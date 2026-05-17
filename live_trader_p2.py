@@ -176,7 +176,54 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
     volumes   = deque([float(k[5]) / 12 for k in klines], maxlen=1000)
     closes_1m = deque(init_c.tolist(), maxlen=500)
 
+    # ── Startup: cancel any open orders left in the book ─────────────────────
+    print("Checking open orders…")
+    try:
+        open_orders = client.get_open_orders(symbol=symbol)
+        for o in open_orders:
+            client.cancel_order(symbol=symbol, orderId=o['orderId'])
+            print(f"  Cancelled open order #{o['orderId']} "
+                  f"@ ${float(o.get('price',0)):,.2f}")
+        if open_orders:
+            print(f"  Cleared {len(open_orders)} order(s)")
+        else:
+            print("  No open orders")
+    except BinanceAPIException as e:
+        print(f"  Order check error: {e.message}")
+
     btc_bal, usdt_bal = get_balances(client, base_asset)
+
+    # ── Startup: detect existing BTC position and estimate cost basis ─────────
+    existing_pos = None
+    if btc_bal >= flt['min_qty']:
+        print(f"  Existing BTC detected: {btc_bal:.8f} — finding cost basis…")
+        try:
+            my_trades = client.get_my_trades(symbol=symbol, limit=200)
+            # Walk trades newest-first, accumulate buys until we account for btc_bal
+            remaining = btc_bal
+            cost = 0.0
+            for t in reversed(my_trades):
+                if remaining <= 0:
+                    break
+                if t['isBuyer']:
+                    tq = min(float(t['qty']), remaining)
+                    cost += float(t['price']) * tq
+                    remaining -= tq
+                else:
+                    remaining += float(t['qty'])  # a sell means we owned more before
+            avg_cost = cost / (btc_bal - max(remaining, 0) + 1e-12)
+            print(f"  Avg cost basis: ${avg_cost:,.2f}")
+        except BinanceAPIException:
+            avg_cost = float(init_c[-1])
+            print(f"  Could not fetch trades — using last price ${avg_cost:,.2f}")
+        stp = avg_cost * 0.997
+        existing_pos = {
+            'entry_price': avg_cost, 'qty':        btc_bal,
+            'stop_price':  stp,      'trail_stop':  stp,
+            'peak_price':  avg_cost, 'stop_dist':   avg_cost * 0.001,
+            'entry_time':  time.time(),
+        }
+
     st = {
         'symbol':        symbol,
         'bar_count':     len(init_c),
@@ -189,7 +236,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
         'ind':           {},
         'signal':        '—',
         'warmup':        True,
-        'position':      None,
+        'position':      existing_pos,
         'pending_order': None,
         'pend_time':     None,
         'trades':        [],
@@ -481,6 +528,46 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             time.sleep(5)
         except KeyboardInterrupt:
             break
+
+    # ── Shutdown: cancel all open orders ─────────────────────────────────────
+    print(f"\n{_c('Shutting down…', Y)}")
+    try:
+        open_orders = client.get_open_orders(symbol=symbol)
+        for o in open_orders:
+            client.cancel_order(symbol=symbol, orderId=o['orderId'])
+            _log(f"SHUTDOWN: cancelled order #{o['orderId']} "
+                 f"@ ${float(o.get('price',0)):,.2f}")
+            print(f"  Cancelled order #{o['orderId']}")
+    except BinanceAPIException as e:
+        print(f"  Cancel error: {e.message}")
+
+    # ── Shutdown: liquidate any BTC held ─────────────────────────────────────
+    btc_bal, usdt_bal = get_balances(client, base_asset)
+    if btc_bal >= flt['min_qty']:
+        print(f"  Selling {btc_bal:.8f} BTC…")
+        try:
+            mo    = client.order_market_sell(
+                symbol=symbol, quantity=fmt_qty(btc_bal, step_size))
+            fills = mo.get('fills', [])
+            if fills:
+                tq     = sum(float(f['qty']) for f in fills)
+                exit_px = sum(float(f['price'])*float(f['qty']) for f in fills) / tq
+                fee     = exit_px * tq * TAKER_FEE
+                pos     = st.get('position')
+                pnl     = (exit_px - pos['entry_price']) * tq if pos else 0.0
+                col     = G if pnl >= 0 else R
+                print(_c(f"  Sold {tq:.8f} BTC @ ${exit_px:,.2f}  "
+                          f"PnL {'+' if pnl>=0 else ''}{pnl:.5f}", col))
+                _log(f"SHUTDOWN: sold {tq:.8f} BTC @ ${exit_px:,.2f}  "
+                     f"PnL {'+' if pnl>=0 else ''}{pnl:.5f}")
+                if pos:
+                    st['trades'].append({
+                        'entry_price': pos['entry_price'], 'exit_price': exit_px,
+                        'qty': tq, 'pnl': pnl, 'fee': fee,
+                        'reason': 'SHUTDOWN', 'exit_time': datetime.now().strftime('%H:%M:%S'),
+                    })
+        except BinanceAPIException as e:
+            print(f"  Sell error: {e.message}")
 
     # ── Final summary ─────────────────────────────────────────────────────────
     trades = st.get('trades', [])
