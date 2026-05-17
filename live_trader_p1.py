@@ -18,12 +18,12 @@ from binance.exceptions import BinanceAPIException
 # ── Configuration — matched to backtest (Sharpe 2.15, 57.5% WR) ──────────────
 SYMBOL        = "BTCUSDT"
 BAR_S         = 5          # 5-second bars
-LIVE_WARMUP   = 15         # live 5s bars before trading (~75 seconds)
+LIVE_WARMUP   = 60         # 60 live 5s bars before trading (matches BB_WINDOW)
 EQUITY_PCT    = 0.95       # deploy 95% of free USDT per trade
 
-BB_WINDOW     = 15         # 15 × 5s = 75-second Bollinger window
-BB_NSTD       = 1.5        # 1.5σ bands → 3:1 R:R with 0.5σ stop
-RSI_PERIOD    = 14
+BB_WINDOW     = 60         # 60 × 5s = 5-min Bollinger window (needs range for variance)
+BB_NSTD       = 1.5        # 1.5σ bands
+RSI_PERIOD    = 14         # 14 × 5s = 70-second RSI
 MOM_FAST      = 3
 MOM_SLOW      = 12
 SMA_WINDOW    = 60         # 60 × 5s = 5-min SMA for macro uptrend gate

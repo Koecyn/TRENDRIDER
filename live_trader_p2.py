@@ -240,17 +240,18 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                     st['btc_bal']  = btc_bal
                     st['usdt_bal'] = usdt_bal
 
-            # ── Indicators from historical closes only — no self-reference ─
-            # Bands/RSI/regime computed from closes_1m (no current price).
-            # Live price is then measured against those fixed reference bands.
-            c_arr = np.array(closes_1m)
-            if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
-                bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
-                regime = classify_regime(closes_1m)
-                rsi_v  = float(calc_rsi(c_arr, RSI_PERIOD)[-1])
-                mom_v  = float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1])
-                mac_v  = _macro_up_1m(c_arr)
-                # Live bb_pct: current price vs reference bands — updates every 250ms
+            # ── Indicators every 250ms — 5s closes for BB/RSI/mom ────────
+            # closes (5s bars) updates every 5s → bands/RSI refresh every 5s.
+            # regime/macro stay on closes_1m (need broader 1-min context).
+            # Live bb_pct = current price vs latest reference bands → 250ms.
+            c5  = np.array(closes)
+            c1m = np.array(closes_1m)
+            if len(c5) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
+                bm, bl, bh, bp, bs = calc_bb(c5, BB_WINDOW, BB_NSTD)
+                rsi_v    = float(calc_rsi(c5, RSI_PERIOD)[-1])
+                mom_v    = float(calc_mom_slope(c5, MOM_FAST, MOM_SLOW)[-1])
+                regime   = classify_regime(closes_1m) if len(c1m) >= 20 else 'UNKNOWN'
+                mac_v    = _macro_up_1m(c1m)
                 live_pct = (price - float(bl[-1])) / (float(bh[-1]) - float(bl[-1]) + 1e-12)
                 st['ind'] = {
                     'rsi':      rsi_v,
