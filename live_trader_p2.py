@@ -168,9 +168,13 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                                interval=Client.KLINE_INTERVAL_1MINUTE,
                                limit=200)
     init_c    = np.array([float(k[4]) for k in klines])
+    init_h    = np.array([float(k[2]) for k in klines])
+    init_l    = np.array([float(k[3]) for k in klines])
     closes    = deque(init_c.tolist(), maxlen=1000)
+    highs     = deque(init_h.tolist(), maxlen=1000)
+    lows      = deque(init_l.tolist(), maxlen=1000)
     volumes   = deque([float(k[5]) / 12 for k in klines], maxlen=1000)
-    closes_1m = deque(init_c.tolist(), maxlen=500)   # 1-min closes for macro_up
+    closes_1m = deque(init_c.tolist(), maxlen=500)
 
     btc_bal, usdt_bal = get_balances(client, base_asset)
     st = {
@@ -224,6 +228,8 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             # ── Close 5-second bar every TICKS_PER_BAR ticks ─────────────
             if tick_count >= TICKS_PER_BAR:
                 closes.append(bar_c)
+                highs.append(bar_h)
+                lows.append(bar_l)
                 volumes.append(max(bar_vol, 1.0))
                 st['bar_count'] += 1
                 st['live_bars']  = min(st['live_bars'] + 1, LIVE_WARMUP + 1)
@@ -421,16 +427,22 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         _log(f"  ✗ EXIT ERR {e.status_code}: {e.message}")
                         st['signal'] = f'EXIT ERR {e.status_code}'
 
-            # C: LIMIT_MAKER at zone top — standing maker bid covering whole entry range
+            # C: LIMIT_MAKER priced via ATR downward component
+            # limit = price - (ATR × down_ratio) + small buffer
+            # stays within entry zone; maker-only, 0% fee
             elif (not pend_id and st.get('signal') == 'LONG ★'
                     and not st.get('warmup', True) and ind):
                 qty = floor_qty(st['usdt_bal'] * EQUITY_PCT / price, step_size)
-                # Zone top = highest price we'll accept as maker in this regime
-                bb_low    = ind.get('bb_low', price)
-                bb_up     = ind.get('bb_up',  price)
-                ep_ratio  = REGIME_ENTRY.get(ind.get('regime', 'UNKNOWN'), 0.5) or 0.5
-                zone_top  = bb_low + ep_ratio * (bb_up - bb_low)
-                limit_px  = round_px(min(zone_top, price), tick_size)
+                bb_low   = ind.get('bb_low', price)
+                bb_up    = ind.get('bb_up',  price)
+                ep_ratio = REGIME_ENTRY.get(ind.get('regime', 'UNKNOWN'), 0.5) or 0.5
+                zone_top = bb_low + ep_ratio * (bb_up - bb_low)
+                # ATR-based depth: how far down price is likely to travel
+                atr, down_ratio = calc_atr(highs, lows, closes)
+                expected_down   = atr * down_ratio          # e.g. $10 × 0.7 = $7
+                buffer          = atr * 0.10                # 10% ATR buffer above target
+                limit_px = round_px(
+                    min(zone_top, price - expected_down + buffer), tick_size)
                 if qty >= min_qty and qty * limit_px >= min_notional:
                     try:
                         order  = client.create_order(
@@ -441,9 +453,10 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         st['pend_time']     = time.time()
                         st['pending_order'] = {'price': limit_px, 'qty': qty}
                         st['signal']        = f"ORDER @ ${limit_px:,.2f}"
-                        _log(f"▶ ORDER placed  maker  #{pend_id}  "
-                             f"@ ${limit_px:,.2f}  zone_top ${zone_top:,.2f}  "
-                             f"qty {qty}  window {ORDER_TIMEOUT}s")
+                        _log(f"▶ ORDER  maker  #{pend_id}  @ ${limit_px:,.2f}  "
+                             f"ATR ${atr:.2f}  down_ratio {down_ratio:.2f}  "
+                             f"expected_down ${expected_down:.2f}  "
+                             f"zone_top ${zone_top:,.2f}  qty {qty}")
                     except BinanceAPIException as e:
                         _log(f"✗ ORDER ERR {e.status_code}: {e.message}")
                         st['signal'] = f'ERR {e.status_code}'

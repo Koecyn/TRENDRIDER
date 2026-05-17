@@ -71,6 +71,19 @@ def calc_bb(close, window=15, n_std=1.5):
     pct_b = (close - lo) / (hi - lo + 1e-12)
     return mid, lo, hi, pct_b, std
 
+def calc_atr(highs, lows, closes, period=14):
+    """ATR + downward ratio: how much of each bar's range is bearish movement."""
+    h = np.array(highs); l = np.array(lows); c = np.array(closes)
+    prev_c = np.roll(c, 1); prev_c[0] = c[0]
+    tr  = np.maximum(h - l, np.maximum(np.abs(h - prev_c), np.abs(l - prev_c)))
+    atr = float(_ema(tr, period)[-1])
+    # Down component: how much of each bar moved below the previous close
+    down = np.maximum(prev_c - l, 0)
+    up   = np.maximum(h - prev_c, 0)
+    total = down + up + 1e-12
+    down_ratio = float(_ema(down / total, period)[-1])   # 0=all up, 1=all down
+    return atr, down_ratio
+
 def calc_mom_slope(close, fast=3, slow=12, smooth=2):
     mom = (_ema(close, fast) - _ema(close, slow)) / (close + 1e-12)
     return _ema(np.gradient(mom), smooth)
