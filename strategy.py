@@ -69,9 +69,17 @@ def precompute(df: pd.DataFrame, params: dict) -> pd.DataFrame:
 
     sma60_a = df["sma60"].values
     mom5m_a = df["mom5m"].values
+
+    # Uptrend: above SMA AND 5m momentum not bearish
     df["macro_up"] = np.where(
         ~np.isnan(sma60_a) & ~np.isnan(mom5m_a),
         ((c > sma60_a) & (mom5m_a > -0.0001)).astype(int),
+        0,
+    )
+    # Downtrend: below SMA AND 5m momentum actively negative (symmetric gate for shorts)
+    df["macro_down"] = np.where(
+        ~np.isnan(sma60_a) & ~np.isnan(mom5m_a),
+        ((c < sma60_a) & (mom5m_a < -0.0001)).astype(int),
         0,
     )
 
@@ -81,7 +89,7 @@ def precompute(df: pd.DataFrame, params: dict) -> pd.DataFrame:
 BT_COLS = [
     "Open", "High", "Low", "Close", "Volume",
     "rsi", "bb_mid", "bb_lower", "bb_upper", "bb_pct", "bb_std",
-    "mom_slope", "vol_ex", "macro_up",
+    "mom_slope", "vol_ex", "macro_up", "macro_down",
 ]
 
 
@@ -120,9 +128,11 @@ class MeanReversionMTF(Strategy):
     @property
     def _bb_std(self):  return self.data.bb_std[-1]
     @property
-    def _macro(self):   return self.data.macro_up[-1]
+    def _macro(self):      return self.data.macro_up[-1]
     @property
-    def _close(self):   return self.data.Close[-1]
+    def _macro_dn(self):   return self.data.macro_down[-1]
+    @property
+    def _close(self):      return self.data.Close[-1]
 
     # ── Long entry: trough with confirmed momentum turn ────────────────────
     def _should_enter_long(self) -> bool:
@@ -136,7 +146,7 @@ class MeanReversionMTF(Strategy):
             self.data.vol_ex[-1] < 4.0              # not a crash
         )
 
-    # ── Short entry: peak with confirmed momentum turn ─────────────────────
+    # ── Short entry: peak with confirmed momentum turn (confirmed downtrend) ─
     def _should_enter_short(self) -> bool:
         if np.isnan(self._bb_pct) or np.isnan(self._rsi) or np.isnan(self._mom):
             return False
@@ -145,7 +155,7 @@ class MeanReversionMTF(Strategy):
             self._bb_pct > (1.0 - self.bb_entry_pct) and  # at upper band
             self._rsi    > rsi_ob                    and  # overbought
             self._mom    < 0.0                       and  # momentum turning down
-            self._macro == 0                         and  # not in uptrend
+            self._macro_dn == 1                      and  # confirmed downtrend
             self.data.vol_ex[-1] < 4.0                   # not a spike
         )
 

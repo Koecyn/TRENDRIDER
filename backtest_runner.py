@@ -21,7 +21,7 @@ from backtesting import Backtest
 
 INDICATOR_PARAMS = dict(
     rsi_period  = 14,   # RSI (14 × 5s = 70s)
-    bb_window   = 30,   # Bollinger (30 × 5s = 2.5 min)
+    bb_window   = 20,   # Bollinger (20 × 5s = 100s) — shorter for more touches
     bb_nstd     = 1.5,  # 1.5σ bands — 3:1 R:R with 0.5σ stop
     mom_fast    = 5,    # EMA fast (25s)
     mom_slow    = 20,   # EMA slow (100s)
@@ -32,9 +32,9 @@ INDICATOR_PARAMS = dict(
 DEFAULT_STRATEGY_PARAMS = dict(
     rsi_entry      = 42.0,   # long: oversold / short: >58
     rsi_exit       = 58.0,   # long: overbought / short: <42
-    bb_entry_pct   = 0.20,   # band proximity zone (widened for more signals)
+    bb_entry_pct   = 0.25,   # band proximity zone
     bb_stop_mult   = 0.5,    # stop 0.5σ beyond band → 3:1 R:R
-    max_hold_bars  = 10,     # 50s max hold → fast recycling
+    max_hold_bars  = 8,      # 40s max hold → fast recycling
     taker_win_min  = 0.005,
 )
 
@@ -43,7 +43,7 @@ PARAM_GRID = {
     "rsi_exit":      [52, 56, 60, 65],
     "bb_entry_pct":  [0.15, 0.20, 0.25, 0.30],
     "bb_stop_mult":  [0.3, 0.5, 0.7, 1.0],
-    "max_hold_bars": [8, 12, 18, 24],
+    "max_hold_bars": [6, 8, 12, 16],
 }
 
 
@@ -198,14 +198,15 @@ def main():
     print(f"    Valid bars: {len(df):,}")
     df_bt = df[BT_COLS].copy()
 
-    # Signal scan (long + short)
-    bb_pct = df["bb_pct"].values
-    rsi_v  = df["rsi"].values
-    macro  = df["macro_up"].values
-    ep     = DEFAULT_STRATEGY_PARAMS["bb_entry_pct"]
-    re     = DEFAULT_STRATEGY_PARAMS["rsi_entry"]
-    sigs_long  = (bb_pct < ep) & (rsi_v < re) & (macro == 1)
-    sigs_short = (bb_pct > (1 - ep)) & (rsi_v > (100 - re)) & (macro == 0)
+    # Signal scan (long + short, pre-momentum-gate counts)
+    bb_pct    = df["bb_pct"].values
+    rsi_v     = df["rsi"].values
+    macro_up  = df["macro_up"].values
+    macro_dn  = df["macro_down"].values
+    ep        = DEFAULT_STRATEGY_PARAMS["bb_entry_pct"]
+    re        = DEFAULT_STRATEGY_PARAMS["rsi_entry"]
+    sigs_long  = (bb_pct < ep) & (rsi_v < re) & (macro_up == 1)
+    sigs_short = (bb_pct > (1 - ep)) & (rsi_v > (100 - re)) & (macro_dn == 1)
     sigs_total = sigs_long.sum() + sigs_short.sum()
     print(f"    Long signals:  {sigs_long.sum():,} ({sigs_long.sum()/days:.0f}/day)")
     print(f"    Short signals: {sigs_short.sum():,} ({sigs_short.sum()/days:.0f}/day)")
