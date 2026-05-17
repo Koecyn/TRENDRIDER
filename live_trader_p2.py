@@ -151,10 +151,11 @@ def sell_best(client, symbol, qty, step_size, tick_size, window_s=30):
     qty_sold = qty
     try:
         _, ask  = best_bid_ask(client, symbol)
+        limit   = ask + tick_size          # one tick above ask — better price, still maker
         o       = client.create_order(
             symbol=symbol, side='SELL', type='LIMIT_MAKER',
             quantity=fmt_qty(qty, step_size),
-            price=fmt_px(ask, tick_size))
+            price=fmt_px(limit, tick_size))
         oid      = o['orderId']
         deadline = time.time() + window_s
         while time.time() < deadline:
