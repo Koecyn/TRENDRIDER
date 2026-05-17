@@ -143,6 +143,47 @@ def render(st):
     print("  Ctrl+C to stop")
 
 
+# ── Best-effort sell: LIMIT_MAKER at ask, market fallback after window_s ─────
+def sell_best(client, symbol, qty, step_size, tick_size, window_s=30):
+    """Try maker sell at ask; fall back to market after window_s seconds.
+    Returns (exit_price, qty_sold, method) where method is 'MAKER' or 'MKT'."""
+    exit_px = None
+    qty_sold = qty
+    try:
+        _, ask  = best_bid_ask(client, symbol)
+        o       = client.create_order(
+            symbol=symbol, side='SELL', type='LIMIT_MAKER',
+            quantity=fmt_qty(qty, step_size),
+            price=fmt_px(ask, tick_size))
+        oid      = o['orderId']
+        deadline = time.time() + window_s
+        while time.time() < deadline:
+            time.sleep(TICK_S)
+            status = client.get_order(symbol=symbol, orderId=oid)
+            if status['status'] == 'FILLED':
+                fills    = status.get('fills', [])
+                if fills:
+                    tq      = sum(float(f['qty']) for f in fills)
+                    exit_px = sum(float(f['price'])*float(f['qty']) for f in fills)/tq
+                    qty_sold = tq
+                else:
+                    exit_px = float(status['price'])
+                return exit_px, qty_sold, 'MAKER'
+        # Window expired — cancel and fall through to market
+        try: client.cancel_order(symbol=symbol, orderId=oid)
+        except BinanceAPIException: pass
+    except BinanceAPIException:
+        pass
+    # Market fallback
+    mo    = client.order_market_sell(symbol=symbol, quantity=fmt_qty(qty, step_size))
+    fills = mo.get('fills', [])
+    if fills:
+        tq      = sum(float(f['qty']) for f in fills)
+        exit_px = sum(float(f['price'])*float(f['qty']) for f in fills)/tq
+        qty_sold = tq
+    return exit_px, qty_sold, 'MKT'
+
+
 # ── Main loop — 250 ms ticks, 5-second bars ───────────────────────────────────
 def run_pure_maker_loop(symbol="BTCUSDT"):
     load_dotenv()
@@ -415,53 +456,21 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                          f"entry ${pos['entry_price']:,.2f}  "
                          f"trail ${pos.get('trail_stop', pos['stop_price']):,.2f}  "
                          f"price ${price:,.2f}")
-                    qty     = pos['qty']
-                    exit_px = price
-                    fee     = 0.0
+                    qty = pos['qty']
                     try:
-                        if reason in ('TRAIL', 'MOM↓'):
-                            # Try maker limit sell at ask first (0% fee)
-                            _, ask = best_bid_ask(client, symbol)
-                            sell_o = client.create_order(
-                                symbol=symbol, side='SELL', type='LIMIT_MAKER',
-                                quantity=fmt_qty(qty, step_size),
-                                price=fmt_px(ask, tick_size))
-                            for _ in range(ORDER_TIMEOUT * 4):
-                                time.sleep(TICK_S)
-                                o = client.get_order(symbol=symbol,
-                                                     orderId=sell_o['orderId'])
-                                if o['status'] == 'FILLED':
-                                    exit_px = float(o['price'])
-                                    break
-                            else:
-                                try:
-                                    client.cancel_order(symbol=symbol,
-                                                        orderId=sell_o['orderId'])
-                                except BinanceAPIException:
-                                    pass
-                                reason = reason + '→MKT'
-
-                        if reason in ('STOP', 'TIME', 'TRAIL→MKT', 'MOM↓→MKT'):
-                            mo    = client.order_market_sell(
-                                symbol=symbol,
-                                quantity=fmt_qty(qty, step_size))
-                            fills = mo.get('fills', [])
-                            if fills:
-                                tq      = sum(float(f['qty']) for f in fills)
-                                exit_px = (sum(float(f['price']) * float(f['qty'])
-                                              for f in fills) / tq)
-                                fee     = exit_px * qty * TAKER_FEE
-
-                        pnl = (exit_px - pos['entry_price']) * qty
-                        _log(f"  ↳ sold  ${exit_px:,.2f}  "
+                        exit_px, qty_sold, method = sell_best(
+                            client, symbol, qty, step_size, tick_size, window_s=30)
+                        fee = exit_px * qty_sold * (MAKER_FEE if method == 'MAKER' else TAKER_FEE)
+                        pnl = (exit_px - pos['entry_price']) * qty_sold
+                        _log(f"  ↳ sold  ${exit_px:,.2f} via {method}  "
                              f"PnL {'+' if pnl>=0 else ''}{pnl:.5f}  fee {fee:.5f}")
                         st['trades'].append({
                             'entry_price': pos['entry_price'],
                             'exit_price':  exit_px,
-                            'qty':         qty,
+                            'qty':         qty_sold,
                             'pnl':         pnl,
                             'fee':         fee,
-                            'reason':      reason,
+                            'reason':      f'{reason}({method})',
                             'exit_time':   datetime.now().strftime('%H:%M:%S'),
                         })
                         st['position'] = None
@@ -541,30 +550,28 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
     except BinanceAPIException as e:
         print(f"  Cancel error: {e.message}")
 
-    # ── Shutdown: liquidate any BTC held ─────────────────────────────────────
+    # ── Shutdown: liquidate BTC — maker first, market after 30s ─────────────
     btc_bal, usdt_bal = get_balances(client, base_asset)
     if btc_bal >= flt['min_qty']:
-        print(f"  Selling {btc_bal:.8f} BTC…")
+        print(f"  Selling {btc_bal:.8f} BTC (30s maker window then market)…")
         try:
-            mo    = client.order_market_sell(
-                symbol=symbol, quantity=fmt_qty(btc_bal, step_size))
-            fills = mo.get('fills', [])
-            if fills:
-                tq     = sum(float(f['qty']) for f in fills)
-                exit_px = sum(float(f['price'])*float(f['qty']) for f in fills) / tq
-                fee     = exit_px * tq * TAKER_FEE
-                pos     = st.get('position')
-                pnl     = (exit_px - pos['entry_price']) * tq if pos else 0.0
-                col     = G if pnl >= 0 else R
-                print(_c(f"  Sold {tq:.8f} BTC @ ${exit_px:,.2f}  "
-                          f"PnL {'+' if pnl>=0 else ''}{pnl:.5f}", col))
-                _log(f"SHUTDOWN: sold {tq:.8f} BTC @ ${exit_px:,.2f}  "
-                     f"PnL {'+' if pnl>=0 else ''}{pnl:.5f}")
+            exit_px, qty_sold, method = sell_best(
+                client, symbol, btc_bal, step_size, tick_size, window_s=30)
+            if exit_px:
+                fee = exit_px * qty_sold * (MAKER_FEE if method == 'MAKER' else TAKER_FEE)
+                pos = st.get('position')
+                pnl = (exit_px - pos['entry_price']) * qty_sold if pos else 0.0
+                col = G if pnl >= 0 else R
+                print(_c(f"  Sold {qty_sold:.8f} BTC @ ${exit_px:,.2f} "
+                         f"via {method}  PnL {'+' if pnl>=0 else ''}{pnl:.5f}", col))
+                _log(f"SHUTDOWN: sold {qty_sold:.8f} BTC @ ${exit_px:,.2f} "
+                     f"via {method}  PnL {'+' if pnl>=0 else ''}{pnl:.5f}")
                 if pos:
                     st['trades'].append({
                         'entry_price': pos['entry_price'], 'exit_price': exit_px,
-                        'qty': tq, 'pnl': pnl, 'fee': fee,
-                        'reason': 'SHUTDOWN', 'exit_time': datetime.now().strftime('%H:%M:%S'),
+                        'qty': qty_sold, 'pnl': pnl, 'fee': fee,
+                        'reason': f'SHUTDOWN({method})',
+                        'exit_time': datetime.now().strftime('%H:%M:%S'),
                     })
         except BinanceAPIException as e:
             print(f"  Sell error: {e.message}")
