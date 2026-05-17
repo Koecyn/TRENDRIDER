@@ -184,22 +184,28 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                     st['ind']    = ind
                     st['warmup'] = st['live_bars'] < LIVE_WARMUP
 
-                    bad = any(np.isnan(ind[k])
-                              for k in ('rsi', 'bb_pct', 'mom'))
-                    if (not st['warmup'] and not st['position']
-                            and not pend_id and not bad):
-                        if (ind['bb_pct']  < BB_ENTRY_PCT
-                                and ind['rsi'] < RSI_ENTRY
-                                and ind['mom'] > 0.0
-                                and ind['macro_up'] == 1):
-                            st['signal'] = 'LONG ★'
-                        else:
-                            st['signal'] = '—'
-
                 if st['bar_count'] % 10 == 0:
                     btc_bal, usdt_bal = get_balances(client, base_asset)
                     st['btc_bal']  = btc_bal
                     st['usdt_bal'] = usdt_bal
+
+            # ── Per-tick signal eval using live price ─────────────────────
+            ind = st.get('ind', {})
+            if (ind and not st.get('warmup', True)
+                    and not st.get('position') and not pend_id):
+                bb_low   = ind.get('bb_low', 0.0)
+                bb_up    = ind.get('bb_up',  0.0)
+                curr_pct = (price - bb_low) / (bb_up - bb_low + 1e-12)
+                bad      = any(np.isnan(ind.get(k, float('nan')))
+                               for k in ('rsi', 'mom'))
+                if (not bad
+                        and curr_pct   < BB_ENTRY_PCT
+                        and ind['rsi'] < RSI_ENTRY
+                        and ind['mom'] > 0.0
+                        and ind['macro_up'] == 1):
+                    st['signal'] = 'LONG ★'
+                else:
+                    st['signal'] = '—'
 
             # ── State machine ─────────────────────────────────────────────
             ind = st.get('ind', {})
