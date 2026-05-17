@@ -51,7 +51,11 @@ PARAM_GRID = {
 # Backtest runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_backtest(df, strategy_params, cash=10.0, commission=0.0001):
+def run_backtest(df, strategy_params, cash=10.0, commission=0.00001):
+    # Maker fee = 0%, taker fee = 0.002% (0.00002).
+    # Entries are maker (0 fee), exits mix taker/maker.
+    # Conservative estimate: all exits taker → round-trip 0.002% → per side 0.001%
+    # backtesting.py charges commission on each fill, so use 0.00001 (≈ 0.001% / side).
     bt = Backtest(df, MeanReversionMTF, cash=cash,
                   commission=commission, exclusive_orders=True,
                   trade_on_close=False)
