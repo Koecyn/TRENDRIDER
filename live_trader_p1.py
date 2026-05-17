@@ -18,7 +18,7 @@ from binance.exceptions import BinanceAPIException
 # ── Configuration — matched to backtest (Sharpe 2.15, 57.5% WR) ──────────────
 SYMBOL        = "BTCUSDT"
 BAR_S         = 5          # 5-second bars
-LIVE_WARMUP   = 60         # 60 live 5s bars before trading (matches BB_WINDOW)
+LIVE_WARMUP   = 5          # 5 live 5s bars (~25s) — history pre-loaded, just sync price
 EQUITY_PCT    = 0.95       # deploy 95% of free USDT per trade
 
 BB_WINDOW     = 60         # 60 × 5s = 5-min Bollinger window (needs range for variance)

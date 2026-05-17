@@ -285,6 +285,9 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
         'session_start': datetime.now().strftime('%H:%M:%S'),
     }
 
+    print(f"\n  Ready — starting in 4 seconds…")
+    time.sleep(4)
+
     pend_id    = None
     tick_count = 0
     bar_h = bar_l = bar_c = float(init_c[-1])
