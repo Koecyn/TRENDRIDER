@@ -240,25 +240,24 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                     st['btc_bal']  = btc_bal
                     st['usdt_bal'] = usdt_bal
 
-            # ── Indicators every 250ms — 5s closes for BB/RSI/mom ────────
-            # closes (5s bars) updates every 5s → bands/RSI refresh every 5s.
-            # regime/macro stay on closes_1m (need broader 1-min context).
-            # Live bb_pct = current price vs latest reference bands → 250ms.
-            c5  = np.array(closes)
+            # ── All indicators recomputed every 250ms from live data ─────
+            # Append current live price to closed bars so every tick is fresh.
+            # regime/macro use closes_1m for the broader 1-min structure.
+            c5  = np.append(np.array(closes), price)
             c1m = np.array(closes_1m)
             if len(c5) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
                 bm, bl, bh, bp, bs = calc_bb(c5, BB_WINDOW, BB_NSTD)
-                rsi_v    = float(calc_rsi(c5, RSI_PERIOD)[-1])
-                mom_v    = float(calc_mom_slope(c5, MOM_FAST, MOM_SLOW)[-1])
-                regime   = classify_regime(closes_1m) if len(c1m) >= 20 else 'UNKNOWN'
-                mac_v    = _macro_up_1m(c1m)
-                live_pct = (price - float(bl[-1])) / (float(bh[-1]) - float(bl[-1]) + 1e-12)
+                rsi_v  = float(calc_rsi(c5, RSI_PERIOD)[-1])
+                mom_v  = float(calc_mom_slope(c5, MOM_FAST, MOM_SLOW)[-1])
+                bb_pct = float(bp[-1])
+                regime = classify_regime(closes_1m) if len(c1m) >= 20 else 'UNKNOWN'
+                mac_v  = _macro_up_1m(c1m)
                 st['ind'] = {
                     'rsi':      rsi_v,
                     'bb_mid':   float(bm[-1]),
                     'bb_low':   float(bl[-1]),
                     'bb_up':    float(bh[-1]),
-                    'bb_pct':   live_pct,
+                    'bb_pct':   bb_pct,
                     'bb_std':   float(bs[-1]),
                     'mom':      mom_v,
                     'macro_up': mac_v,
@@ -266,7 +265,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 }
                 st['warmup'] = st['live_bars'] < LIVE_WARMUP
                 if tick_count == 1:
-                    _log(f"BAR  ${price:,.2f}  {regime:<10}  BB {live_pct*100:5.1f}%  "
+                    _log(f"BAR  ${price:,.2f}  {regime:<10}  BB {bb_pct*100:5.1f}%  "
                          f"RSI {rsi_v:5.1f}  mom {mom_v:+.2e}  "
                          f"macro {'✓' if mac_v else '✗'}  "
                          f"width ${float(bh[-1]-bl[-1]):,.2f}")
