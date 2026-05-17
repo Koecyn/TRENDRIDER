@@ -1,14 +1,25 @@
 """
-HFT Mean-Reversion Multi-Timeframe Strategy
-============================================
-Framework  : backtesting.py (bar-by-bar, zero lookahead)
-Primary TF : 1-minute bars
-Higher TFs : 5m and 10m resampled (in-bar, boundary-locked)
+HFT Mean-Reversion — BB + RSI + Momentum confirmation, 5-second bars
+======================================================================
+Long entry (trough detected):
+  1. bb_pct < bb_entry_pct       → price at/below lower Bollinger band (1.5σ)
+  2. RSI < rsi_entry              → oversold
+  3. mom_slope > 0                → momentum ALREADY TURNING UP
+  4. macro_up = 1                 → buying dips in uptrend only
 
-Entry  : trough during macro uptrend
-         • normalized momentum flattening (negative → neutral)
-         • volume exhaustion or capitulation spike
-Exit   : momentum death / peak confirmed / trailing stop
+Short entry (peak detected):
+  1. bb_pct > (1 - bb_entry_pct) → price at/above upper Bollinger band
+  2. RSI > (100 - rsi_entry)      → overbought
+  3. mom_slope < 0                → momentum ALREADY TURNING DOWN
+  4. macro_up = 0                 → shorting peaks in non-uptrend only
+
+Long exit:  price >= bb_mid OR RSI > rsi_exit
+Short exit: price <= bb_mid OR RSI < (100 - rsi_exit)
+Stop (long):  bb_lower - bb_stop_mult * bb_std
+Stop (short): bb_upper + bb_stop_mult * bb_std
+Max hold: max_hold_bars (anti-stall, default 10 × 5s = 50s)
+
+R:R with bb_nstd=1.5: target=mid (1.5σ), stop=0.5σ beyond band → 3:1
 """
 
 import sys, os
@@ -19,14 +30,15 @@ import pandas as pd
 from backtesting import Backtest, Strategy
 
 from indicators import (
-    momentum_pct, momentum_slope_pct, roc,
+    rsi as rsi_fn, bollinger,
+    momentum_pct, momentum_slope_pct,
     volume_exhaustion, vwap_rolling,
-    resample_ohlcv, trailing_low, _ema,
+    resample_ohlcv, _rolling_mean,
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pre-compute all indicators onto the DataFrame BEFORE the backtest loop
+# Pre-compute
 # ─────────────────────────────────────────────────────────────────────────────
 
 def precompute(df: pd.DataFrame, params: dict) -> pd.DataFrame:
@@ -36,37 +48,41 @@ def precompute(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     v  = df["Volume"].values
     p  = params
 
-    # 1m normalized momentum
-    df["mom_pct"]      = momentum_pct(c, fast=p["mom_fast"], slow=p["mom_slow"])
-    df["mom_slope"]    = momentum_slope_pct(c, fast=p["mom_fast"], slow=p["mom_slow"], smooth=3)
-    df["roc5"]         = roc(c, 5)
-    df["vol_exhaust"]  = volume_exhaustion(v, window=p["vol_window"])
-    df["vwap"]         = vwap_rolling(h, lo, c, v, window=p["vwap_window"])
+    df["rsi"]       = rsi_fn(c, period=p["rsi_period"])
 
-    # 5m resampled
-    c5, h5, l5, v5 = resample_ohlcv(c, h, lo, v, tf_bars=5)
-    df["low_5m"]       = l5
-    df["close_5m"]     = c5
-    df["mom_pct_5m"]   = momentum_pct(c5, fast=3, slow=10)
+    bb_mid, bb_low, bb_up, bb_pct, bb_std = bollinger(
+        c, window=p["bb_window"], n_std=p["bb_nstd"])
+    df["bb_mid"]    = bb_mid
+    df["bb_lower"]  = bb_low
+    df["bb_upper"]  = bb_up
+    df["bb_pct"]    = bb_pct
+    df["bb_std"]    = bb_std
+    df["bb_stop"]   = bb_low - 0.5 * bb_std   # reference only; strategy recomputes
 
-    # 10m resampled
-    c10, h10, l10, v10 = resample_ohlcv(c, h, lo, v, tf_bars=10)
-    df["low_10m"]      = l10
+    df["mom_slope"] = momentum_slope_pct(c, fast=p["mom_fast"],
+                                            slow=p["mom_slow"], smooth=2)
+    df["vol_ex"]    = volume_exhaustion(v, window=p["vol_window"])
+    df["sma60"]     = _rolling_mean(c, 60)
 
-    # Trailing 5-bar low of 1m lows (stop reference)
-    df["trail_sl"]     = trailing_low(lo, window=5)
+    c5, h5, l5, v5 = resample_ohlcv(c, h, lo, v, tf_bars=60)
+    df["mom5m"]     = momentum_pct(c5, fast=3, slow=12)
 
-    # Macro uptrend: price above VWAP AND 5m momentum positive
-    vwap_arr  = df["vwap"].values
-    mom5_arr  = df["mom_pct_5m"].values
-    macro_up  = np.where(
-        (~np.isnan(vwap_arr)) & (~np.isnan(mom5_arr)),
-        ((c > vwap_arr) & (mom5_arr > 0)).astype(int),
+    sma60_a = df["sma60"].values
+    mom5m_a = df["mom5m"].values
+    df["macro_up"] = np.where(
+        ~np.isnan(sma60_a) & ~np.isnan(mom5m_a),
+        ((c > sma60_a) & (mom5m_a > -0.0001)).astype(int),
         0,
     )
-    df["macro_up"] = macro_up
 
     return df
+
+
+BT_COLS = [
+    "Open", "High", "Low", "Close", "Volume",
+    "rsi", "bb_mid", "bb_lower", "bb_upper", "bb_pct", "bb_std",
+    "mom_slope", "vol_ex", "macro_up",
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,195 +90,118 @@ def precompute(df: pd.DataFrame, params: dict) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MeanReversionMTF(Strategy):
-    # ── Tunable thresholds (all normalized, dimensionless) ─────────────────
-    # Momentum slope thresholds (units: Δ(ema_diff/price) per bar)
-    mom_flat_thresh  = -0.0002   # slope below this (negative) but recovering
-    mom_peak_thresh  =  0.0001   # peak slope (was above this, now declining)
-    mom_exit_thresh  = -0.00005  # exit when slope drops below this after peak
 
-    # Volume thresholds
-    vol_exhaust_lo   =  0.65     # seller exhaustion (low vol)
-    vol_exhaust_hi   =  1.70     # capitulation spike (high vol)
+    # ── Tunable parameters ─────────────────────────────────────────────────
+    rsi_entry      = 42.0   # long: RSI oversold / short: (100 - rsi_entry)
+    rsi_exit       = 58.0   # long: RSI overbought / short: (100 - rsi_exit)
+    bb_entry_pct   = 0.20   # band proximity zone
+    bb_stop_mult   = 0.5    # stop = band ± bb_stop_mult * bb_std
+    max_hold_bars  = 10     # 50s max hold → fast recycling
+    taker_win_min  = 0.005
 
-    # Risk management
-    sl_buffer        =  0.0005   # SL = trail_sl * (1 - sl_buffer)
-    risk_pct         =  0.01     # 1% equity risk per trade
-    max_hold_bars    =  60       # force-exit anti-stall
-
-    # Taker switch: only use taker if projected win covers friction
-    taker_win_min    =  0.008    # 0.8% min projected gain to pay taker fee
-
-    # ── State ──────────────────────────────────────────────────────────────
     def init(self):
-        self._entry_bar       = -1
-        self._peak_mom_slope  = -np.inf
-        self._active_sl       = np.nan
-        self._entry_price     = np.nan
-        self._sl_confirm_bars = 0
+        self._entry_bar  = -1
+        self._stop_price = np.nan
+        self._direction  = 0   # 1 = long, -1 = short
 
-    # ── Indicator accessors (direct column read, no self.I overhead) ────────
+    # ── Accessors ─────────────────────────────────────────────────────────
     @property
-    def _mom(self): return self.data.mom_slope[-1]
+    def _rsi(self):     return self.data.rsi[-1]
     @property
-    def _mom_prev(self): return self.data.mom_slope[-2] if len(self.data.mom_slope) > 1 else self._mom
+    def _mom(self):     return self.data.mom_slope[-1]
     @property
-    def _mom_pct(self): return self.data.mom_pct[-1]
+    def _bb_pct(self):  return self.data.bb_pct[-1]
     @property
-    def _ve(self): return self.data.vol_exhaust[-1]
+    def _bb_mid(self):  return self.data.bb_mid[-1]
     @property
-    def _roc5(self): return self.data.roc5[-1]
+    def _bb_low(self):  return self.data.bb_lower[-1]
     @property
-    def _vwap(self): return self.data.vwap[-1]
+    def _bb_up(self):   return self.data.bb_upper[-1]
     @property
-    def _trail_sl(self): return self.data.trail_sl[-1]
+    def _bb_std(self):  return self.data.bb_std[-1]
     @property
-    def _low5m(self): return self.data.low_5m[-1]
+    def _macro(self):   return self.data.macro_up[-1]
     @property
-    def _low10m(self): return self.data.low_10m[-1]
-    @property
-    def _macro_up(self): return self.data.macro_up[-1]
-    @property
-    def _close(self): return self.data.Close[-1]
+    def _close(self):   return self.data.Close[-1]
 
-    # ── Entry conditions ────────────────────────────────────────────────────
-    def _trough_conditions(self) -> bool:
-        """
-        Buy trough during macro uptrend:
-          1. Macro context: price above VWAP, 5m momentum positive
-          2. Momentum slope was negative, is now FLATTENING (recovering toward 0)
-          3. Volume shows exhaustion (sellers drying up) OR capitulation spike
-        """
-        if not self._macro_up:
+    # ── Long entry: trough with confirmed momentum turn ────────────────────
+    def _should_enter_long(self) -> bool:
+        if np.isnan(self._bb_pct) or np.isnan(self._rsi) or np.isnan(self._mom):
             return False
-        if np.isnan(self._mom) or np.isnan(self._mom_prev):
-            return False
-
-        # Momentum flattening: slope improving (less negative) but still negative
-        flattening = (self._mom > self._mom_prev) and (self._mom < self.mom_flat_thresh)
-
-        # Volume signal
-        vol_sig = (self._ve < self.vol_exhaust_lo) or (self._ve > self.vol_exhaust_hi)
-
-        return flattening and vol_sig
-
-    # ── Exit conditions ─────────────────────────────────────────────────────
-    def _peak_conditions(self) -> bool:
-        """
-        Sell peak:
-          1. Momentum slope peaked (was above mom_peak_thresh during the trade)
-          2. Now declining below mom_exit_thresh
-          OR ROC went negative
-        """
-        if np.isnan(self._mom) or np.isnan(self._mom_prev):
-            return False
-
-        # Update peak
-        if self._mom > self._peak_mom_slope:
-            self._peak_mom_slope = self._mom
-
-        # Peak death: was strong positive, now weakening
-        peak_death = (
-            self._peak_mom_slope > self.mom_peak_thresh
-            and self._mom < self._mom_prev          # slope declining
-            and self._mom < self.mom_exit_thresh     # below exit threshold
+        return bool(
+            self._bb_pct < self.bb_entry_pct and   # at lower band
+            self._rsi    < self.rsi_entry     and   # oversold
+            self._mom    > 0.0                and   # momentum turning up
+            self._macro == 1                  and   # macro uptrend
+            self.data.vol_ex[-1] < 4.0              # not a crash
         )
-        roc_negative = (not np.isnan(self._roc5)) and (self._roc5 < -0.001)
 
-        return peak_death or roc_negative
-
-    # ── Taker decision ──────────────────────────────────────────────────────
-    def _use_taker(self) -> bool:
-        if np.isnan(self._entry_price) or self._entry_price <= 0:
+    # ── Short entry: peak with confirmed momentum turn ─────────────────────
+    def _should_enter_short(self) -> bool:
+        if np.isnan(self._bb_pct) or np.isnan(self._rsi) or np.isnan(self._mom):
             return False
-        gain = (self._close - self._entry_price) / self._entry_price
-        friction = 0.00002 + 0.30 * max(gain, 0)
-        return gain > friction + self.taker_win_min
+        rsi_ob = 100.0 - self.rsi_entry   # overbought threshold (e.g. 58)
+        return bool(
+            self._bb_pct > (1.0 - self.bb_entry_pct) and  # at upper band
+            self._rsi    > rsi_ob                    and  # overbought
+            self._mom    < 0.0                       and  # momentum turning down
+            self._macro == 0                         and  # not in uptrend
+            self.data.vol_ex[-1] < 4.0                   # not a spike
+        )
 
-    # ── Trailing stop ───────────────────────────────────────────────────────
-    def _update_sl(self):
-        if np.isnan(self._trail_sl):
-            return
-        new_sl = self._trail_sl * (1.0 - self.sl_buffer)
-        if np.isnan(self._active_sl) or new_sl > self._active_sl:
-            self._active_sl = new_sl
+    # ── Long exit: mean-reversion complete ────────────────────────────────
+    def _should_exit_long(self) -> bool:
+        if np.isnan(self._bb_pct) or np.isnan(self._rsi): return False
+        return bool(self._close >= self._bb_mid or self._rsi > self.rsi_exit)
 
-    def _stop_triggered(self) -> bool:
-        if np.isnan(self._active_sl):
-            return False
-        price = self._close
-        if price >= self._active_sl:
-            self._sl_confirm_bars = 0
-            return False
-        # Below stop — check hardening conditions
-        low10m = self._low10m
-        if not np.isnan(low10m) and price <= low10m:
-            return True  # Confirmed: broke macro low
-        self._sl_confirm_bars += 1
-        if self._sl_confirm_bars >= 5:
-            self._sl_confirm_bars = 0
-            return True  # Confirmed: 5 consecutive bars below stop
-        return False
+    # ── Short exit: mean-reversion complete ───────────────────────────────
+    def _should_exit_short(self) -> bool:
+        if np.isnan(self._bb_pct) or np.isnan(self._rsi): return False
+        rsi_os = 100.0 - self.rsi_exit   # oversold threshold (e.g. 42)
+        return bool(self._close <= self._bb_mid or self._rsi < rsi_os)
 
-    # ── Main loop ───────────────────────────────────────────────────────────
+    # ── Stop check (direction-aware) ──────────────────────────────────────
+    def _stop_hit(self) -> bool:
+        if np.isnan(self._stop_price): return False
+        if self._direction == 1:
+            return self._close < self._stop_price
+        return self._close > self._stop_price   # short
+
+    # ── Main loop ──────────────────────────────────────────────────────────
     def next(self):
-        bar_idx = len(self.data) - 1
+        bar = len(self.data) - 1
+        if bar < 80: return
+        if np.isnan(self._bb_mid) or np.isnan(self._bb_std): return
 
-        # Warm-up: need at least 30 bars for indicator stability
-        if bar_idx < 30:
-            return
-        if np.isnan(self._vwap) or np.isnan(self._trail_sl):
-            return
-
-        # ── In position ──────────────────────────────────────────────────
         if self.position:
-            self._update_sl()
-
-            # Anti-stall
-            if bar_idx - self._entry_bar >= self.max_hold_bars:
-                self.position.close()
-                self._reset()
-                return
-
-            # Stop check
-            if self._stop_triggered():
-                self.position.close()
-                self._reset()
-                return
-
-            # Peak exit
-            if self._peak_conditions():
-                self.position.close()
-                self._reset()
-                return
-
-        # ── No position: look for entry ──────────────────────────────────
+            if bar - self._entry_bar >= self.max_hold_bars:
+                self.position.close(); self._reset(); return
+            if self._stop_hit():
+                self.position.close(); self._reset(); return
+            if self._direction == 1 and self._should_exit_long():
+                self.position.close(); self._reset(); return
+            if self._direction == -1 and self._should_exit_short():
+                self.position.close(); self._reset(); return
         else:
-            if self._trough_conditions():
-                sl_price   = self._trail_sl * (1.0 - self.sl_buffer)
-                entry_est  = self._close
-                if sl_price >= entry_est or np.isnan(sl_price):
-                    return
-                risk_per_unit = entry_est - sl_price
-                if risk_per_unit <= 0:
-                    return
-
-                # Integer unit sizing: risk_pct of equity, capped to 20% of equity
-                # (backtesting.py cancels size < 1 → must be >= 1 integer unit)
-                risk_usd    = self.equity * self.risk_pct
-                n_by_risk   = risk_usd / risk_per_unit
-                n_by_avail  = int(self.equity * 0.20 / entry_est)
-                n_units     = max(1, min(int(round(n_by_risk)), n_by_avail))
-
+            if self._should_enter_long():
+                stop_price = self._bb_low - self.bb_stop_mult * self._bb_std
+                if np.isnan(stop_price) or stop_price >= self._close: return
+                n_units = max(1, int(self.equity * 0.95 / self._close))
                 self.buy(size=n_units)
-                self._entry_bar      = bar_idx
-                self._entry_price    = entry_est
-                self._peak_mom_slope = self._mom
-                self._active_sl      = sl_price
-                self._sl_confirm_bars = 0
+                self._entry_bar  = bar
+                self._stop_price = stop_price
+                self._direction  = 1
+
+            elif self._should_enter_short():
+                stop_price = self._bb_up + self.bb_stop_mult * self._bb_std
+                if np.isnan(stop_price) or stop_price <= self._close: return
+                n_units = max(1, int(self.equity * 0.95 / self._close))
+                self.sell(size=n_units)
+                self._entry_bar  = bar
+                self._stop_price = stop_price
+                self._direction  = -1
 
     def _reset(self):
-        self._entry_bar       = -1
-        self._entry_price     = np.nan
-        self._peak_mom_slope  = -np.inf
-        self._active_sl       = np.nan
-        self._sl_confirm_bars = 0
+        self._entry_bar  = -1
+        self._stop_price = np.nan
+        self._direction  = 0

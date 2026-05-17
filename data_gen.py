@@ -1,10 +1,11 @@
 """
-Synthetic OHLCV data generator mimicking real crypto market regimes.
-Produces 1-minute bars with:
-  - Trending macro periods (uptrend / downtrend / sideways)
-  - Mean-reverting micro noise with fat tails
-  - Volume clustering around price turning points
-  - Spread simulation for maker/taker execution
+Synthetic OHLCV — 5-second bars, 21-day dataset.
+Realistic BTC microstructure:
+  - 50/25/25 regime (up/down/flat) — balanced for mean-reversion
+  - Drift ~3.5%/day uptrend (down from runaway 25%/day)
+  - GARCH(1,1) volatility clustering + Student-t fat tails
+  - Volume spikes at turning points
+  - start_price = $1.00, cash = $10 → 9-10 integer units per trade
 """
 
 import numpy as np
@@ -13,83 +14,70 @@ from scipy.stats import t as student_t
 
 
 def _regime_schedule(n_bars: int, rng: np.random.Generator) -> np.ndarray:
-    """Return per-bar regime labels: 1=uptrend, -1=downtrend, 0=sideways."""
-    regimes = []
-    remaining = n_bars
+    """50% uptrend, 25% downtrend, 25% sideways — balanced for mean-rev."""
+    regimes, remaining = [], n_bars
     while remaining > 0:
-        regime = rng.choice([1, -1, 0], p=[0.45, 0.35, 0.20])
-        length = int(rng.integers(60, 300))  # 1–5 h blocks
-        length = min(length, remaining)
-        regimes.extend([regime] * length)
-        remaining -= length
+        regime = rng.choice([1, -1, 0], p=[0.50, 0.25, 0.25])
+        bars   = int(rng.integers(60, 600))   # 5–50 min blocks
+        bars   = min(bars, remaining)
+        regimes.extend([regime] * bars)
+        remaining -= bars
     return np.array(regimes[:n_bars])
 
 
-def _vol_cluster(n: int, base_vol: float, rng: np.random.Generator) -> np.ndarray:
-    """GARCH(1,1)-like volatility clustering."""
-    h = np.empty(n)
-    h[0] = base_vol ** 2
-    alpha, beta, omega = 0.08, 0.88, base_vol ** 2 * (1 - 0.08 - 0.88)
-    eps = student_t.rvs(df=5, size=n, random_state=rng)
-    returns = np.empty(n)
+def _garch(n: int, base_vol: float, rng: np.random.Generator):
+    alpha, beta = 0.08, 0.88
+    omega = base_vol**2 * (1.0 - alpha - beta)
+    h = np.empty(n); h[0] = base_vol**2
+    eps  = student_t.rvs(df=5, size=n, random_state=rng)
+    rets = np.empty(n)
     for i in range(n):
-        h[i] = omega + alpha * (returns[i - 1] ** 2 if i > 0 else 0) + beta * h[i - 1]
-        returns[i] = np.sqrt(max(h[i], 1e-12)) * eps[i]
-    return returns, np.sqrt(h)
+        if i > 0: h[i] = omega + alpha*rets[i-1]**2 + beta*h[i-1]
+        rets[i] = np.sqrt(max(h[i], 1e-16)) * eps[i]
+    return rets, np.sqrt(h)
 
 
-def generate_1m_ohlcv(
-    n_bars: int = 20_000,
+def generate_5s_ohlcv(
+    n_bars: int = 362_880,       # 21 days × 86400 / 5
     seed: int = 42,
-    start_price: float = 100.0,   # $100 unit price keeps int-size viable
-    base_vol: float = 0.0012,
+    start_price: float = 1.0,
+    base_vol: float = 0.00010,   # per 5s bar → ~1.3% daily vol (realistic)
 ) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
+
+    rng     = np.random.default_rng(seed)
     regimes = _regime_schedule(n_bars, rng)
-    returns, vols = _vol_cluster(n_bars, base_vol, rng)
+    rets, vols = _garch(n_bars, base_vol, rng)
 
-    # Macro drift per regime
-    drift = regimes * 0.00015
-    log_prices = np.cumsum(returns + drift)
-    closes = start_price * np.exp(log_prices)
+    # ~3.5%/day uptrend drift (was 25%/day — now realistic)
+    drift      = regimes * 0.000002
+    log_prices = np.cumsum(rets + drift)
+    closes     = start_price * np.exp(log_prices)
 
-    # Intrabar OHLC from close using vol proxy
-    spread_half = vols * closes * 0.5
-    opens = np.empty(n_bars)
-    opens[0] = start_price
-    opens[1:] = closes[:-1]
+    spread_half = vols * closes * 0.25
+    opens       = np.empty(n_bars)
+    opens[0]    = start_price
+    opens[1:]   = closes[:-1]
+    highs = np.maximum(opens, closes) + np.abs(rng.normal(0, spread_half*0.5, n_bars))
+    lows  = np.minimum(opens, closes) - np.abs(rng.normal(0, spread_half*0.5, n_bars))
 
-    highs = np.maximum(opens, closes) + np.abs(rng.normal(0, spread_half * 0.8, n_bars))
-    lows = np.minimum(opens, closes) - np.abs(rng.normal(0, spread_half * 0.8, n_bars))
+    base_v   = 200.0
+    vol_mult = 1.0 + 4.0 * np.abs(rets) / (vols + 1e-14)
+    mom      = np.convolve(rets, np.ones(5)/5, mode="same")
+    reversal = np.abs(np.gradient(mom)); reversal /= reversal.max() + 1e-14
+    volume   = base_v * vol_mult * (1 + 5.0*reversal)
+    volume   = np.maximum(volume + rng.normal(0, base_v*0.05, n_bars), 1.0)
 
-    # Volume: higher at turning points and trend accelerations
-    base_vol_amt = 500.0
-    vol_mult = 1.0 + 3.0 * np.abs(returns) / (vols + 1e-12)
-    # Extra volume spike at local turning points (momentum reversals)
-    momentum = np.convolve(returns, np.ones(5) / 5, mode="same")
-    reversal_signal = np.abs(np.gradient(momentum))
-    reversal_signal = reversal_signal / (reversal_signal.max() + 1e-12)
-    volume = base_vol_amt * vol_mult * (1 + 4.0 * reversal_signal)
-    volume = np.maximum(volume + rng.normal(0, base_vol_amt * 0.1, n_bars), 10.0)
-
-    idx = pd.date_range("2024-01-01", periods=n_bars, freq="1min")
-    df = pd.DataFrame(
-        {
-            "Open": opens,
-            "High": highs,
-            "Low": lows,
-            "Close": closes,
-            "Volume": volume,
-        },
+    idx = pd.date_range("2024-01-01", periods=n_bars, freq="5s")
+    return pd.DataFrame(
+        {"Open": opens, "High": highs, "Low": lows,
+         "Close": closes, "Volume": volume},
         index=idx,
     )
-    # Spread for maker/taker simulation (in price units, full spread)
-    df["Spread"] = vols * closes * 0.4
-    return df
 
 
 if __name__ == "__main__":
-    df = generate_1m_ohlcv()
-    df.to_csv("data/synthetic_1m.csv")
-    print(f"Generated {len(df):,} bars  |  price range: {df['Close'].min():.0f}–{df['Close'].max():.0f}")
-    print(df.tail())
+    import os; os.makedirs("data", exist_ok=True)
+    df = generate_5s_ohlcv()
+    df.to_csv("data/synthetic_5s.csv")
+    print(f"{len(df):,} bars | {len(df)/17280:.1f} days | "
+          f"price {df['Close'].min():.4f}–{df['Close'].max():.4f}")
