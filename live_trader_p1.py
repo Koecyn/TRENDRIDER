@@ -28,9 +28,8 @@ MOM_FAST      = 3
 MOM_SLOW      = 12
 SMA_WINDOW    = 60         # 60 × 5s = 5-min SMA for macro uptrend gate
 
-RSI_ENTRY     = 42.0       # RSI < 42 → oversold, buy signal
-RSI_EXIT      = 58.0       # RSI > 58 → overbought, sell signal
-BB_ENTRY_PCT  = 0.20       # enter when price in bottom 20% of BB range
+RSI_EXIT      = 65.0       # RSI > 65 → extended, take profit
+BB_ENTRY_PCT  = 0.50       # enter when price below BB midline in uptrend
 BB_STOP_MULT  = 0.5        # stop = bb_lower − 0.5 × bb_std
 MAX_HOLD_S    = 30         # time-stop: sell after 30 seconds regardless
 MOM5M_THRESH  = -0.0001    # macro_up gate: 5-min momentum must exceed this

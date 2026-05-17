@@ -19,7 +19,7 @@ if not api_key or not api_secret:
 client = Client(api_key, api_secret, tld='us')
 
 BB_WINDOW=15; BB_NSTD=1.5; RSI_PERIOD=14; MOM_FAST=3; MOM_SLOW=12
-SMA_WINDOW=60; RSI_ENTRY=42.0; BB_ENTRY_PCT=0.20; MOM5M_THRESH=-0.0001
+SMA_WINDOW=60; BB_ENTRY_PCT=0.50; MOM5M_THRESH=-0.0001
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'; B='\033[1m'
 
 def _ema(arr, span):
@@ -73,36 +73,30 @@ try:
         cpct = (price - bl) / (bh - bl + 1e-12) * 100
         mac, sma60, mom5m = macro_1m(c1m)
 
-        bb_ok  = cpct  < BB_ENTRY_PCT * 100
-        rsi_ok = rsi   < RSI_ENTRY
-        mom_ok = mom   > 0.0
+        bb_ok  = cpct < BB_ENTRY_PCT * 100
         mac_ok = mac
-
-        all_ok = bb_ok and rsi_ok and mom_ok and mac_ok
+        all_ok = bb_ok and mac_ok
 
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
         print(f"  {B}ENTRY CONDITION CHECKER{Z}  —  read-only")
         print(f"  {'═'*52}")
         print(f"  Price      ${price:,.2f}")
         print(f"  BB lower   ${bl:,.2f}  mid ${bm:,.2f}  upper ${bh:,.2f}")
+        print(f"  BB width   ${bh-bl:,.2f}   std ${std[-1]:,.2f}")
         print(f"  SMA60(1m)  ${sma60:,.2f}   mom5m {mom5m:+.6f}")
         print()
-        print(f"  {'CONDITION':<22} {'VALUE':>10}  {'NEED':>10}  STATUS")
+        print(f"  {'CONDITION':<25} {'VALUE':>8}  {'NEED':>8}  STATUS")
         print(f"  {'─'*52}")
-        print(f"  {'BB zone (live price)':<22} {cpct:>9.1f}%  {'< 20%':>10}  {pf(bb_ok, '✓' if bb_ok else '✗')}")
-        print(f"  {'RSI (last bar)':<22} {rsi:>10.2f}  {'< 42.0':>10}  {pf(rsi_ok,'✓' if rsi_ok else '✗')}")
-        print(f"  {'Mom slope':<22} {mom:>+10.6f}  {'> 0':>10}  {pf(mom_ok,'✓' if mom_ok else '✗')}")
-        print(f"  {'Macro uptrend (1m)':<22} {'YES' if mac else 'NO':>10}  {'YES':>10}  {pf(mac_ok,'✓' if mac_ok else '✗')}")
+        print(f"  {'BB zone (price vs midline)':<25} {cpct:>7.1f}%  {'< 50%':>8}  {pf(bb_ok,'✓' if bb_ok else '✗')}")
+        print(f"  {'Macro uptrend (1m)':<25} {'YES' if mac else 'NO':>8}  {'YES':>8}  {pf(mac_ok,'✓' if mac_ok else '✗')}")
         print(f"  {'─'*52}")
 
         if all_ok:
-            print(f"  {G}{B}★ ALL CONDITIONS MET — would enter NOW{Z}")
+            print(f"  {G}{B}★ SIGNAL — would enter NOW{Z}")
         else:
             fails = []
-            if not bb_ok:  fails.append(f"BB zone {cpct:.0f}% (need <20%)")
-            if not rsi_ok: fails.append(f"RSI {rsi:.1f} (need <42)")
-            if not mom_ok: fails.append(f"mom flat/negative")
-            if not mac_ok: fails.append(f"macro not uptrend (price {'above' if price>sma60 else 'BELOW'} SMA60)")
+            if not bb_ok:  fails.append(f"price above midline ({cpct:.0f}% — need <50%)")
+            if not mac_ok: fails.append(f"not uptrend (price {'above' if price>sma60 else 'BELOW'} SMA60 by ${abs(price-sma60):.2f})")
             print(f"  {R}Blocking: {' | '.join(fails)}{Z}")
 
         print(f"\n  1-min bars loaded: {len(c1m)}  (need 72 for macro)")

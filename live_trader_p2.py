@@ -68,17 +68,14 @@ def render(st):
     elif sig == 'LONG ★':
         print(_c(f"  ★  SIGNAL FOUND — placing LIMIT_MAKER buy now…", G))
     else:
-        rsi_v   = ind.get('rsi', 0)
         bb_low  = ind.get('bb_low', 0.0)
         bb_up_v = ind.get('bb_up',  0.0)
+        bb_mid  = ind.get('bb_mid', 0.0)
         cp      = (price - bb_low) / (bb_up_v - bb_low + 1e-12) * 100
-        mom_v   = ind.get('mom', 0)
         mac     = bool(ind.get('macro_up'))
-        bb_s  = _c(f'BB {cp:.0f}% ✓', G)  if cp < 20        else _c(f'BB {cp:.0f}% ✗', R)
-        rsi_s = _c(f'RSI {rsi_v:.0f} ✓', G) if rsi_v < RSI_ENTRY else _c(f'RSI {rsi_v:.0f} ✗', R)
-        mom_s = _c('mom ✓', G)  if mom_v > 0 else _c(f'mom {mom_v:+.5f} ✗', R)
-        mac_s = _c('macro ✓', G) if mac       else _c('macro ✗', R)
-        print(f"  ◉  {bb_s}  {rsi_s}  {mom_s}  {mac_s}")
+        bb_s  = _c(f'BB {cp:.0f}% ✓', G) if cp < BB_ENTRY_PCT * 100 else _c(f'BB {cp:.0f}% ✗ (need <{BB_ENTRY_PCT*100:.0f}%)', R)
+        mac_s = _c('macro ✓', G) if mac else _c('macro ✗', R)
+        print(f"  ◉  SCANNING   {bb_s}   {mac_s}")
 
     # ── Wallet ────────────────────────────────────────────────────────────
     total = st['usdt_bal'] + st['btc_bal'] * price
@@ -223,7 +220,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 if st['live_bars'] % 12 == 0:
                     closes_1m.append(bar_c)
 
-                c_arr = np.array(closes)
+                c_arr = np.array(closes_1m)   # 1-min closes give meaningful BB variance
                 if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
                     bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
                     st['ind'] = {
@@ -250,13 +247,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 bb_low   = ind.get('bb_low', 0.0)
                 bb_up    = ind.get('bb_up',  0.0)
                 curr_pct = (price - bb_low) / (bb_up - bb_low + 1e-12)
-                bad      = any(np.isnan(ind.get(k, float('nan')))
-                               for k in ('rsi', 'mom'))
-                if (not bad
-                        and curr_pct   < BB_ENTRY_PCT
-                        and ind['rsi'] < RSI_ENTRY
-                        and ind['mom'] > 0.0
-                        and ind['macro_up'] == 1):
+                if (curr_pct < BB_ENTRY_PCT and ind.get('macro_up') == 1):
                     st['signal'] = 'LONG ★'
                 else:
                     st['signal'] = '—'
@@ -303,7 +294,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 elif held >= MAX_HOLD_S:
                     reason = 'TIME'
                 elif (ind and not np.isnan(ind.get('rsi', float('nan')))
-                        and (price >= ind.get('bb_mid', price + 1)
+                        and (price >= ind.get('bb_up', price + 1) * 0.90
                              or ind['rsi'] > RSI_EXIT)):
                     reason = 'TARGET'
 
