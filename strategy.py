@@ -58,13 +58,24 @@ def precompute(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     df["vol_ex"]    = volume_exhaustion(v, window=p["vol_window"])
     df["sma60"]     = _rolling_mean(c, 60)
 
+    c5, h5, l5, v5 = resample_ohlcv(c, h, lo, v, tf_bars=60)
+    df["mom5m"]     = momentum_pct(c5, fast=3, slow=12)
+
+    sma60_a = df["sma60"].values
+    mom5m_a = df["mom5m"].values
+    df["macro_up"] = np.where(
+        ~np.isnan(sma60_a) & ~np.isnan(mom5m_a),
+        ((c > sma60_a) & (mom5m_a > -0.0001)).astype(int),
+        0,
+    )
+
     return df
 
 
 BT_COLS = [
     "Open", "High", "Low", "Close", "Volume",
     "rsi", "bb_mid", "bb_lower", "bb_pct", "bb_std",
-    "mom_slope", "vol_ex",
+    "mom_slope", "vol_ex", "macro_up",
 ]
 
 
@@ -102,7 +113,10 @@ class MeanReversionMTF(Strategy):
     @property
     def _close(self):   return self.data.Close[-1]
 
-    # ── Entry: buy dip with momentum already turning up ───────────────────
+    @property
+    def _macro(self): return self.data.macro_up[-1]
+
+    # ── Entry: buy dip in uptrend with momentum already turning up ────────
     def _should_enter(self) -> bool:
         if np.isnan(self._bb_pct) or np.isnan(self._rsi) or np.isnan(self._mom):
             return False
@@ -110,6 +124,7 @@ class MeanReversionMTF(Strategy):
             self._bb_pct < self.bb_entry_pct and   # at lower band
             self._rsi    < self.rsi_entry     and   # oversold
             self._mom    > 0.0                and   # momentum ALREADY turning up
+            self._macro == 1                  and   # confirmed uptrend (no falling knives)
             self.data.vol_ex[-1] < 4.0              # not a crash
         )
 

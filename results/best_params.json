@@ -1,19 +1,19 @@
 {
   "indicator_params": {
     "rsi_period": 14,
-    "bb_window": 20,
+    "bb_window": 15,
     "bb_nstd": 1.5,
-    "mom_fast": 5,
-    "mom_slow": 20,
+    "mom_fast": 3,
+    "mom_slow": 12,
     "vol_window": 60,
     "vwap_window": 60
   },
   "strategy_params": {
     "rsi_entry": 42.0,
     "rsi_exit": 58.0,
-    "bb_entry_pct": 0.25,
+    "bb_entry_pct": 0.2,
     "bb_stop_mult": 0.5,
-    "max_hold_bars": 8,
+    "max_hold_bars": 6,
     "taker_win_min": 0.005
   }
 }

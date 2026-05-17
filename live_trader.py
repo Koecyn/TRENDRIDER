@@ -35,12 +35,14 @@ BB_NSTD       = 1.5        # 1.5σ bands  →  3:1 R:R with 0.5σ stop
 RSI_PERIOD    = 14
 MOM_FAST      = 3
 MOM_SLOW      = 12
+SMA_WINDOW    = 60         # 60 × 5s = 5-min SMA for macro uptrend gate
 
 RSI_ENTRY     = 42.0       # oversold threshold (buy)
 RSI_EXIT      = 58.0       # overbought threshold (sell)
 BB_ENTRY_PCT  = 0.20       # enter when price in bottom 20% of BB range
 BB_STOP_MULT  = 0.5        # stop = bb_lower - 0.5 * bb_std
 MAX_HOLD_S    = 30         # time-stop: 30 seconds
+MOM5M_THRESH  = -0.0001    # macro_up: 5m momentum must be above this
 
 ORDER_TIMEOUT = 8          # seconds to wait for maker fill before cancel
 
@@ -96,6 +98,27 @@ def calc_mom_slope(close: np.ndarray, fast: int = 3, slow: int = 12,
     ema_s = _ema(close, slow)
     mom   = (ema_f - ema_s) / (close + 1e-12)
     return _ema(np.gradient(mom), smooth)
+
+
+def calc_macro_up(closes_5s: np.ndarray, sma_window: int = 60) -> bool:
+    """
+    Macro uptrend gate: close > 5-min SMA AND 5m momentum not bearish.
+    Matches precompute() in strategy.py exactly.
+    Returns True only when it's safe to buy pullbacks.
+    """
+    if len(closes_5s) < sma_window + 12:
+        return False
+    price  = closes_5s[-1]
+    sma60  = closes_5s[-sma_window:].mean()
+    # Build 5-min bar closes (every 60 5s bars = 1 5-min bar)
+    n5m    = len(closes_5s) // 60
+    if n5m < 12:
+        return False
+    c5m    = np.array([closes_5s[(i + 1) * 60 - 1] for i in range(n5m)])
+    ema_f  = _ema(c5m, 3)
+    ema_s  = _ema(c5m, 12)
+    mom5m  = (ema_f[-1] - ema_s[-1]) / (c5m[-1] + 1e-12)
+    return bool(price > sma60 and mom5m > MOM5M_THRESH)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +202,8 @@ def render(st: dict) -> None:
     print(_bar("RSI:",         f"  {ind.get('rsi', 0):>12.2f}"))
     print(_bar("Mom Slope:",   f"  {ind.get('mom', 0):>+12.6f}"))
     print(_bar("BB Zone %:",   f"  {ind.get('bb_pct', 0)*100:>11.1f}%"))
+    macro_str = "UPTREND" if ind.get('macro_up', 0) else "sideways/down"
+    print(_bar("Macro:",       f"  {macro_str:>12}"))
     print(_bar("Signal:",      f"  {st.get('signal', '—'):>12}"))
 
     # ── Current position ──────────────────────────────────────────────────
@@ -348,14 +373,20 @@ def run_pure_maker_loop(symbol: str = "BTCUSDT") -> None:
                     st['ind'] = ind
                     st['warmup'] = st['live_bars'] < LIVE_WARMUP
 
+                    # Macro uptrend gate (must match strategy.py precompute)
+                    macro_up = calc_macro_up(np.array(closes), SMA_WINDOW)
+                    ind['macro_up'] = int(macro_up)
+
                     # Determine signal
                     if (not st['warmup']
-                            and not any(np.isnan(v) for v in ind.values())
+                            and not any(np.isnan(v) for v in ind.values()
+                                        if isinstance(v, float))
                             and not st['position']
                             and not pend_id):
                         if (ind['bb_pct'] < BB_ENTRY_PCT
                                 and ind['rsi'] < RSI_ENTRY
-                                and ind['mom'] > 0.0):
+                                and ind['mom'] > 0.0
+                                and macro_up):          # only buy in uptrend
                             st['signal'] = 'LONG ★'
                         else:
                             st['signal'] = '—'

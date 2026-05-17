@@ -198,17 +198,18 @@ def main():
     # ── 2. Indicators ─────────────────────────────────────────────────────
     print("\n[2] Pre-computing indicators…")
     df = precompute(raw.copy(), INDICATOR_PARAMS)
-    df = df.dropna(subset=["bb_mid","rsi","sma60"])
+    df = df.dropna(subset=["bb_mid","rsi","sma60","mom_slope"])
     print(f"    Valid bars: {len(df):,}")
     df_bt = df[BT_COLS].copy()
 
-    # Signal scan — long-only (BB + RSI + momentum already turning up)
+    # Signal scan — long-only (BB + RSI + momentum + macro uptrend)
     bb_pct = df["bb_pct"].values
     rsi_v  = df["rsi"].values
     mom_v  = df["mom_slope"].values
+    macro  = df["macro_up"].values
     ep     = DEFAULT_STRATEGY_PARAMS["bb_entry_pct"]
     re     = DEFAULT_STRATEGY_PARAMS["rsi_entry"]
-    sigs   = (bb_pct < ep) & (rsi_v < re) & (mom_v > 0)
+    sigs   = (bb_pct < ep) & (rsi_v < re) & (mom_v > 0) & (macro == 1)
     print(f"    Entry signals: {sigs.sum():,} ({sigs.sum()/days:.0f}/day)")
 
     # ── 3. Baseline ───────────────────────────────────────────────────────
