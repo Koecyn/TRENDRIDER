@@ -12,14 +12,6 @@ C = '\033[96m'; D = '\033[2m';  B = '\033[1m'; Z = '\033[0m'
 def _c(s, col):
     return f'{col}{s}{Z}'
 
-def _exit_hit(price, ind):
-    """Regime-aware profit target."""
-    regime   = ind.get('regime', 'UNKNOWN')
-    exit_pct = REGIME_EXIT.get(regime, 0.50)
-    bl = ind.get('bb_low', price - 1)
-    bh = ind.get('bb_up',  price + 1)
-    pos_pct = (price - bl) / (bh - bl + 1e-12)
-    return pos_pct >= exit_pct
 
 def _macro_up_1m(c1m):
     """Macro uptrend directly from 1-minute closes — works with 72+ bars."""
@@ -65,10 +57,11 @@ def render(st):
         unr  = (price - pos['entry_price']) * pos['qty']
         col  = G if unr >= 0 else R
         sign = '+' if unr >= 0 else ''
+        trail = pos.get('trail_stop', pos['stop_price'])
+        peak  = pos.get('peak_price', price)
         print(_c(f"  ▶  IN POSITION   entry ${pos['entry_price']:,.2f}   "
-                 f"stop ${pos['stop_price']:,.2f}   "
-                 f"P&L {sign}${abs(unr):.4f}   "
-                 f"{held:.0f}s / {MAX_HOLD_S}s", col))
+                 f"peak ${peak:,.2f}   trail ${trail:,.2f}   "
+                 f"P&L {sign}${abs(unr):.4f}   {held:.0f}s/{MAX_HOLD_S}s", col))
     elif pend:
         age = time.time() - st.get('pend_time', time.time())
         print(_c(f"  ◎  ORDER PENDING   @ ${pend['price']:,.2f}   "
@@ -276,6 +269,13 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 else:
                     st['signal'] = '—'
 
+            # ── Trail stop: update high watermark every tick ──────────────
+            if st.get('position'):
+                p = st['position']
+                p['peak_price'] = max(p.get('peak_price', price), price)
+                new_trail = p['peak_price'] - p.get('stop_dist', p['peak_price'] * 0.001)
+                p['trail_stop'] = max(p.get('trail_stop', p['stop_price']), new_trail)
+
             # ── State machine ─────────────────────────────────────────────
             ind = st.get('ind', {})
             pos = st.get('position')
@@ -285,12 +285,16 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 try:
                     o = client.get_order(symbol=symbol, orderId=pend_id)
                     if o['status'] == 'FILLED':
-                        ep  = float(o['price'])
-                        qty = float(o['executedQty'])
-                        stp = ep - BB_STOP_MULT * ind.get('bb_std', ep * 0.001)
-                        st['position']      = {'entry_price': ep, 'qty': qty,
-                                               'stop_price':  stp,
-                                               'entry_time':  time.time()}
+                        ep   = float(o['price'])
+                        qty  = float(o['executedQty'])
+                        stp  = ep - BB_STOP_MULT * ind.get('bb_std', ep * 0.001)
+                        sdist = max(ep - stp, ep * 0.0002)   # min 0.02% stop distance
+                        st['position'] = {
+                            'entry_price': ep,  'qty':        qty,
+                            'stop_price':  stp, 'trail_stop': stp,
+                            'peak_price':  ep,  'stop_dist':  sdist,
+                            'entry_time':  time.time(),
+                        }
                         st['pending_order'] = None
                         st['pend_time']     = None
                         st['signal']        = 'HOLDING'
@@ -313,20 +317,24 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             elif pos:
                 held   = time.time() - pos['entry_time']
                 reason = None
-                if price < pos['stop_price']:
-                    reason = 'STOP'
+                trail  = pos.get('trail_stop', pos['stop_price'])
+                if price < trail:
+                    # Below trail stop — profitable exit if above entry, else stop
+                    reason = 'TRAIL' if price >= pos['entry_price'] else 'STOP'
                 elif held >= MAX_HOLD_S:
                     reason = 'TIME'
-                elif (ind and not np.isnan(ind.get('rsi', float('nan')))
-                        and (_exit_hit(price, ind) or ind['rsi'] > RSI_EXIT)):
-                    reason = 'TARGET'
+                elif (ind
+                        and ind.get('rsi', 0) > RSI_EXIT
+                        and ind.get('mom', 1) < 0):
+                    reason = 'MOM↓'   # RSI extended AND momentum flipped negative
 
                 if reason:
                     qty     = pos['qty']
                     exit_px = price
                     fee     = 0.0
                     try:
-                        if reason == 'TARGET':
+                        if reason in ('TRAIL', 'MOM↓'):
+                            # Try maker limit sell at ask first (0% fee)
                             _, ask = best_bid_ask(client, symbol)
                             sell_o = client.create_order(
                                 symbol=symbol, side='SELL', type='LIMIT_MAKER',
@@ -345,9 +353,9 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                                                         orderId=sell_o['orderId'])
                                 except BinanceAPIException:
                                     pass
-                                reason = 'TARGET→MKT'
+                                reason = reason + '→MKT'
 
-                        if reason in ('STOP', 'TIME', 'TARGET→MKT'):
+                        if reason in ('STOP', 'TIME', 'TRAIL→MKT', 'MOM↓→MKT'):
                             mo    = client.order_market_sell(
                                 symbol=symbol,
                                 quantity=fmt_qty(qty, step_size))
