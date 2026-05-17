@@ -88,6 +88,57 @@ def calc_macro_up(closes_5s, sma_win=60):
     mom5m = (_ema(c5m, 3)[-1] - _ema(c5m, 12)[-1]) / (c5m[-1] + 1e-12)
     return bool(arr[-1] > sma and mom5m > MOM5M_THRESH)
 
+# ── Regime detection ─────────────────────────────────────────────────────────
+# Entry bb_pct threshold per regime (None = no longs)
+REGIME_ENTRY = {
+    'UPTREND':   0.50,   # any pullback below midline
+    'RANGING':   0.28,   # near lower band
+    'COMPRESS':  0.20,   # only extreme lower band — breakout imminent
+    'DOWNTREND': None,   # no long entries
+    'UNKNOWN':   0.28,
+}
+# Exit bb_pct threshold per regime
+REGIME_EXIT = {
+    'UPTREND':   0.82,   # near upper band — ride the bounce
+    'RANGING':   0.50,   # midline
+    'COMPRESS':  0.55,   # just past midline
+    'DOWNTREND': 0.50,
+    'UNKNOWN':   0.50,
+}
+REGIME_COLOR = {         # for dashboard
+    'UPTREND': '\033[92m', 'DOWNTREND': '\033[91m',
+    'RANGING': '\033[93m', 'COMPRESS':  '\033[96m', 'UNKNOWN': '\033[2m',
+}
+
+def classify_regime(closes_1m):
+    """
+    Detect regime from 1-min closes using EMA alignment + swing structure.
+    Returns: 'UPTREND' | 'DOWNTREND' | 'RANGING' | 'COMPRESS' | 'UNKNOWN'
+    """
+    c = np.array(closes_1m)
+    if len(c) < 30:
+        return 'UNKNOWN'
+    e20   = _ema(c, 20)
+    e60   = _ema(c, min(60, len(c)))
+    slope = (e20[-1] - e20[-6]) / (e20[-6] + 1e-12)
+    # Swing structure over last 20 bars
+    seg       = c[-20:]
+    h1, l1    = seg[:10].max(), seg[:10].min()
+    h2, l2    = seg[10:].max(), seg[10:].min()
+    hh = h2 > h1 * 1.0002    # higher highs
+    hl = l2 > l1 * 1.0002    # higher lows
+    lh = h2 < h1 * 0.9998    # lower highs
+    ll = l2 < l1 * 0.9998    # lower lows
+    above = c[-1] > e20[-1]
+    below = c[-1] < e20[-1]
+    if lh and hl:
+        return 'COMPRESS'                     # triangle: lower highs + higher lows
+    if above and slope > 0.00005 and (hh or hl):
+        return 'UPTREND'
+    if below and slope < -0.00005 and (ll or lh):
+        return 'DOWNTREND'
+    return 'RANGING'
+
 # ── Exchange helpers — Binance.US ─────────────────────────────────────────────
 def get_filters(client, symbol):
     info = client.get_symbol_info(symbol)

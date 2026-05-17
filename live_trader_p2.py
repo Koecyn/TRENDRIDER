@@ -12,6 +12,15 @@ C = '\033[96m'; D = '\033[2m';  B = '\033[1m'; Z = '\033[0m'
 def _c(s, col):
     return f'{col}{s}{Z}'
 
+def _exit_hit(price, ind):
+    """Regime-aware profit target."""
+    regime   = ind.get('regime', 'UNKNOWN')
+    exit_pct = REGIME_EXIT.get(regime, 0.50)
+    bl = ind.get('bb_low', price - 1)
+    bh = ind.get('bb_up',  price + 1)
+    pos_pct = (price - bl) / (bh - bl + 1e-12)
+    return pos_pct >= exit_pct
+
 def _macro_up_1m(c1m):
     """Macro uptrend directly from 1-minute closes — works with 72+ bars."""
     if len(c1m) < 72:
@@ -68,14 +77,18 @@ def render(st):
     elif sig == 'LONG ★':
         print(_c(f"  ★  SIGNAL FOUND — placing LIMIT_MAKER buy now…", G))
     else:
-        bb_low  = ind.get('bb_low', 0.0)
-        bb_up_v = ind.get('bb_up',  0.0)
-        bb_mid  = ind.get('bb_mid', 0.0)
-        cp      = (price - bb_low) / (bb_up_v - bb_low + 1e-12) * 100
-        mac     = bool(ind.get('macro_up'))
-        bb_s  = _c(f'BB {cp:.0f}% ✓', G) if cp < BB_ENTRY_PCT * 100 else _c(f'BB {cp:.0f}% ✗ (need <{BB_ENTRY_PCT*100:.0f}%)', R)
-        mac_s = _c('macro ✓', G) if mac else _c('macro ✗', R)
-        print(f"  ◉  SCANNING   {bb_s}   {mac_s}")
+        regime    = ind.get('regime', 'UNKNOWN')
+        entry_pct = REGIME_ENTRY.get(regime, 0)
+        bl        = ind.get('bb_low', 0.0)
+        bu        = ind.get('bb_up',  0.0)
+        cp        = (price - bl) / (bu - bl + 1e-12) * 100
+        rc        = REGIME_COLOR.get(regime, D)
+        no_entry  = entry_pct is None
+        if no_entry:
+            print(_c(f"  ✋  {regime} — no long entries, waiting for regime change", R))
+        else:
+            bb_s = _c(f'BB {cp:.0f}%✓', G) if cp < entry_pct*100 else _c(f'BB {cp:.0f}%✗ need<{entry_pct*100:.0f}%', R)
+            print(f"  ◉  {_c(regime, rc)}   {bb_s}")
 
     # ── Wallet ────────────────────────────────────────────────────────────
     total = st['usdt_bal'] + st['btc_bal'] * price
@@ -86,19 +99,22 @@ def render(st):
 
     # ── Indicators ────────────────────────────────────────────────────────
     if ind:
-        bb_p  = ind.get('bb_pct', 0) * 100
-        rsi_v = ind.get('rsi', 0)
-        mom_v = ind.get('mom', 0)
-        b_col = G if bb_p < 20 else (R if bb_p > 80 else Z)
-        r_col = G if rsi_v < RSI_ENTRY else (R if rsi_v > RSI_EXIT else Z)
-        m_str = _c('UPTREND ✓', G) if ind.get('macro_up') else _c('bearish', R)
-        print(f"\n  {_c('INDICATORS', B)}")
-        print(f"  BB  ${ind.get('bb_low',0):,.2f} / "
-              f"${ind.get('bb_mid',0):,.2f} / "
-              f"${ind.get('bb_up',0):,.2f}   "
-              f"zone {_c(f'{bb_p:.0f}%', b_col)}")
-        print(f"  RSI {_c(f'{rsi_v:.1f}', r_col)}   "
-              f"mom {mom_v:+.6f}   macro {m_str}")
+        regime = ind.get('regime', 'UNKNOWN')
+        rc     = REGIME_COLOR.get(regime, D)
+        ep     = REGIME_ENTRY.get(regime)
+        xp     = REGIME_EXIT.get(regime, 0.5)
+        bl     = ind.get('bb_low', 0); bm2 = ind.get('bb_mid', 0); bu = ind.get('bb_up', 0)
+        bb_w   = bu - bl
+        bb_p   = ind.get('bb_pct', 0) * 100
+        rsi_v  = ind.get('rsi', 0)
+        r_col  = G if rsi_v < 45 else (R if rsi_v > 65 else Z)
+        m_str  = _c('macro ✓', G) if ind.get('macro_up') else _c('macro ✗', R)
+        entry_str = f'<{ep*100:.0f}%' if ep else 'NONE'
+        print(f"\n  {_c('MARKET', B)}  {_c(regime, rc)}   "
+              f"entry {entry_str}  exit >{xp*100:.0f}%")
+        print(f"  BB  ${bl:,.2f} / ${bm2:,.2f} / ${bu:,.2f}   "
+              f"width ${bb_w:,.2f}   zone {bb_p:.0f}%")
+        print(f"  RSI {_c(f'{rsi_v:.1f}', r_col)}   {m_str}")
 
     # ── Session summary ───────────────────────────────────────────────────
     trades = st.get('trades', [])
@@ -223,6 +239,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 c_arr = np.array(closes_1m)   # 1-min closes give meaningful BB variance
                 if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
                     bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
+                    regime = classify_regime(closes_1m)
                     st['ind'] = {
                         'rsi':      float(calc_rsi(c_arr, RSI_PERIOD)[-1]),
                         'bb_mid':   float(bm[-1]),
@@ -232,6 +249,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         'bb_std':   float(bs[-1]),
                         'mom':      float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1]),
                         'macro_up': _macro_up_1m(np.array(closes_1m)),
+                        'regime':   regime,
                     }
                     st['warmup'] = st['live_bars'] < LIVE_WARMUP
 
@@ -244,10 +262,16 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             ind = st.get('ind', {})
             if (ind and not st.get('warmup', True)
                     and not st.get('position') and not pend_id):
-                bb_low   = ind.get('bb_low', 0.0)
-                bb_up    = ind.get('bb_up',  0.0)
-                curr_pct = (price - bb_low) / (bb_up - bb_low + 1e-12)
-                if (curr_pct < BB_ENTRY_PCT and ind.get('macro_up') == 1):
+                regime    = ind.get('regime', 'UNKNOWN')
+                entry_pct = REGIME_ENTRY.get(regime)
+                bb_low    = ind.get('bb_low', 0.0)
+                bb_up     = ind.get('bb_up',  0.0)
+                curr_pct  = (price - bb_low) / (bb_up - bb_low + 1e-12)
+                # Uptrend also requires macro confirmation; other regimes just use bb_pct
+                macro_ok  = (ind.get('macro_up') == 1) if regime == 'UPTREND' else True
+                if (entry_pct is not None
+                        and curr_pct < entry_pct
+                        and macro_ok):
                     st['signal'] = 'LONG ★'
                 else:
                     st['signal'] = '—'
@@ -294,8 +318,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 elif held >= MAX_HOLD_S:
                     reason = 'TIME'
                 elif (ind and not np.isnan(ind.get('rsi', float('nan')))
-                        and (price >= ind.get('bb_up', price + 1) * 0.90
-                             or ind['rsi'] > RSI_EXIT)):
+                        and (_exit_hit(price, ind) or ind['rsi'] > RSI_EXIT)):
                     reason = 'TARGET'
 
                 if reason:
