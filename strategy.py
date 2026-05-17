@@ -141,12 +141,11 @@ class MeanReversionMTF(Strategy):
         return bool(
             self._bb_pct < self.bb_entry_pct and   # at lower band
             self._rsi    < self.rsi_entry     and   # oversold
-            self._mom    > 0.0                and   # momentum turning up
-            self._macro == 1                  and   # macro uptrend
+            self._mom    > 0.0                and   # momentum ALREADY turning up
             self.data.vol_ex[-1] < 4.0              # not a crash
         )
 
-    # ── Short entry: peak with confirmed momentum turn (confirmed downtrend) ─
+    # ── Short entry: peak with confirmed momentum turn ─────────────────────
     def _should_enter_short(self) -> bool:
         if np.isnan(self._bb_pct) or np.isnan(self._rsi) or np.isnan(self._mom):
             return False
@@ -154,8 +153,7 @@ class MeanReversionMTF(Strategy):
         return bool(
             self._bb_pct > (1.0 - self.bb_entry_pct) and  # at upper band
             self._rsi    > rsi_ob                    and  # overbought
-            self._mom    < 0.0                       and  # momentum turning down
-            self._macro_dn == 1                      and  # confirmed downtrend
+            self._mom    < 0.0                       and  # momentum ALREADY turning down
             self.data.vol_ex[-1] < 4.0                   # not a spike
         )
 
