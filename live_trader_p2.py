@@ -323,9 +323,9 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 else:
                     st['signal'] = f'INSUF (min ${min_notional:.0f})'
 
-            # ── Render dashboard once per second ──────────────────────────
+            # ── Render dashboard every 250 ms tick ───────────────────────
             now = time.time()
-            if now - last_render >= 1.0:
+            if now - last_render >= TICK_S:
                 render(st)
                 last_render = now
 
