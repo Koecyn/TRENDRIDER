@@ -1,101 +1,137 @@
 # live_trader_p2.py  —  Part 2 of 2
 # cat live_trader_p1.py live_trader_p2.py > live_trader.py
 
-TICK_S = 0.25          # Binance.US exchange sample rate: 250 ms
-TICKS_PER_BAR = int(BAR_S / TICK_S)   # 20 ticks per 5-second bar
-W = 64                 # dashboard width
+TICK_S        = 0.25
+TICKS_PER_BAR = int(BAR_S / TICK_S)
+W             = 66
+_SP           = '|/-\\'
+
+G = '\033[92m'; R = '\033[91m'; Y = '\033[93m'
+C = '\033[96m'; D = '\033[2m';  B = '\033[1m'; Z = '\033[0m'
+
+def _c(s, col):
+    return f'{col}{s}{Z}'
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 def render(st):
-    os.system('clear')
+    sys.stdout.write('\033[2J\033[H')
+    sys.stdout.flush()
+
     price = st.get('price', 0.0)
-    now   = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print('═' * W)
-    print(f"  HFT MEAN-REVERSION  |  {st['symbol']}  |  Binance.US")
-    print(f"  {now}  |  Bar #{st['bar_count']}  |  tick 250ms")
-    print('═' * W)
+    ts    = datetime.now().strftime('%H:%M:%S')
+    spin  = _SP[st.get('spin', 0) % len(_SP)]
+    tick  = st.get('tick', 0)
 
-    total = st['usdt_bal'] + st['btc_bal'] * price
-    print(f"\n  WALLET")
-    print(f"  {'USDT Free':<24} ${st['usdt_bal']:>10.4f}")
-    print(f"  {'BTC Free':<24}  {st['btc_bal']:>10.8f}")
-    print(f"  {'Total Value':<24} ${total:>10.4f}")
+    # ── Header ────────────────────────────────────────────────────────────
+    print(_c('═' * W, C))
+    print(f"  {_c('HFT MEAN-REVERSION', B)}  {st['symbol']}  "
+          f"Binance.US  {spin}  {ts}")
+    print(f"  bar #{st['bar_count']}  "
+          f"tick {tick:02d}/{TICKS_PER_BAR}  "
+          f"${price:,.2f}")
+    print(_c('─' * W, C))
 
-    ind  = st.get('ind', {})
+    # ── Status — one line that tells you exactly what the bot is doing ────
     warm = st.get('warmup', True)
-    tag  = f" (WARMING {st['live_bars']}/{LIVE_WARMUP})" if warm else ""
-    print(f"\n  LIVE DATA{tag}")
-    print(f"  {'Price':<24} ${price:>12.2f}")
-    print(f"  {'BB Lower':<24} ${ind.get('bb_low', 0):>12.2f}")
-    print(f"  {'BB Mid':<24} ${ind.get('bb_mid', 0):>12.2f}")
-    print(f"  {'BB Upper':<24} ${ind.get('bb_up', 0):>12.2f}")
-    print(f"  {'RSI':<24}  {ind.get('rsi', 0):>11.2f}")
-    print(f"  {'Mom Slope':<24}  {ind.get('mom', 0):>+11.6f}")
-    print(f"  {'BB Zone %':<24}  {ind.get('bb_pct', 0) * 100:>10.1f}%")
-    mstr = "UPTREND ✓" if ind.get('macro_up') else "sideways/down"
-    print(f"  {'Macro':<24}  {mstr:>12}")
-    print(f"  {'Signal':<24}  {st.get('signal', '—'):>12}")
-
     pos  = st.get('position')
     pend = st.get('pending_order')
-    print(f"\n  POSITION")
-    if pos:
+    sig  = st.get('signal', '—')
+    ind  = st.get('ind', {})
+
+    if warm:
+        n    = st.get('live_bars', 0)
+        secs = (LIVE_WARMUP - n) * BAR_S
+        print(_c(f"  ◌  WARMING UP   {n}/{LIVE_WARMUP} bars   "
+                 f"~{secs}s until trading starts", Y))
+    elif pos:
         held = time.time() - pos['entry_time']
         unr  = (price - pos['entry_price']) * pos['qty']
+        col  = G if unr >= 0 else R
         sign = '+' if unr >= 0 else ''
-        print(f"  {'Status':<24}  {'LONG  (open)':>12}")
-        print(f"  {'Entry Price':<24} ${pos['entry_price']:>12.4f}")
-        print(f"  {'Quantity BTC':<24}  {pos['qty']:>12.8f}")
-        print(f"  {'Stop Price':<24} ${pos['stop_price']:>12.4f}")
-        print(f"  {'Hold Time':<24}  {held:>8.0f}s / {MAX_HOLD_S}s")
-        print(f"  {'Unrealized P&L':<24}  {sign}${abs(unr):>10.4f}")
+        print(_c(f"  ▶  IN POSITION   entry ${pos['entry_price']:,.2f}   "
+                 f"stop ${pos['stop_price']:,.2f}   "
+                 f"P&L {sign}${abs(unr):.4f}   "
+                 f"{held:.0f}s / {MAX_HOLD_S}s", col))
     elif pend:
-        print(f"  PENDING LIMIT_MAKER BUY  @ ${pend['price']:.2f}"
-              f"  qty={pend['qty']:.8f} BTC")
+        age = time.time() - st.get('pend_time', time.time())
+        print(_c(f"  ◎  ORDER PENDING   @ ${pend['price']:,.2f}   "
+                 f"qty {pend['qty']:.8f}   "
+                 f"{age:.0f}s / {ORDER_TIMEOUT}s", Y))
+    elif sig == 'LONG ★':
+        print(_c(f"  ★  SIGNAL FOUND — placing LIMIT_MAKER buy now…", G))
     else:
-        print(f"  No open position")
+        rsi_v = ind.get('rsi', 0)
+        bb_p  = ind.get('bb_pct', 1) * 100
+        mac   = 'UP' if ind.get('macro_up') else 'DN'
+        print(_c(f"  ◉  SCANNING   RSI {rsi_v:.1f}  "
+                 f"BB {bb_p:.0f}%  macro {mac}   "
+                 f"waiting for dip to lower band…", D))
 
+    # ── Wallet ────────────────────────────────────────────────────────────
+    total = st['usdt_bal'] + st['btc_bal'] * price
+    print(f"\n  {_c('WALLET', B)}")
+    print(f"  USDT ${st['usdt_bal']:>10.2f}   "
+          f"BTC {st['btc_bal']:>12.8f}   "
+          f"Total ${total:>10.2f}")
+
+    # ── Indicators ────────────────────────────────────────────────────────
+    if ind:
+        bb_p  = ind.get('bb_pct', 0) * 100
+        rsi_v = ind.get('rsi', 0)
+        mom_v = ind.get('mom', 0)
+        b_col = G if bb_p < 20 else (R if bb_p > 80 else Z)
+        r_col = G if rsi_v < RSI_ENTRY else (R if rsi_v > RSI_EXIT else Z)
+        m_str = _c('UPTREND ✓', G) if ind.get('macro_up') else _c('bearish', R)
+        print(f"\n  {_c('INDICATORS', B)}")
+        print(f"  BB  ${ind.get('bb_low',0):,.2f} / "
+              f"${ind.get('bb_mid',0):,.2f} / "
+              f"${ind.get('bb_up',0):,.2f}   "
+              f"zone {_c(f'{bb_p:.0f}%', b_col)}")
+        print(f"  RSI {_c(f'{rsi_v:.1f}', r_col)}   "
+              f"mom {mom_v:+.6f}   macro {m_str}")
+
+    # ── Session summary ───────────────────────────────────────────────────
     trades = st.get('trades', [])
-    wins   = [t for t in trades if t['pnl'] > 0]
+    wins   = sum(1 for t in trades if t['pnl'] > 0)
     gross  = sum(t['pnl'] for t in trades)
     fees   = sum(t.get('fee', 0.0) for t in trades)
     net    = gross - fees
-    wr     = len(wins) / len(trades) * 100 if trades else 0.0
-    print(f"\n  SESSION  (started {st.get('session_start', '—')})")
-    print(f"  {'Trades':<24}  {len(trades):>12}")
-    print(f"  {'Wins / Losses':<24}  {len(wins)} / {len(trades) - len(wins)}")
-    print(f"  {'Win Rate':<24}  {wr:>11.1f}%")
-    g = '+' if gross >= 0 else ''
-    print(f"  {'Gross P&L':<24}  {g}${gross:>9.4f}")
-    print(f"  {'Fees (taker only)':<24}  ${fees:>10.4f}")
-    n = '+' if net >= 0 else ''
-    print(f"  {'NET P&L':<24}  {n}${abs(net):>10.4f}")
+    wr     = wins / len(trades) * 100 if trades else 0.0
+    nc     = G if net >= 0 else R
+    nsign  = '+' if net >= 0 else ''
+    print(f"\n  {_c('SESSION', B)}  {st.get('session_start','—')}   "
+          f"trades {len(trades)}   wins {wins}   "
+          f"wr {wr:.0f}%   "
+          f"net {_c(f'{nsign}${abs(net):.4f}', nc)}")
 
-    print(f"\n  LAST 10 TRADES")
-    print(f"  {'Time':<9} {'Entry':>10} {'Exit':>10} {'Net PnL':>9} {'Why':<9} Result")
-    print(f"  {'─' * (W - 4)}")
-    for t in trades[-10:]:
-        s = '+' if t['pnl'] >= 0 else ''
-        r = '✓ WIN' if t['pnl'] > 0 else '✗ LOSS'
-        print(f"  {t['exit_time']:<9} "
-              f"${t['entry_price']:>9.2f} "
-              f"${t['exit_price']:>9.2f} "
-              f"{s}${abs(t['pnl'] - t.get('fee', 0)):>7.4f} "
-              f"{t['reason']:<9} {r}")
-    print('═' * W)
+    # ── Trade history — newest first ──────────────────────────────────────
+    if trades:
+        print(f"\n  {_c('TRADES', B)} — newest first")
+        print(f"  {'time':<9}  {'entry':>9}  {'exit':>9}  {'net':>8}  why")
+        print(f"  {'─' * (W - 4)}")
+        for t in reversed(trades[-20:]):
+            net_t = t['pnl'] - t.get('fee', 0.0)
+            col   = G if t['pnl'] > 0 else R
+            tsign = '+' if net_t >= 0 else ''
+            print(_c(f"  {t['exit_time']:<9}  "
+                     f"${t['entry_price']:>8.2f}  "
+                     f"${t['exit_price']:>8.2f}  "
+                     f"{tsign}${abs(net_t):>6.4f}  "
+                     f"{t['reason']}", col))
+
+    print(_c('\n' + '─' * W, C))
     print("  Ctrl+C to stop")
 
 
 # ── Main loop — 250 ms ticks, 5-second bars ───────────────────────────────────
 def run_pure_maker_loop(symbol="BTCUSDT"):
-    load_dotenv()   # reads .env in current directory
+    load_dotenv()
     api_key    = os.getenv('BINANCE_API_KEY')
     api_secret = os.getenv('BINANCE_SECRET_KEY')
     if not api_key or not api_secret:
         print("ERROR: missing BINANCE_API_KEY / BINANCE_SECRET_KEY in .env")
         sys.exit(1)
 
-    # tld='us' → all calls go to api.binance.us (Binance.US, not Binance.com)
     client     = Client(api_key, api_secret, tld='us')
     base_asset = symbol.replace("USDT", "")
 
@@ -107,21 +143,21 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
     min_notional = flt.get('min_notional', 10.0)
     print(f"step={step_size}  tick={tick_size}  min_notional=${min_notional}")
 
-    # Pre-load 200 one-minute klines → instant indicator warmup
     print("Pre-loading history…")
     klines = client.get_klines(symbol=symbol,
                                interval=Client.KLINE_INTERVAL_1MINUTE,
                                limit=200)
-    init_c = np.array([float(k[4]) for k in klines])
-    closes  = deque(init_c.tolist(),            maxlen=1000)
-    volumes = deque([float(k[5]) / 12          # vol per 5s bar ≈ 1min vol / 12
-                     for k in klines],          maxlen=1000)
+    init_c  = np.array([float(k[4]) for k in klines])
+    closes  = deque(init_c.tolist(), maxlen=1000)
+    volumes = deque([float(k[5]) / 12 for k in klines], maxlen=1000)
 
     btc_bal, usdt_bal = get_balances(client, base_asset)
     st = {
         'symbol':        symbol,
         'bar_count':     len(init_c),
         'live_bars':     0,
+        'tick':          0,
+        'spin':          0,
         'price':         float(init_c[-1]),
         'usdt_bal':      usdt_bal,
         'btc_bal':       btc_bal,
@@ -130,13 +166,14 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
         'warmup':        True,
         'position':      None,
         'pending_order': None,
+        'pend_time':     None,
         'trades':        [],
         'session_start': datetime.now().strftime('%H:%M:%S'),
     }
 
-    pend_id = pend_time = None
-    tick_count = 0                       # ticks in current bar
-    bar_o = bar_h = bar_l = bar_c = float(init_c[-1])
+    pend_id    = None
+    tick_count = 0
+    bar_h = bar_l = bar_c = float(init_c[-1])
     bar_vol = 0.0
     prev_px = float(init_c[-1])
     last_render = 0.0
@@ -147,7 +184,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
         tick_t = time.time()
         try:
             # ── 250 ms price tick ─────────────────────────────────────────
-            price      = float(client.get_symbol_ticker(symbol=symbol)['price'])
+            price       = float(client.get_symbol_ticker(symbol=symbol)['price'])
             st['price'] = price
             bar_h       = max(bar_h, price)
             bar_l       = min(bar_l, price)
@@ -155,6 +192,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             bar_vol    += abs(price - prev_px) * 500 + 1.0
             prev_px     = price
             tick_count += 1
+            st['tick']  = tick_count
 
             # ── Close 5-second bar every TICKS_PER_BAR ticks ─────────────
             if tick_count >= TICKS_PER_BAR:
@@ -163,29 +201,27 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 st['bar_count'] += 1
                 st['live_bars']  = min(st['live_bars'] + 1, LIVE_WARMUP + 1)
                 tick_count = 0
-                bar_o = bar_h = bar_l = bar_c = price
+                st['tick'] = 0
+                bar_h = bar_l = bar_c = price
                 bar_vol = 0.0
 
                 c_arr = np.array(closes)
-                need  = max(BB_WINDOW, RSI_PERIOD, MOM_SLOW)
-                if len(c_arr) >= need:
+                if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
                     bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
-                    ind = {
+                    st['ind'] = {
                         'rsi':      float(calc_rsi(c_arr, RSI_PERIOD)[-1]),
                         'bb_mid':   float(bm[-1]),
                         'bb_low':   float(bl[-1]),
                         'bb_up':    float(bh[-1]),
                         'bb_pct':   float(bp[-1]),
                         'bb_std':   float(bs[-1]),
-                        'mom':      float(calc_mom_slope(c_arr,
-                                                         MOM_FAST, MOM_SLOW)[-1]),
+                        'mom':      float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1]),
                         'macro_up': int(calc_macro_up(c_arr, SMA_WINDOW)),
                     }
-                    st['ind']    = ind
                     st['warmup'] = st['live_bars'] < LIVE_WARMUP
 
                 if st['bar_count'] % 10 == 0:
-                    btc_bal, usdt_bal = get_balances(client, base_asset)
+                    btc_bal, usdt_bal    = get_balances(client, base_asset)
                     st['btc_bal']  = btc_bal
                     st['usdt_bal'] = usdt_bal
 
@@ -223,21 +259,24 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                                                'stop_price':  stp,
                                                'entry_time':  time.time()}
                         st['pending_order'] = None
+                        st['pend_time']     = None
                         st['signal']        = 'HOLDING'
-                        pend_id = pend_time = None
+                        pend_id             = None
                     elif o['status'] in ('CANCELED', 'REJECTED', 'EXPIRED'):
                         st['pending_order'] = None
+                        st['pend_time']     = None
                         st['signal']        = '—'
-                        pend_id = pend_time = None
-                    elif time.time() - pend_time > ORDER_TIMEOUT:
+                        pend_id             = None
+                    elif time.time() - st.get('pend_time', time.time()) > ORDER_TIMEOUT:
                         client.cancel_order(symbol=symbol, orderId=pend_id)
                         st['pending_order'] = None
+                        st['pend_time']     = None
                         st['signal']        = '—'
-                        pend_id = pend_time = None
+                        pend_id             = None
                 except BinanceAPIException:
                     pass
 
-            # B: open position — sell BTC we own when conditions met
+            # B: open position — sell BTC when exit conditions met
             elif pos:
                 held   = time.time() - pos['entry_time']
                 reason = None
@@ -256,19 +295,17 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                     fee     = 0.0
                     try:
                         if reason == 'TARGET':
-                            # Maker limit sell at ask — 0% fee
-                            _, ask  = best_bid_ask(client, symbol)
-                            sell_o  = client.create_order(
+                            _, ask = best_bid_ask(client, symbol)
+                            sell_o = client.create_order(
                                 symbol=symbol, side='SELL', type='LIMIT_MAKER',
                                 quantity=fmt_qty(qty, step_size),
                                 price=fmt_px(ask, tick_size))
-                            for _ in range(ORDER_TIMEOUT * 4):   # 250ms sleep
+                            for _ in range(ORDER_TIMEOUT * 4):
                                 time.sleep(TICK_S)
                                 o = client.get_order(symbol=symbol,
                                                      orderId=sell_o['orderId'])
                                 if o['status'] == 'FILLED':
                                     exit_px = float(o['price'])
-                                    fee     = 0.0
                                     break
                             else:
                                 try:
@@ -301,7 +338,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         })
                         st['position'] = None
                         st['signal']   = '—'
-                        btc_bal, usdt_bal = get_balances(client, base_asset)
+                        btc_bal, usdt_bal    = get_balances(client, base_asset)
                         st['btc_bal']  = btc_bal
                         st['usdt_bal'] = usdt_bal
 
@@ -320,7 +357,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                             quantity=fmt_qty(qty, step_size),
                             price=fmt_px(bid, tick_size))
                         pend_id             = order['orderId']
-                        pend_time           = time.time()
+                        st['pend_time']     = time.time()
                         st['pending_order'] = {
                             'price': round_px(bid, tick_size), 'qty': qty}
                         st['signal'] = f"ORDER @ ${round_px(bid, tick_size):.2f}"
@@ -329,13 +366,13 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 else:
                     st['signal'] = f'INSUF (min ${min_notional:.0f})'
 
-            # ── Render dashboard every 250 ms tick ───────────────────────
+            # ── Render every 250 ms tick ──────────────────────────────────
             now = time.time()
             if now - last_render >= TICK_S:
+                st['spin'] = (st.get('spin', 0) + 1) % len(_SP)
                 render(st)
                 last_render = now
 
-            # ── Pace to 250 ms per tick ───────────────────────────────────
             elapsed = time.time() - tick_t
             time.sleep(max(0.0, TICK_S - elapsed))
 
@@ -347,14 +384,15 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             break
 
     # ── Final summary ─────────────────────────────────────────────────────────
-    print('\n' + '═' * W)
     trades = st.get('trades', [])
     gross  = sum(t['pnl'] for t in trades)
     fees   = sum(t.get('fee', 0.0) for t in trades)
     wins   = sum(1 for t in trades if t['pnl'] > 0)
     wr     = wins / len(trades) * 100 if trades else 0
-    print(f"  Trades: {len(trades)}  WR: {wr:.1f}%  Net P&L: ${gross - fees:+.4f}")
-    print('═' * W)
+    print(f"\n{_c('═'*W, C)}")
+    print(f"  Trades {len(trades)}   WR {wr:.1f}%   "
+          f"Net P&L {_c(f'{gross-fees:+.4f}', G if gross>=fees else R)}")
+    print(_c('═' * W, C))
 
 
 if __name__ == "__main__":
