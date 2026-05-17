@@ -12,6 +12,14 @@ C = '\033[96m'; D = '\033[2m';  B = '\033[1m'; Z = '\033[0m'
 def _c(s, col):
     return f'{col}{s}{Z}'
 
+def _macro_up_1m(c1m):
+    """Macro uptrend directly from 1-minute closes — works with 72+ bars."""
+    if len(c1m) < 72:
+        return 0
+    sma = c1m[-60:].mean()
+    v   = (_ema(c1m, 3)[-1] - _ema(c1m, 12)[-1]) / (c1m[-1] + 1e-12)
+    return int(c1m[-1] > sma and v > MOM5M_THRESH)
+
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 def render(st):
     sys.stdout.write('\033[2J\033[H')
@@ -60,12 +68,17 @@ def render(st):
     elif sig == 'LONG ★':
         print(_c(f"  ★  SIGNAL FOUND — placing LIMIT_MAKER buy now…", G))
     else:
-        rsi_v = ind.get('rsi', 0)
-        bb_p  = ind.get('bb_pct', 1) * 100
-        mac   = 'UP' if ind.get('macro_up') else 'DN'
-        print(_c(f"  ◉  SCANNING   RSI {rsi_v:.1f}  "
-                 f"BB {bb_p:.0f}%  macro {mac}   "
-                 f"waiting for dip to lower band…", D))
+        rsi_v   = ind.get('rsi', 0)
+        bb_low  = ind.get('bb_low', 0.0)
+        bb_up_v = ind.get('bb_up',  0.0)
+        cp      = (price - bb_low) / (bb_up_v - bb_low + 1e-12) * 100
+        mom_v   = ind.get('mom', 0)
+        mac     = bool(ind.get('macro_up'))
+        bb_s  = _c(f'BB {cp:.0f}% ✓', G)  if cp < 20        else _c(f'BB {cp:.0f}% ✗', R)
+        rsi_s = _c(f'RSI {rsi_v:.0f} ✓', G) if rsi_v < RSI_ENTRY else _c(f'RSI {rsi_v:.0f} ✗', R)
+        mom_s = _c('mom ✓', G)  if mom_v > 0 else _c(f'mom {mom_v:+.5f} ✗', R)
+        mac_s = _c('macro ✓', G) if mac       else _c('macro ✗', R)
+        print(f"  ◉  {bb_s}  {rsi_s}  {mom_s}  {mac_s}")
 
     # ── Wallet ────────────────────────────────────────────────────────────
     total = st['usdt_bal'] + st['btc_bal'] * price
@@ -147,9 +160,10 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
     klines = client.get_klines(symbol=symbol,
                                interval=Client.KLINE_INTERVAL_1MINUTE,
                                limit=200)
-    init_c  = np.array([float(k[4]) for k in klines])
-    closes  = deque(init_c.tolist(), maxlen=1000)
-    volumes = deque([float(k[5]) / 12 for k in klines], maxlen=1000)
+    init_c    = np.array([float(k[4]) for k in klines])
+    closes    = deque(init_c.tolist(), maxlen=1000)
+    volumes   = deque([float(k[5]) / 12 for k in klines], maxlen=1000)
+    closes_1m = deque(init_c.tolist(), maxlen=500)   # 1-min closes for macro_up
 
     btc_bal, usdt_bal = get_balances(client, base_asset)
     st = {
@@ -205,6 +219,10 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 bar_h = bar_l = bar_c = price
                 bar_vol = 0.0
 
+                # Append a 1-minute close every 12 five-second bars
+                if st['live_bars'] % 12 == 0:
+                    closes_1m.append(bar_c)
+
                 c_arr = np.array(closes)
                 if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
                     bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
@@ -216,7 +234,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         'bb_pct':   float(bp[-1]),
                         'bb_std':   float(bs[-1]),
                         'mom':      float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1]),
-                        'macro_up': int(calc_macro_up(c_arr, SMA_WINDOW)),
+                        'macro_up': _macro_up_1m(np.array(closes_1m)),
                     }
                     st['warmup'] = st['live_bars'] < LIVE_WARMUP
 
