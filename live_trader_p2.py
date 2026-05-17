@@ -88,10 +88,11 @@ def render(st):
 
 # ── Main loop — 250 ms ticks, 5-second bars ───────────────────────────────────
 def run_pure_maker_loop(symbol="BTCUSDT"):
+    load_dotenv()   # reads .env in current directory
     api_key    = os.getenv('BINANCE_API_KEY')
     api_secret = os.getenv('BINANCE_SECRET_KEY')
     if not api_key or not api_secret:
-        print("ERROR: set BINANCE_API_KEY and BINANCE_SECRET_KEY")
+        print("ERROR: missing BINANCE_API_KEY / BINANCE_SECRET_KEY in .env")
         sys.exit(1)
 
     # tld='us' → all calls go to api.binance.us (Binance.US, not Binance.com)

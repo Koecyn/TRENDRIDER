@@ -11,6 +11,7 @@ import math
 from datetime import datetime
 from collections import deque
 import numpy as np
+from dotenv import load_dotenv
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
