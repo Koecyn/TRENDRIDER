@@ -64,9 +64,10 @@ def render(st):
                  f"P&L {sign}${abs(unr):.4f}   {held:.0f}s/{MAX_HOLD_S}s", col))
     elif pend:
         age = time.time() - st.get('pend_time', time.time())
-        print(_c(f"  ◎  ORDER PENDING   @ ${pend['price']:,.2f}   "
+        print(_c(f"  !! ORDER PENDING !!   @ ${pend['price']:,.2f}   "
                  f"qty {pend['qty']:.8f}   "
-                 f"{age:.0f}s / {ORDER_TIMEOUT}s", Y))
+                 f"{age:.0f}s / {ORDER_TIMEOUT}s  "
+                 f"(maker buy placed — waiting for fill)", B))
     elif sig == 'LONG ★':
         print(_c(f"  ★  SIGNAL FOUND — placing LIMIT_MAKER buy now…", G))
     else:
