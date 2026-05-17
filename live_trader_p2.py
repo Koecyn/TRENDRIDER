@@ -235,37 +235,41 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 if st['live_bars'] % 12 == 0:
                     closes_1m.append(bar_c)
 
-                c_arr = np.array(closes_1m)   # 1-min closes give meaningful BB variance
-                if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
-                    bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
-                    regime = classify_regime(closes_1m)
-                    rsi_v  = float(calc_rsi(c_arr, RSI_PERIOD)[-1])
-                    mom_v  = float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1])
-                    mac_v  = _macro_up_1m(np.array(closes_1m))
-                    st['ind'] = {
-                        'rsi':      rsi_v,
-                        'bb_mid':   float(bm[-1]),
-                        'bb_low':   float(bl[-1]),
-                        'bb_up':    float(bh[-1]),
-                        'bb_pct':   float(bp[-1]),
-                        'bb_std':   float(bs[-1]),
-                        'mom':      mom_v,
-                        'macro_up': mac_v,
-                        'regime':   regime,
-                    }
-                    st['warmup'] = st['live_bars'] < LIVE_WARMUP
+                if st['bar_count'] % 10 == 0:
+                    btc_bal, usdt_bal = get_balances(client, base_asset)
+                    st['btc_bal']  = btc_bal
+                    st['usdt_bal'] = usdt_bal
+
+            # ── Live indicators every 250ms tick — append current price ───
+            c_arr = np.append(np.array(closes_1m), price)
+            if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
+                bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
+                regime = classify_regime(list(closes_1m) + [price])
+                rsi_v  = float(calc_rsi(c_arr, RSI_PERIOD)[-1])
+                mom_v  = float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1])
+                mac_v  = _macro_up_1m(c_arr)
+                prev_ind = st.get('ind', {})
+                st['ind'] = {
+                    'rsi':      rsi_v,
+                    'bb_mid':   float(bm[-1]),
+                    'bb_low':   float(bl[-1]),
+                    'bb_up':    float(bh[-1]),
+                    'bb_pct':   float(bp[-1]),
+                    'bb_std':   float(bs[-1]),
+                    'mom':      mom_v,
+                    'macro_up': mac_v,
+                    'regime':   regime,
+                }
+                st['warmup'] = st['live_bars'] < LIVE_WARMUP
+                # Log once per bar (first tick of each bar) for the scroll
+                if tick_count == 1:
                     cp = float(bp[-1]) * 100
-                    _log(f"BAR  ${bar_c:,.2f}  {regime:<10}  BB {cp:5.1f}%  "
+                    _log(f"BAR  ${price:,.2f}  {regime:<10}  BB {cp:5.1f}%  "
                          f"RSI {rsi_v:5.1f}  mom {mom_v:+.2e}  "
                          f"macro {'✓' if mac_v else '✗'}  "
                          f"width ${float(bh[-1]-bl[-1]):,.2f}")
 
-                if st['bar_count'] % 10 == 0:
-                    btc_bal, usdt_bal    = get_balances(client, base_asset)
-                    st['btc_bal']  = btc_bal
-                    st['usdt_bal'] = usdt_bal
-
-            # ── Per-tick signal eval using live price ─────────────────────
+            # ── Per-tick signal eval using live indicators ────────────────
             ind = st.get('ind', {})
             if (ind and not st.get('warmup', True)
                     and not st.get('position') and not pend_id):
