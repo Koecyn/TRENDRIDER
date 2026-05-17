@@ -265,7 +265,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                     'regime':   regime,
                 }
                 st['warmup'] = st['live_bars'] < LIVE_WARMUP
-                if tick_count == 1:
+                if tick_count == 1 and st.get('live_bars', 0) % 12 == 0:
                     _log(f"BAR  ${price:,.2f}  {regime:<10}  BB {bb_pct*100:5.1f}%  "
                          f"RSI {rsi_v:5.1f}  mom {mom_v:+.2e}  "
                          f"macro {'✓' if mac_v else '✗'}  "
@@ -302,43 +302,6 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             # ── State machine ─────────────────────────────────────────────
             ind = st.get('ind', {})
             pos = st.get('position')
-
-            # A: pending maker buy — check fill / timeout
-            if pend_id and not pos:
-                try:
-                    o = client.get_order(symbol=symbol, orderId=pend_id)
-                    if o['status'] == 'FILLED':
-                        ep   = float(o['price'])
-                        qty  = float(o['executedQty'])
-                        stp  = ep - BB_STOP_MULT * ind.get('bb_std', ep * 0.001)
-                        sdist = max(ep - stp, ep * 0.0002)   # min 0.02% stop distance
-                        st['position'] = {
-                            'entry_price': ep,  'qty':        qty,
-                            'stop_price':  stp, 'trail_stop': stp,
-                            'peak_price':  ep,  'stop_dist':  sdist,
-                            'entry_time':  time.time(),
-                        }
-                        st['pending_order'] = None
-                        st['pend_time']     = None
-                        st['signal']        = 'HOLDING'
-                        pend_id             = None
-                        _log(f"✓ FILLED   buy  ${ep:,.2f}  qty {qty}  "
-                             f"stop ${stp:,.2f}  dist ${sdist:,.2f}")
-                    elif o['status'] in ('CANCELED', 'REJECTED', 'EXPIRED'):
-                        _log(f"✗ ORDER {o['status']}  #{pend_id}")
-                        st['pending_order'] = None
-                        st['pend_time']     = None
-                        st['signal']        = '—'
-                        pend_id             = None
-                    elif time.time() - st.get('pend_time', time.time()) > ORDER_TIMEOUT:
-                        client.cancel_order(symbol=symbol, orderId=pend_id)
-                        _log(f"✗ ORDER timeout cancelled  #{pend_id}")
-                        st['pending_order'] = None
-                        st['pend_time']     = None
-                        st['signal']        = '—'
-                        pend_id             = None
-                except BinanceAPIException:
-                    pass
 
             # B: open position — sell BTC when exit conditions met
             elif pos:
@@ -419,26 +382,36 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         _log(f"  ✗ EXIT ERR {e.status_code}: {e.message}")
                         st['signal'] = f'EXIT ERR {e.status_code}'
 
-            # C: place maker buy when signal fires
+            # C: market buy when signal fires — fills instantly
             elif (not pend_id and st.get('signal') == 'LONG ★'
                     and not st.get('warmup', True) and ind):
                 qty = floor_qty(st['usdt_bal'] * EQUITY_PCT / price, step_size)
                 if qty >= min_qty and qty * price >= min_notional:
                     try:
-                        bid, _ = best_bid_ask(client, symbol)
-                        order  = client.create_order(
-                            symbol=symbol, side='BUY', type='LIMIT_MAKER',
-                            quantity=fmt_qty(qty, step_size),
-                            price=fmt_px(bid, tick_size))
-                        pend_id             = order['orderId']
-                        st['pend_time']     = time.time()
-                        st['pending_order'] = {
-                            'price': round_px(bid, tick_size), 'qty': qty}
-                        st['signal'] = f"ORDER @ ${round_px(bid, tick_size):.2f}"
-                        _log(f"▶ ORDER placed  buy  #{pend_id}  "
-                             f"@ ${round_px(bid, tick_size):,.2f}  qty {qty}")
+                        mo   = client.order_market_buy(
+                            symbol=symbol, quantity=fmt_qty(qty, step_size))
+                        fills = mo.get('fills', [])
+                        if fills:
+                            tq = sum(float(f['qty']) for f in fills)
+                            ep = sum(float(f['price'])*float(f['qty']) for f in fills)/tq
+                            qty = tq
+                        else:
+                            ep = price
+                        stp   = ep - BB_STOP_MULT * ind.get('bb_std', ep * 0.001)
+                        sdist = max(ep - stp, ep * 0.0002)
+                        st['position'] = {
+                            'entry_price': ep,  'qty':        qty,
+                            'stop_price':  stp, 'trail_stop': stp,
+                            'peak_price':  ep,  'stop_dist':  sdist,
+                            'entry_time':  time.time(),
+                        }
+                        btc_bal, usdt_bal = get_balances(client, base_asset)
+                        st['btc_bal']  = btc_bal
+                        st['usdt_bal'] = usdt_bal
+                        st['signal'] = 'HOLDING'
+                        _log(f"✓ BOUGHT  market  ${ep:,.2f}  qty {qty}  stop ${stp:,.2f}")
                     except BinanceAPIException as e:
-                        _log(f"✗ ORDER ERR {e.status_code}: {e.message}")
+                        _log(f"✗ BUY ERR {e.status_code}: {e.message}")
                         st['signal'] = f'ERR {e.status_code}'
                 else:
                     _log(f"✗ INSUF  usdt ${st['usdt_bal']:.2f}  "
