@@ -1,0 +1,19 @@
+{
+  "indicator_params": {
+    "mom_fast": 5,
+    "mom_slow": 20,
+    "vol_window": 20,
+    "vwap_window": 20
+  },
+  "strategy_params": {
+    "mom_flat_thresh": -0.0002,
+    "mom_peak_thresh": 0.0001,
+    "mom_exit_thresh": -5e-05,
+    "vol_exhaust_lo": 0.65,
+    "vol_exhaust_hi": 1.7,
+    "sl_buffer": 0.0005,
+    "risk_pct": 0.01,
+    "max_hold_bars": 60,
+    "taker_win_min": 0.008
+  }
+}
