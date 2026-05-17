@@ -33,7 +33,7 @@ BB_ENTRY_PCT  = 0.50       # enter when price below BB midline in uptrend
 BB_STOP_MULT  = 0.5        # stop = bb_lower − 0.5 × bb_std
 MAX_HOLD_S    = 30         # time-stop: sell after 30 seconds regardless
 MOM5M_THRESH  = -0.0001    # macro_up gate: 5-min momentum must exceed this
-ORDER_TIMEOUT = 8          # seconds to wait for maker fill before cancelling
+ORDER_TIMEOUT = 45         # strike window: 45s to get maker fill before cancelling
 
 # Binance.US fees (your account tier)
 MAKER_FEE     = 0.0        # 0%    — post-only limit orders
