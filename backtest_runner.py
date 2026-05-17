@@ -1,7 +1,7 @@
 """
 Backtest runner — Bollinger + RSI mean-reversion, 5-second bars.
+Long-only: buy BTC dips, sell BTC we own on recovery.
 $10 starting balance. Sharpe target: 2.0. Full trade log output.
-Long + Short symmetric mean-reversion. 21-day dataset.
 """
 
 import os, sys, json, warnings, itertools
@@ -175,7 +175,7 @@ def main():
     os.makedirs("results", exist_ok=True)
 
     print("="*65)
-    print("  HFT MEAN-REVERSION  |  5s bars  |  BB+RSI L+S  |  $10")
+    print("  HFT MEAN-REVERSION  |  5s bars  |  BB+RSI LONG  |  $10")
     print("="*65)
 
     # ── 1. Data ───────────────────────────────────────────────────────────
@@ -198,18 +198,14 @@ def main():
     print(f"    Valid bars: {len(df):,}")
     df_bt = df[BT_COLS].copy()
 
-    # Signal scan (pre-momentum-gate counts, no macro filter)
+    # Signal scan — long-only (BB + RSI + momentum already turning up)
     bb_pct = df["bb_pct"].values
     rsi_v  = df["rsi"].values
     mom_v  = df["mom_slope"].values
     ep     = DEFAULT_STRATEGY_PARAMS["bb_entry_pct"]
     re     = DEFAULT_STRATEGY_PARAMS["rsi_entry"]
-    sigs_long  = (bb_pct < ep) & (rsi_v < re) & (mom_v > 0)
-    sigs_short = (bb_pct > (1 - ep)) & (rsi_v > (100 - re)) & (mom_v < 0)
-    sigs_total = sigs_long.sum() + sigs_short.sum()
-    print(f"    Long signals:  {sigs_long.sum():,} ({sigs_long.sum()/days:.0f}/day)")
-    print(f"    Short signals: {sigs_short.sum():,} ({sigs_short.sum()/days:.0f}/day)")
-    print(f"    Total signals: {sigs_total:,} ({sigs_total/days:.0f}/day)")
+    sigs   = (bb_pct < ep) & (rsi_v < re) & (mom_v > 0)
+    print(f"    Entry signals: {sigs.sum():,} ({sigs.sum()/days:.0f}/day)")
 
     # ── 3. Baseline ───────────────────────────────────────────────────────
     print("\n[3] Baseline run…")
