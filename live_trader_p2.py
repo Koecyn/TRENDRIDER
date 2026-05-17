@@ -198,6 +198,12 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
     prev_px = float(init_c[-1])
     last_render = 0.0
 
+    event_log = deque(maxlen=5000)
+
+    def _log(msg):
+        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        event_log.append(f"{ts}  {msg}")
+
     render(st)
 
     while True:
@@ -233,18 +239,26 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 if len(c_arr) >= max(BB_WINDOW, RSI_PERIOD, MOM_SLOW):
                     bm, bl, bh, bp, bs = calc_bb(c_arr, BB_WINDOW, BB_NSTD)
                     regime = classify_regime(closes_1m)
+                    rsi_v  = float(calc_rsi(c_arr, RSI_PERIOD)[-1])
+                    mom_v  = float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1])
+                    mac_v  = _macro_up_1m(np.array(closes_1m))
                     st['ind'] = {
-                        'rsi':      float(calc_rsi(c_arr, RSI_PERIOD)[-1]),
+                        'rsi':      rsi_v,
                         'bb_mid':   float(bm[-1]),
                         'bb_low':   float(bl[-1]),
                         'bb_up':    float(bh[-1]),
                         'bb_pct':   float(bp[-1]),
                         'bb_std':   float(bs[-1]),
-                        'mom':      float(calc_mom_slope(c_arr, MOM_FAST, MOM_SLOW)[-1]),
-                        'macro_up': _macro_up_1m(np.array(closes_1m)),
+                        'mom':      mom_v,
+                        'macro_up': mac_v,
                         'regime':   regime,
                     }
                     st['warmup'] = st['live_bars'] < LIVE_WARMUP
+                    cp = float(bp[-1]) * 100
+                    _log(f"BAR  ${bar_c:,.2f}  {regime:<10}  BB {cp:5.1f}%  "
+                         f"RSI {rsi_v:5.1f}  mom {mom_v:+.2e}  "
+                         f"macro {'✓' if mac_v else '✗'}  "
+                         f"width ${float(bh[-1]-bl[-1]):,.2f}")
 
                 if st['bar_count'] % 10 == 0:
                     btc_bal, usdt_bal    = get_balances(client, base_asset)
@@ -265,6 +279,9 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 if (entry_pct is not None
                         and curr_pct < entry_pct
                         and macro_ok):
+                    if st['signal'] != 'LONG ★':
+                        _log(f"★ SIGNAL  ${price:,.2f}  {regime}  BB {curr_pct*100:.1f}%"
+                             f"  (need <{entry_pct*100:.0f}%)")
                     st['signal'] = 'LONG ★'
                 else:
                     st['signal'] = '—'
@@ -299,13 +316,17 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         st['pend_time']     = None
                         st['signal']        = 'HOLDING'
                         pend_id             = None
+                        _log(f"✓ FILLED   buy  ${ep:,.2f}  qty {qty}  "
+                             f"stop ${stp:,.2f}  dist ${sdist:,.2f}")
                     elif o['status'] in ('CANCELED', 'REJECTED', 'EXPIRED'):
+                        _log(f"✗ ORDER {o['status']}  #{pend_id}")
                         st['pending_order'] = None
                         st['pend_time']     = None
                         st['signal']        = '—'
                         pend_id             = None
                     elif time.time() - st.get('pend_time', time.time()) > ORDER_TIMEOUT:
                         client.cancel_order(symbol=symbol, orderId=pend_id)
+                        _log(f"✗ ORDER timeout cancelled  #{pend_id}")
                         st['pending_order'] = None
                         st['pend_time']     = None
                         st['signal']        = '—'
@@ -329,6 +350,10 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                     reason = 'MOM↓'   # RSI extended AND momentum flipped negative
 
                 if reason:
+                    _log(f"→ EXIT {reason}  held {held:.0f}s  "
+                         f"entry ${pos['entry_price']:,.2f}  "
+                         f"trail ${pos.get('trail_stop', pos['stop_price']):,.2f}  "
+                         f"price ${price:,.2f}")
                     qty     = pos['qty']
                     exit_px = price
                     fee     = 0.0
@@ -367,6 +392,8 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                                 fee     = exit_px * qty * TAKER_FEE
 
                         pnl = (exit_px - pos['entry_price']) * qty
+                        _log(f"  ↳ sold  ${exit_px:,.2f}  "
+                             f"PnL {'+' if pnl>=0 else ''}{pnl:.5f}  fee {fee:.5f}")
                         st['trades'].append({
                             'entry_price': pos['entry_price'],
                             'exit_price':  exit_px,
@@ -383,6 +410,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         st['usdt_bal'] = usdt_bal
 
                     except BinanceAPIException as e:
+                        _log(f"  ✗ EXIT ERR {e.status_code}: {e.message}")
                         st['signal'] = f'EXIT ERR {e.status_code}'
 
             # C: place maker buy when signal fires
@@ -401,9 +429,14 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                         st['pending_order'] = {
                             'price': round_px(bid, tick_size), 'qty': qty}
                         st['signal'] = f"ORDER @ ${round_px(bid, tick_size):.2f}"
+                        _log(f"▶ ORDER placed  buy  #{pend_id}  "
+                             f"@ ${round_px(bid, tick_size):,.2f}  qty {qty}")
                     except BinanceAPIException as e:
+                        _log(f"✗ ORDER ERR {e.status_code}: {e.message}")
                         st['signal'] = f'ERR {e.status_code}'
                 else:
+                    _log(f"✗ INSUF  usdt ${st['usdt_bal']:.2f}  "
+                         f"need ${min_notional:.0f}  qty {qty}")
                     st['signal'] = f'INSUF (min ${min_notional:.0f})'
 
             # ── Render every 250 ms tick ──────────────────────────────────
@@ -417,6 +450,7 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
             time.sleep(max(0.0, TICK_S - elapsed))
 
         except BinanceAPIException as e:
+            _log(f"API ERR {e.status_code}: {e.message} — retry in 5s")
             st['signal'] = f'API {e.status_code} — retry…'
             render(st)
             time.sleep(5)
@@ -433,6 +467,26 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
     print(f"  Trades {len(trades)}   WR {wr:.1f}%   "
           f"Net P&L {_c(f'{gross-fees:+.4f}', G if gross>=fees else R)}")
     print(_c('═' * W, C))
+
+    # ── Full scroll log ───────────────────────────────────────────────────────
+    if event_log:
+        print(f"\n{_c('═'*W, C)}")
+        print(f"  {_c('FULL SESSION LOG', B)}  —  {len(event_log)} entries")
+        print(_c('─' * W, C))
+        for line in event_log:
+            # colour key event types
+            if '★' in line or 'SIGNAL' in line:
+                print(_c(f"  {line}", G))
+            elif '▶ ORDER' in line or '✓ FILLED' in line:
+                print(_c(f"  {line}", C))
+            elif '→ EXIT' in line or '↳ sold' in line:
+                col = G if '+' in line else R
+                print(_c(f"  {line}", col))
+            elif 'ERR' in line or '✗' in line:
+                print(_c(f"  {line}", R))
+            else:
+                print(f"  {line}")
+        print(_c('═' * W, C))
 
 
 if __name__ == "__main__":
