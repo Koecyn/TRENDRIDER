@@ -38,10 +38,14 @@ live_data.json  (watcher writes this, Claude reads this):
 import os, sys, time, json, subprocess, signal, shlex
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 REPO_DIR    = Path(__file__).parent.resolve()
 BRANCH      = "claude/hft-mean-reversion-strategy-pJ4YU"
+GITHUB_USER = "Koecyn"
 TRIGGER_F   = REPO_DIR / "trigger.json"
 DATA_F      = REPO_DIR / "live_data.json"
 LOG_F       = REPO_DIR / "process.log"
@@ -162,16 +166,33 @@ class Proc:
         return self.p.pid if self.p else 0
 
 # ── Auth check ────────────────────────────────────────────────────────────────
+def inject_token():
+    """Embed GITHUB_TOKEN into remote URL so git never prompts."""
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if not token:
+        log("GITHUB_TOKEN not found in .env — will rely on system credentials", Y)
+        return
+    r = git(["remote", "get-url", "origin"])
+    url = r.stdout.strip()
+    # strip any existing credentials from URL
+    import re
+    url = re.sub(r"https://[^@]*@", "https://", url)
+    if url.startswith("https://"):
+        authed = url.replace("https://", f"https://{GITHUB_USER}:{token}@", 1)
+        git(["remote", "set-url", "origin", authed])
+        log("GitHub token injected into remote URL", G)
+
 def check_auth():
     log("Checking repo access…", C)
     r = git(["remote", "-v"])
     if r.returncode != 0:
         log("Not a git repo — run from inside TRENDRIDER/", R)
         sys.exit(1)
+    inject_token()
     r2 = git(["fetch", "origin", BRANCH])
     if r2.returncode != 0:
         log(f"Cannot reach remote: {r2.stderr.strip()}", R)
-        log("Check your git credentials / network", R)
+        log("Add GITHUB_TOKEN=ghp_xxx to your .env file", R)
         sys.exit(1)
     log("Repo access OK", G)
 
