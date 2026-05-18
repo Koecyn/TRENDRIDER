@@ -143,46 +143,68 @@ def render(st):
     print("  Ctrl+C to stop")
 
 
-# ── Best-effort sell: LIMIT_MAKER at ask, market fallback after window_s ─────
-def sell_best(client, symbol, qty, step_size, tick_size, window_s=30):
-    """Try maker sell at ask; fall back to market after window_s seconds.
-    Returns (exit_price, qty_sold, method) where method is 'MAKER' or 'MKT'."""
-    exit_px = None
-    qty_sold = qty
-    try:
-        _, ask  = best_bid_ask(client, symbol)
-        limit   = ask + tick_size          # one tick above ask — better price, still maker
-        o       = client.create_order(
+# ── Best-effort sell: LIMIT_MAKER at ask+1tick, market only if profitable ─────
+def sell_best(client, symbol, qty, step_size, tick_size,
+              entry_price=None, window_s=30):
+    """Try maker sell at ask+1tick for window_s seconds.
+    Market fallback ONLY if profit > taker fee cost.
+    If not profitable enough, keeps re-placing maker — never dumps at a loss.
+    Returns (exit_price, qty_sold, method)."""
+    def _market_ok(px):
+        if entry_price is None: return True
+        profit = (px - entry_price) * qty
+        fee    = px * qty * TAKER_FEE
+        return profit > fee
+
+    def _place_maker():
+        _, ask = best_bid_ask(client, symbol)
+        limit  = ask + tick_size
+        o = client.create_order(
             symbol=symbol, side='SELL', type='LIMIT_MAKER',
             quantity=fmt_qty(qty, step_size),
             price=fmt_px(limit, tick_size))
-        oid      = o['orderId']
-        deadline = time.time() + window_s
-        while time.time() < deadline:
+        return o['orderId'], limit
+
+    oid = None
+    try:
+        oid, limit = _place_maker()
+        deadline   = time.time() + window_s
+        while True:
             time.sleep(TICK_S)
             status = client.get_order(symbol=symbol, orderId=oid)
             if status['status'] == 'FILLED':
-                fills    = status.get('fills', [])
+                fills = status.get('fills', [])
                 if fills:
-                    tq      = sum(float(f['qty']) for f in fills)
-                    exit_px = sum(float(f['price'])*float(f['qty']) for f in fills)/tq
-                    qty_sold = tq
+                    tq  = sum(float(f['qty']) for f in fills)
+                    px  = sum(float(f['price'])*float(f['qty']) for f in fills)/tq
                 else:
-                    exit_px = float(status['price'])
-                return exit_px, qty_sold, 'MAKER'
-        # Window expired — cancel and fall through to market
-        try: client.cancel_order(symbol=symbol, orderId=oid)
-        except BinanceAPIException: pass
+                    px  = float(status['price'])
+                    tq  = qty
+                return px, tq, 'MAKER'
+            if time.time() >= deadline:
+                try: client.cancel_order(symbol=symbol, orderId=oid)
+                except BinanceAPIException: pass
+                # Check if market sell is profitable enough
+                cur = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                if _market_ok(cur):
+                    mo    = client.order_market_sell(
+                        symbol=symbol, quantity=fmt_qty(qty, step_size))
+                    fills = mo.get('fills', [])
+                    if fills:
+                        tq  = sum(float(f['qty']) for f in fills)
+                        px  = sum(float(f['price'])*float(f['qty']) for f in fills)/tq
+                    else:
+                        px, tq = cur, qty
+                    return px, tq, 'MKT'
+                else:
+                    # Not profitable — re-place maker for another window
+                    oid, limit = _place_maker()
+                    deadline   = time.time() + window_s
     except BinanceAPIException:
-        pass
-    # Market fallback
-    mo    = client.order_market_sell(symbol=symbol, quantity=fmt_qty(qty, step_size))
-    fills = mo.get('fills', [])
-    if fills:
-        tq      = sum(float(f['qty']) for f in fills)
-        exit_px = sum(float(f['price'])*float(f['qty']) for f in fills)/tq
-        qty_sold = tq
-    return exit_px, qty_sold, 'MKT'
+        if oid:
+            try: client.cancel_order(symbol=symbol, orderId=oid)
+            except BinanceAPIException: pass
+    return None, qty, 'ERR'
 
 
 # ── Main loop — 250 ms ticks, 5-second bars ───────────────────────────────────
@@ -258,11 +280,12 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
         except BinanceAPIException:
             avg_cost = float(init_c[-1])
             print(f"  Could not fetch trades — using last price ${avg_cost:,.2f}")
-        stp = avg_cost * 0.997
+        sdist = min(STOP_MAX_USD, max(STOP_MIN_USD, avg_cost * 0.0002))
+        stp   = avg_cost - sdist
         existing_pos = {
-            'entry_price': avg_cost, 'qty':        btc_bal,
-            'stop_price':  stp,      'trail_stop':  stp,
-            'peak_price':  avg_cost, 'stop_dist':   avg_cost * 0.001,
+            'entry_price': avg_cost, 'qty':       btc_bal,
+            'stop_price':  stp,      'trail_stop': stp,
+            'peak_price':  avg_cost, 'stop_dist':  sdist,
             'entry_time':  time.time(),
         }
 
@@ -412,9 +435,13 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                 try:
                     o = client.get_order(symbol=symbol, orderId=pend_id)
                     if o['status'] == 'FILLED':
-                        ep    = float(o['price']); qty = float(o['executedQty'])
-                        stp   = ep - BB_STOP_MULT * ind.get('bb_std', ep * 0.001)
-                        sdist = max(ep - stp, ep * 0.0002)
+                        ep      = float(o['price']); qty = float(o['executedQty'])
+                        regime  = ind.get('regime', 'UNKNOWN')
+                        atr_v, _= calc_atr(highs, lows, closes)
+                        sdist   = max(STOP_MIN_USD,
+                                      min(STOP_MAX_USD,
+                                          atr_v * STOP_ATR_MULT.get(regime, 0.15)))
+                        stp     = ep - sdist
                         st['position'] = {
                             'entry_price': ep,  'qty':        qty,
                             'stop_price':  stp, 'trail_stop': stp,
@@ -463,7 +490,8 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
                     qty = pos['qty']
                     try:
                         exit_px, qty_sold, method = sell_best(
-                            client, symbol, qty, step_size, tick_size, window_s=30)
+                            client, symbol, qty, step_size, tick_size,
+                            entry_price=pos['entry_price'], window_s=30)
                         fee = exit_px * qty_sold * (MAKER_FEE if method == 'MAKER' else TAKER_FEE)
                         pnl = (exit_px - pos['entry_price']) * qty_sold
                         _log(f"  ↳ sold  ${exit_px:,.2f} via {method}  "
@@ -559,8 +587,10 @@ def run_pure_maker_loop(symbol="BTCUSDT"):
     if btc_bal >= flt['min_qty']:
         print(f"  Selling {btc_bal:.8f} BTC (30s maker window then market)…")
         try:
+            pos_ep = st.get('position', {}) or {}
             exit_px, qty_sold, method = sell_best(
-                client, symbol, btc_bal, step_size, tick_size, window_s=30)
+                client, symbol, btc_bal, step_size, tick_size,
+                entry_price=pos_ep.get('entry_price'), window_s=30)
             if exit_px:
                 fee = exit_px * qty_sold * (MAKER_FEE if method == 'MAKER' else TAKER_FEE)
                 pos = st.get('position')

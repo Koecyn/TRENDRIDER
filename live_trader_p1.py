@@ -30,10 +30,20 @@ SMA_WINDOW    = 60         # 60 × 5s = 5-min SMA for macro uptrend gate
 
 RSI_EXIT      = 65.0       # RSI > 65 → extended, take profit
 BB_ENTRY_PCT  = 0.50       # enter when price below BB midline in uptrend
-BB_STOP_MULT  = 0.5        # stop = bb_lower − 0.5 × bb_std
 MAX_HOLD_S    = 30         # time-stop: sell after 30 seconds regardless
 MOM5M_THRESH  = -0.0001    # macro_up gate: 5-min momentum must exceed this
 ORDER_TIMEOUT = 45         # strike window: 45s to get maker fill before cancelling
+
+# Regime-aware ATR stop multipliers — tight in downtrend, wider in uptrend
+STOP_ATR_MULT = {
+    'UPTREND':   0.30,
+    'RANGING':   0.20,
+    'COMPRESS':  0.15,
+    'DOWNTREND': 0.08,   # $4 stop on $50 ATR — tiny, preserve capital
+    'UNKNOWN':   0.15,
+}
+STOP_MIN_USD = 2.0    # never tighter than $2
+STOP_MAX_USD = 15.0   # never wider than $15
 
 # Binance.US fees (your account tier)
 MAKER_FEE     = 0.0        # 0%    — post-only limit orders
