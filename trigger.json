@@ -1,0 +1,6 @@
+{
+  "id":      "20260518_test_001",
+  "command": "RELOAD",
+  "bash":    "python -c \"print('Hello from Claude')\"",
+  "message": "bridge test — print hello"
+}
