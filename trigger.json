@@ -1,6 +1,6 @@
 {
-  "id": "20260519_025325",
+  "id": "20260519_025502",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "fix vol display + volMin 0.95->0.50"
+  "message": "add @trade stream for individual trade feed"
 }
