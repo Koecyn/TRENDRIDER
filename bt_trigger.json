@@ -1,6 +1,6 @@
 {
-  "id": "iter7_bias_10",
+  "id": "iter8_adx20",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.10",
-  "message": "iter7: minBias 0.10 — require clearer upside bias. watching if Sharpe keeps climbing or we cut too deep"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 20",
+  "message": "iter8: adxMin 22->20, minBias 0.05 locked. ADX blocking 30% — probe if slightly looser helps"
 }
