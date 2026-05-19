@@ -24,7 +24,7 @@ P = {
     'emaTrend':      50,
     'rsiOB':         80,
     'rsiOS':         28,
-    'volMin':        0.25,
+    'volMin':        0.0,
     'atrStop':       1.9,
     'atrTp':         2.8,
     'partialAt':     1.0,
