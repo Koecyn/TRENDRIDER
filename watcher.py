@@ -69,11 +69,15 @@ def git(args, check=False):
 def git_pull():
     r = git(["pull", "--rebase", "origin", BRANCH])
     if r.returncode != 0:
-        log(f"pull failed: {r.stderr.strip()}", R)
-        return False
+        # Diverged and can't rebase — hard reset to origin
+        log("rebase failed — hard-resetting to origin", Y)
+        git(["rebase", "--abort"])
+        git(["fetch", "origin", BRANCH])
+        git(["reset", "--hard", f"origin/{BRANCH}"])
+        log("Reset to origin — re-synced", G)
     changed = "Already up to date" not in r.stdout
     if changed:
-        log(f"Pulled new changes", G)
+        log("Pulled new changes", G)
     return True
 
 def git_push_data():
@@ -82,6 +86,8 @@ def git_push_data():
              f"live_data {datetime.now().strftime('%Y%m%d_%H%M%S')}"])
     if "nothing to commit" in (r.stdout + r.stderr):
         return
+    # Rebase onto origin before pushing to avoid non-fast-forward rejection
+    git(["pull", "--rebase", "origin", BRANCH])
     r2 = git(["push", "origin", BRANCH])
     if r2.returncode == 0:
         log("live_data.json pushed to repo", G)
