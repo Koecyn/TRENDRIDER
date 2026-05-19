@@ -1,6 +1,6 @@
 {
-  "id": "20260519_032828",
+  "id": "20260519_044500",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "load two-branch watcher"
+  "message": "volMin=0.0 — disable volume filter on thin Binance.US market"
 }
