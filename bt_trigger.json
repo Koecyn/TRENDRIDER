@@ -1,6 +1,6 @@
 {
-  "id": "iter9_adx24",
+  "id": "iter10_stop15",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 24",
-  "message": "iter9: adxMin 24 (tighter), minBias 0.05. adx20 was -0.28, adx22 was +1.95 — probe upper side"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.5",
+  "message": "iter10: atrStop 1.9->1.5. directional ATR already sizes to expected downswing — 1.5x might cut losers faster"
 }
