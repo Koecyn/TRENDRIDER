@@ -204,7 +204,7 @@ class TrendRider(Strategy):
             self._partial_taken = False
             self._bars_held     = 0
             self._atr_at_entry  = a
-            self.buy()
+            self.buy(size=0.99)  # 99% cash, spot only — no margin/leverage
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 def fetch_binance(days=30, start=None):
@@ -277,8 +277,9 @@ def main():
         if args.save_csv:
             save_csv(df, args.save_csv)
 
+    # margin=1.0 = spot only, no leverage, no borrowing
     bt = Backtest(df, TrendRider, cash=args.balance,
-                  commission=0.0, exclusive_orders=True)
+                  commission=0.0, margin=1.0, exclusive_orders=True)
 
     if args.optimize:
         print("Running optimization...")
