@@ -386,7 +386,7 @@ def main():
     ap.add_argument('--start',    type=str,   default=None,  help='Start date YYYY-MM-DD')
     ap.add_argument('--csv',      type=str,   default=None,  help='Load bars from CSV')
     ap.add_argument('--save-csv', type=str,   default=None,  help='Save fetched bars to CSV')
-    ap.add_argument('--balance',  type=float, default=10.0,  help='Starting balance USD')
+    ap.add_argument('--balance',  type=float, default=100.0, help='Starting balance USD (default 100)')
     ap.add_argument('--verbose',  action='store_true',       help='Print every entry/exit')
     ap.add_argument('--out-json', type=str,   default=None,  help='Save results JSON')
     args = ap.parse_args()

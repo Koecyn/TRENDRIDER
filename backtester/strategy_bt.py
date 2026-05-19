@@ -265,7 +265,7 @@ def main():
     ap.add_argument('--start',    type=str,   default=None)
     ap.add_argument('--csv',      type=str,   default=None)
     ap.add_argument('--save-csv', type=str,   default=None)
-    ap.add_argument('--balance',  type=float, default=10.0)
+    ap.add_argument('--balance',  type=float, default=100.0)
     ap.add_argument('--optimize', action='store_true')
     args = ap.parse_args()
 
