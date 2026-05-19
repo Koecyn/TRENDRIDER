@@ -204,16 +204,16 @@ class TrendRider(Strategy):
             self._partial_taken = False
             self._bars_held     = 0
             self._atr_at_entry  = a
-            self.buy(size=0.99)  # 99% cash, spot only — no margin/leverage
+            # size=0.99 means 99% of available equity (fractional, not units)
+            self.buy(size=0.99)
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 def fetch_binance(days=30, start=None):
     if not HAS_BINANCE:
         sys.exit("python-binance not installed: pip install python-binance")
     from datetime import datetime, timezone
-    api_key    = os.getenv("BINANCE_API_KEY", "")
-    api_secret = os.getenv("BINANCE_API_SECRET", "")
-    client     = Client(api_key, api_secret, tld='us')
+    # Public endpoint — no API keys needed for historical klines
+    client     = Client("", "", tld='us')
 
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     if start:
@@ -277,9 +277,19 @@ def main():
         if args.save_csv:
             save_csv(df, args.save_csv)
 
-    # margin=1.0 = spot only, no leverage, no borrowing
+    # backtesting.py rounds size to integers: round(fraction * equity / price)
+    # BTC at ~$76k with $100 balance: round(0.99 * 100 / 76000) = 0 → all orders cancelled
+    # Fix: scale prices so 1 unit ≈ $1, giving ~99 units per trade
+    med   = df['Close'].median()
+    scale = max(1, round(med / (args.balance / 100)))
+    if scale > 1:
+        df[['Open', 'High', 'Low', 'Close']] /= scale
+        print(f"Price scaled by 1/{scale} (median ${med:,.0f} → ${med/scale:.2f}) — "
+              f"~{round(0.99 * args.balance / (med / scale))} units per trade")
+
+    # margin=1.0 = spot only, flat cash, no leverage, no borrowing
     bt = Backtest(df, TrendRider, cash=args.balance,
-                  commission=0.0, margin=1.0, exclusive_orders=True)
+                  commission=0.0002, margin=1.0, exclusive_orders=True)
 
     if args.optimize:
         print("Running optimization...")
