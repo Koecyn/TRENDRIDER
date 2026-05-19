@@ -67,7 +67,7 @@ def git(args, check=False):
         capture_output=True, text=True)
 
 def git_pull():
-    r = git(["pull", "origin", BRANCH, "--ff-only"])
+    r = git(["pull", "--rebase", "origin", BRANCH])
     if r.returncode != 0:
         log(f"pull failed: {r.stderr.strip()}", R)
         return False
