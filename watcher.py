@@ -275,10 +275,10 @@ def main():
                 git_pull()
                 proc.start(bash_cmd)
 
+            git_pull()
+
             status = "running" if proc.running() else "stopped"
             write_data(status, last_id, proc.pid(), bash_cmd)
-
-            git_pull()
 
             trigger = fetch_trigger()
             if not trigger:
