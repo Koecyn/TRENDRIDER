@@ -1,6 +1,6 @@
 {
-  "id": "iter3",
+  "id": "iter4_downtrend_bias",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/strategy_bt.py --csv backtester/btc_30d.csv --balance 100 --adx-min 22 --atr-stop 0.8 --atr-tp 1.5 --partial-at 99 --max-hold 8",
-  "message": "iter3: tighter stop 0.8 (cut losers faster), same target 1.5, maxHold 8. R:R=1.875 needs only 35% win rate to profit"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100",
+  "message": "iter4: DOWNTREND variant with -1 to +1 ATR bias. stop/target sized to expected directional components. adxMin=22, minBias=-0.1"
 }

@@ -51,8 +51,8 @@ P = {
     'trailAtr':      0.65,
     'trailActivate': 0.25,
     'maxHoldBars':   25,
-    'adxMin':        18,
-    'minBias':       0.35,   # skip entry if upside < 35% of total ATR
+    'adxMin':        22,
+    'minBias':       -0.1,   # skip entry if bias < -0.1 (market too bearish to go long)
 }
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -95,36 +95,40 @@ def calc_atr(high, low, close, period=14):
         out[i+1] = (out[i] * (period-1) + trs[i]) / period
     return out
 
-def calc_atr_up(high, low, close, period=14):
-    """Upside ATR: Wilder-smoothed average of (high - prev_close) clamped ≥ 0."""
-    n = len(close)
-    out = np.zeros(n)
-    if n < 2:
-        return out
-    moves = np.zeros(n)
-    for i in range(1, n):
-        moves[i] = max(high[i] - close[i-1], 0.0)
-    if n <= period:
-        return out
-    out[period] = np.mean(moves[1:period+1])
-    for i in range(period+1, n):
-        out[i] = (out[i-1] * (period-1) + moves[i]) / period
-    return out
+def calc_atr_bias(high, low, close, period=14):
+    """
+    Directional ATR bias normalised to [-1, +1].
 
-def calc_atr_dn(high, low, close, period=14):
-    """Downside ATR: Wilder-smoothed average of (prev_close - low) clamped ≥ 0."""
+    bias = (atr_up - atr_dn) / (atr_up + atr_dn)
+
+    +1  price fails to reclaim lows  → buyers absorb every dip  → pure uptrend
+     0  symmetric up/down movement   → flat / ranging
+    -1  price fails to reclaim highs → sellers cap every bounce → pure downtrend
+
+    atr_up : Wilder-smoothed mean of max(high - prev_close, 0)
+    atr_dn : Wilder-smoothed mean of max(prev_close - low,  0)
+
+    Use with total ATR to get expected directional components:
+      expected_up = atr * (1 + bias) / 2
+      expected_dn = atr * (1 - bias) / 2
+    """
     n = len(close)
     out = np.zeros(n)
-    if n < 2:
+    if n <= period + 1:
         return out
-    moves = np.zeros(n)
-    for i in range(1, n):
-        moves[i] = max(close[i-1] - low[i], 0.0)
-    if n <= period:
-        return out
-    out[period] = np.mean(moves[1:period+1])
-    for i in range(period+1, n):
-        out[i] = (out[i-1] * (period-1) + moves[i]) / period
+    up = np.array([max(high[i] - close[i-1], 0.0) for i in range(1, n)])
+    dn = np.array([max(close[i-1] - low[i],  0.0) for i in range(1, n)])
+
+    au = np.mean(up[:period])
+    ad = np.mean(dn[:period])
+    tot = au + ad
+    out[period] = (au - ad) / tot if tot > 0 else 0.0
+
+    for i in range(period, len(up)):
+        au = (au * (period - 1) + up[i]) / period
+        ad = (ad * (period - 1) + dn[i]) / period
+        tot = au + ad
+        out[i + 1] = (au - ad) / tot if tot > 0 else 0.0
     return out
 
 def calc_adx(high, low, close, period=14):
@@ -180,15 +184,14 @@ class TrendRiderAdaptive(Strategy):
         l = np.array(self.data.Low)
         v = np.array(self.data.Volume)
 
-        self.ema5   = self.I(calc_ema,       c,       P['emaFast'],  name='EMA5')
-        self.ema13  = self.I(calc_ema,       c,       P['emaSlow'],  name='EMA13')
-        self.ema50  = self.I(calc_ema,       c,       P['emaTrend'], name='EMA50')
-        self.rsi    = self.I(calc_rsi,       c,                      name='RSI')
-        self.atr    = self.I(calc_atr,       h, l, c,                name='ATR')
-        self.atr_up = self.I(calc_atr_up,   h, l, c,                name='ATR_Up')
-        self.atr_dn = self.I(calc_atr_dn,   h, l, c,                name='ATR_Dn')
-        self.adx    = self.I(calc_adx,       h, l, c,                name='ADX')
-        self.vol    = self.I(calc_vol_ratio, v,                      name='VolRatio')
+        self.ema5     = self.I(calc_ema,      c,       P['emaFast'],  name='EMA5')
+        self.ema13    = self.I(calc_ema,      c,       P['emaSlow'],  name='EMA13')
+        self.ema50    = self.I(calc_ema,      c,       P['emaTrend'], name='EMA50')
+        self.rsi      = self.I(calc_rsi,      c,                      name='RSI')
+        self.atr      = self.I(calc_atr,      h, l, c,                name='ATR')
+        self.atr_bias = self.I(calc_atr_bias, h, l, c,                name='ATR_Bias')
+        self.adx      = self.I(calc_adx,      h, l, c,                name='ADX')
+        self.vol      = self.I(calc_vol_ratio,v,                       name='VolRatio')
 
         self._stop          = 0.0
         self._target        = 0.0
@@ -221,9 +224,15 @@ class TrendRiderAdaptive(Strategy):
         dx      = self.adx[-1]
         lo      = self.data.Low[-1]
 
-        a_up = self.atr_up[-1]
-        a_dn = self.atr_dn[-1]
         a    = self.atr[-1]
+        bias = self.atr_bias[-1]   # -1 (downtrend) → 0 (flat) → +1 (uptrend)
+
+        # Expected directional components from total ATR + bias
+        # atr * (1+bias)/2 = upward expected move   (0 when bias=-1, atr when bias=+1)
+        # atr * (1-bias)/2 = downward expected move  (atr when bias=-1, 0 when bias=+1)
+        FLOOR = 0.15   # never let either component drop below 15% of total ATR
+        a_up_exp = max(a * (1 + bias) / 2, a * FLOOR)
+        a_dn_exp = max(a * (1 - bias) / 2, a * FLOOR)
 
         self._d_bars += 1
 
@@ -235,7 +244,7 @@ class TrendRiderAdaptive(Strategy):
             riskUnit = abs(self._entry - self._stop)
             pnlR = (price - self._entry) / riskUnit if riskUnit > 0 else 0
             if pnlR >= self.trailActivate:
-                trail = price - self._atr_up_entry * self.trailAtr
+                trail = price - self._a_up_entry * self.trailAtr
                 self._stop = max(self._stop, trail)
 
             if not self._partial_taken and price >= self._partial_at:
@@ -247,23 +256,22 @@ class TrendRiderAdaptive(Strategy):
             return
 
         # ── Gate: indicators must be warmed up ───────────────────────────
-        if a <= 0 or a_up <= 0 or a_dn <= 0:
+        if a <= 0:
             self._d_no_atr += 1
             return
         if dx < self.adxMin:
             self._d_low_adx += 1
             return
 
-        # ── Regime bias — how much of ATR is upward? ─────────────────────
-        bias = a_up / (a_up + a_dn)   # 0 = all down, 1 = all up
+        # ── Regime gate — bias on [-1, +1] scale ─────────────────────────
         self._d_bias_sum += bias
         self._d_bias_n   += 1
 
-        if bias < self.minBias:
+        if bias < self.minBias:   # too bearish to go long
             self._d_low_bias += 1
             return
 
-        # ── Signal detection (same conditions as base strategy) ──────────
+        # ── Signal detection ──────────────────────────────────────────────
         setup = None
         if f <= s:
             self._d_ema_bear += 1
@@ -288,13 +296,13 @@ class TrendRiderAdaptive(Strategy):
 
         if setup:
             self._entry         = price
-            # Stop sized to downside volatility, target to upside volatility
-            self._stop          = price - a_dn * self.atrStop
-            self._target        = price + a_up * self.atrTp
-            self._partial_at    = price + a_up * self.partialAt
+            # Stop/target sized to expected directional components
+            self._stop          = price - a_dn_exp * self.atrStop
+            self._target        = price + a_up_exp * self.atrTp
+            self._partial_at    = price + a_up_exp * self.partialAt
             self._partial_taken = False
             self._bars_held     = 0
-            self._atr_up_entry  = a_up
+            self._a_up_entry    = a_up_exp
             self.buy(size=0.99)
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -354,9 +362,10 @@ def main():
         st = stats._strategy
         total = st._d_bars or 1
         avg_bias = st._d_bias_sum / st._d_bias_n if st._d_bias_n else 0
+        regime = ('uptrend'   if avg_bias >  0.1 else
+                  'downtrend' if avg_bias < -0.1 else 'ranging/flat')
         print(f"\n── Regime diagnostic ({st._d_bars} bars) ──")
-        print(f"  Avg ATR bias (0=down, 1=up): {avg_bias:.3f}  "
-              f"({'uptrend' if avg_bias > 0.55 else 'downtrend' if avg_bias < 0.45 else 'ranging'})")
+        print(f"  Avg ATR bias (-1=down, 0=flat, +1=up): {avg_bias:+.3f}  ({regime})")
         print(f"  In position:          {st._d_in_pos:6d}  ({100*st._d_in_pos/total:.1f}%)")
         print(f"  ATR not ready:        {st._d_no_atr:6d}  ({100*st._d_no_atr/total:.1f}%)")
         print(f"  ADX < {P['adxMin']} blocked:  {st._d_low_adx:6d}  ({100*st._d_low_adx/total:.1f}%)")
