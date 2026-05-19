@@ -86,10 +86,10 @@ def calc_atr(clist, period=14):
 
 def calc_vol_ratio(volumes, period=10):
     n   = len(volumes)
-    out = np.ones(n)
+    out = np.zeros(n)
     for i in range(period, n):
         avg    = float(np.mean(volumes[i - period:i]))
-        out[i] = volumes[i] / avg if avg > 0 else 1.0
+        out[i] = volumes[i] / avg if avg > 0 else 0.0
     return out
 
 def calc_adx(clist, period=14):
@@ -187,7 +187,7 @@ def get_signal(clist):
     if not above_tr:
         reasons.append(f'price ${cn["close"]:,.0f} < EMA50 ${tr:,.0f}')
     if not vol_ok:
-        reasons.append(f'Vol×{v:.3f} < {P["volMin"]}')
+        reasons.append(f'VolRatio {v:.3f}× < {P["volMin"]}')
     if cross_now and cross_prev:             # EMA_PULLBACK territory
         if r >= 55:
             reasons.append(f'RSI {r:.1f} ≥ 55 (pullback needs <55)')
@@ -328,9 +328,9 @@ def _draw_tty(state):
               f"T:{ind['trend']:,.2f}   ATR ${ind['atr']:.8f}   ADX {ind['adx']:.8f}")
         rc = G if ind['rsi'] < 40 else (R if ind['rsi'] > 65 else Z)
         print(f"  RSI {rc}{ind['rsi']:.8f}{Z}   "
-              f"Vol×{vc}{ind['vol']:.8f}{Z}  "
-              f"VolBTC {ind.get('raw_vol',0):.8f}  "
-              f"Avg {ind.get('vol_avg',0):.8f}")
+              f"VolRatio {vc}{ind['vol']:.3f}×{Z}  "
+              f"LiveBTC {ind.get('live_vol',0):.8f}  "
+              f"10BarAvg {ind.get('vol_avg',0):.8f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
 
@@ -408,9 +408,9 @@ def _draw_compact(state):
               f"T:{ind['trend']:,.2f}  "
               f"RSI {rc}{ind['rsi']:.8f}{Z}  "
               f"ATR ${ind['atr']:.8f}  ADX {ind['adx']:.8f}")
-        print(f"  Vol×{vc}{ind['vol']:.8f}{Z}  "
-              f"VolBTC {ind.get('raw_vol',0):.8f}  "
-              f"AvgBTC {ind.get('vol_avg',0):.8f}")
+        print(f"  VolRatio {vc}{ind['vol']:.3f}×{Z}  "
+              f"LiveBTC {ind.get('live_vol',0):.8f}  "
+              f"10BarAvg {ind.get('vol_avg',0):.8f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
 
@@ -497,6 +497,7 @@ def main():
     lock  = threading.Lock()
     state = {
         'price':         float(raw[-1][4]),
+        'live_vol':      0.0,
         'btc':           btc,
         'usdt':          usdt,
         'pos':           None,
@@ -531,7 +532,8 @@ def main():
             return
         k = msg['k']
         with lock:
-            state['price'] = float(k['c'])
+            state['price']    = float(k['c'])
+            state['live_vol'] = float(k['v'])   # live accumulating volume of current bar
             if k['x']:
                 candles.append({
                     'time':   k['t'], 'open':   float(k['o']),
@@ -572,6 +574,7 @@ def main():
                 closes  = np.array([c['close']  for c in clist])
                 volumes = np.array([c['volume'] for c in clist])
                 idx     = len(clist) - 1
+                vol_avg = float(np.mean(volumes[max(0, idx-10):idx]))
                 with lock:
                     state['ind'] = {
                         'fast':    calc_ema(closes, P['emaFast'])[idx],
@@ -579,11 +582,11 @@ def main():
                         'trend':   calc_ema(closes, P['emaTrend'])[idx],
                         'rsi':     calc_rsi(closes)[idx],
                         'atr':     calc_atr(clist)[idx],
-                        'vol':     calc_vol_ratio(volumes)[idx],
+                        'vol':     (state['live_vol'] / vol_avg if vol_avg > 0 else 0.0),
                         'adx':     calc_adx(clist)[idx],
                         'candles': len(clist),
-                        'raw_vol': float(volumes[idx]),      # actual BTC volume this bar
-                        'vol_avg': float(np.mean(volumes[max(0,idx-10):idx])),
+                        'live_vol': state['live_vol'],   # BTC traded in CURRENT open bar
+                        'vol_avg':  vol_avg,             # 10-bar avg of CLOSED bars
                     }
 
             # ── Position management ───────────────────────────────────────────
