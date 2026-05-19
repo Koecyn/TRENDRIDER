@@ -1,6 +1,6 @@
 {
-  "id": "iter13_mtf5",
+  "id": "iter14_mtf10",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 5 --max-hold 40",
-  "message": "iter13: MTF rolling range — stop=1m ATR, target=5-bar rolling range (~2-3x wider base)"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 10 --max-hold 60",
+  "message": "iter14: targetWindow=10 (10-min range) — iter13 Sharpe=3.94, probe if wider targets help"
 }
