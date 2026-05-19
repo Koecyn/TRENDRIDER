@@ -6,5 +6,4 @@ __pycache__/
 live_data.json
 state_snapshot.json
 data_archive.jsonl.gz
-*_backtest.html
-trendrider_backtest.html
+*.html
