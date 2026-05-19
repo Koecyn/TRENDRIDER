@@ -1,6 +1,6 @@
 {
-  "id": "iter6_min_bias",
+  "id": "iter7_bias_10",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05",
-  "message": "iter6: tune on stored btc_30d.csv. minBias 0.05 (sit out flat market). fixed --start+--days window cap committed too"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.10",
+  "message": "iter7: minBias 0.10 — require clearer upside bias. watching if Sharpe keeps climbing or we cut too deep"
 }
