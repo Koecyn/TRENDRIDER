@@ -61,17 +61,31 @@ def log(msg, col=Z):
     print(f"{col}[watcher {ts()}] {msg}{Z}", flush=True)
 
 # ── Git helpers ───────────────────────────────────────────────────────────────
+def git_unlock():
+    """Remove stale git lock files so operations don't hang."""
+    for lock in ["index.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD"]:
+        p = REPO_DIR / ".git" / lock
+        if p.exists():
+            p.unlink()
+            log(f"Removed stale {lock}", Y)
+    rebase_dir = REPO_DIR / ".git" / "rebase-merge"
+    if rebase_dir.exists():
+        import shutil
+        shutil.rmtree(rebase_dir, ignore_errors=True)
+        log("Cleared stale rebase-merge dir", Y)
+
 def git(args, check=False):
     return subprocess.run(
         ["git"] + args, cwd=REPO_DIR,
         capture_output=True, text=True)
 
 def git_pull():
+    git_unlock()
     r = git(["pull", "--rebase", "origin", BRANCH])
     if r.returncode != 0:
-        # Diverged and can't rebase — hard reset to origin
         log("rebase failed — hard-resetting to origin", Y)
         git(["rebase", "--abort"])
+        git_unlock()
         git(["fetch", "origin", BRANCH])
         git(["reset", "--hard", f"origin/{BRANCH}"])
         log("Reset to origin — re-synced", G)
@@ -81,12 +95,12 @@ def git_pull():
     return True
 
 def git_push_data():
+    git_unlock()
     git(["add", str(DATA_F)])
     r = git(["commit", "-m",
              f"live_data {datetime.now().strftime('%Y%m%d_%H%M%S')}"])
     if "nothing to commit" in (r.stdout + r.stderr):
         return
-    # Rebase onto origin before pushing to avoid non-fast-forward rejection
     git(["pull", "--rebase", "origin", BRANCH])
     r2 = git(["push", "origin", BRANCH])
     if r2.returncode == 0:
