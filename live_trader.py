@@ -22,7 +22,7 @@ P = {
     'emaFast':       5,
     'emaSlow':       13,
     'emaTrend':      50,
-    'rsiOB':         75,
+    'rsiOB':         80,
     'rsiOS':         28,
     'volMin':        0.25,
     'atrStop':       1.9,
