@@ -1,6 +1,6 @@
 {
-  "id": "iter18b_oos_win5",
+  "id": "iter19_ema200_march",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 5 --max-hold 40",
-  "message": "iter18b: March OOS window=5 — can smaller targets survive the March downtrend?"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 10 --max-hold 60",
+  "message": "iter19: March OOS with EMA200 slope gate — does blocking macro downtrend fix win rate?"
 }

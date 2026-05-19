@@ -39,6 +39,7 @@ P = {
     'emaFast':       5,
     'emaSlow':       13,
     'emaTrend':      50,
+    'emaMacro':      200,    # macro trend EMA; slope over 30 bars must be flat/rising
     'rsiOB':         80,
     'rsiOS':         28,
     'volMin':        0.0,
@@ -50,7 +51,7 @@ P = {
     'maxHoldBars':   60,     # 10-bar range needs room; 60 min max hold
     'adxMin':        22,
     'minBias':       0.05,   # skip entry if 1-min bias < minBias
-    'minBias60m':    0.0,    # skip entry if 60-min bias < this (0 = block hourly downtrends)
+    'minBias60m':    0.0,    # skip entry if 60-min bias < this
     'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR
 }
 
@@ -207,6 +208,7 @@ class TrendRiderAdaptive(Strategy):
         self.ema5     = self.I(calc_ema,      c,       P['emaFast'],  name='EMA5')
         self.ema13    = self.I(calc_ema,      c,       P['emaSlow'],  name='EMA13')
         self.ema50    = self.I(calc_ema,      c,       P['emaTrend'], name='EMA50')
+        self.ema200   = self.I(calc_ema,      c,       P['emaMacro'], name='EMA200')
         self.rsi      = self.I(calc_rsi,      c,                      name='RSI')
         self.adx      = self.I(calc_adx,      h, l, c,                name='ADX')
         self.vol      = self.I(calc_vol_ratio,v,                       name='VolRatio')
@@ -243,6 +245,7 @@ class TrendRiderAdaptive(Strategy):
         self._d_bias_sum    = 0.0
         self._d_bias_n      = 0
         self._d_low_bias60m = 0
+        self._d_slope_block = 0     # EMA200 declining over 30 bars
         self._d_ratio_sum   = 0.0   # rng_mtf / atr_1m ratio
         self._d_ratio_n     = 0
 
@@ -293,6 +296,15 @@ class TrendRiderAdaptive(Strategy):
             return
         if dx < self.adxMin:
             self._d_low_adx += 1
+            return
+
+        # ── Macro trend gate — EMA200 slope ──────────────────────────────
+        # Block entries when EMA200 is lower than 30 bars ago: the macro
+        # trend is in decline and counter-trend longs will likely fail.
+        e200 = self.ema200[-1]
+        e200_30 = self.ema200[-30] if len(self.ema200) > 30 else e200
+        if e200 < e200_30:
+            self._d_slope_block += 1
             return
 
         # ── Regime gate — 1-min bias ──────────────────────────────────────
@@ -444,6 +456,7 @@ def main():
         print(f"  ADX < {P['adxMin']} blocked:   {st._d_low_adx:6d}  ({100*st._d_low_adx/total:.1f}%)")
         print(f"  Bias1m < {P['minBias']} (bearish):  {st._d_low_bias:6d}  ({100*st._d_low_bias/total:.1f}%)")
         print(f"  Bias60m < {P['minBias60m']} (hrly dn):  {st._d_low_bias60m:6d}  ({100*st._d_low_bias60m/total:.1f}%)")
+        print(f"  EMA200 declining (30b): {st._d_slope_block:6d}  ({100*st._d_slope_block/total:.1f}%)")
         print(f"  EMA bear (f≤s):         {st._d_ema_bear:6d}  ({100*st._d_ema_bear/total:.1f}%)")
         print(f"  Price < EMA50:          {st._d_below_tr:6d}  ({100*st._d_below_tr/total:.1f}%)")
         print(f"  RSI/pullback blocked:   {st._d_rsi_block:6d}  ({100*st._d_rsi_block/total:.1f}%)")
