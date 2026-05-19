@@ -1,28 +1,25 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# start.sh — launch TRENDRIDER in a tmux split screen
-# Top pane  (30%): watcher.py  — git bridge, trigger commands
-# Bottom pane (70%): trader output — price, wallet, positions, trades
+# start.sh — TRENDRIDER tmux split screen
+# Top (30%): watcher.py — git bridge + trader output piped through
+# Bottom (70%): watcher log only if you want a second view
+# NOTE: trader output now prints directly through watcher — no tmux needed.
+# Run this if you want tmux. Otherwise just: python watcher.py
 
 SESSION="trendrider"
 REPO="$(cd "$(dirname "$0")" && pwd)"
 
-# Kill existing session cleanly
+# Get terminal size without tput (Termux compatible)
+read ROWS COLS < <(stty size 2>/dev/null || echo "50 180")
+ROWS=${ROWS:-50}
+COLS=${COLS:-180}
+
+# Kill any existing session
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
-# Create detached session sized to terminal
-tmux new-session -d -s "$SESSION" -x "$(tput cols)" -y "$(tput lines)"
+# New session with explicit size
+tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS"
 
-# Split: bottom pane gets 70%
-tmux split-window -v -p 70 -t "$SESSION"
+# Only one pane needed — trader output flows through watcher now
+tmux send-keys -t "$SESSION:0" "cd $REPO && python watcher.py" Enter
 
-# Top pane (0): watcher — git bridge
-tmux send-keys -t "$SESSION:0.0" \
-    "cd $REPO && python watcher.py" Enter
-
-# Bottom pane (1): trader log — tail -f so output scrolls naturally
-tmux send-keys -t "$SESSION:0.1" \
-    "cd $REPO && echo 'Waiting for trader to start…' && sleep 3 && tail -n 60 -f process.log" Enter
-
-# Focus top pane and attach
-tmux select-pane -t "$SESSION:0.0"
 tmux attach -t "$SESSION"

@@ -35,7 +35,7 @@ live_data.json  (watcher writes this, Claude reads this):
 }
 """
 
-import os, sys, time, json, subprocess, signal, shlex
+import os, sys, time, json, subprocess, signal, shlex, threading
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -118,21 +118,39 @@ def write_data(status, last_id, pid, bash_cmd):
 # ── Process manager ───────────────────────────────────────────────────────────
 class Proc:
     def __init__(self):
-        self.p       = None
-        self.logfile = None
-        self.cmd     = ""
+        self.p          = None
+        self.logfile    = None
+        self.cmd        = ""
+        self._reader    = None
+
+    def _pipe_output(self):
+        """Forward subprocess stdout+stderr to terminal AND logfile."""
+        try:
+            for line in self.p.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                if self.logfile:
+                    self.logfile.write(line)
+                    self.logfile.flush()
+        except Exception:
+            pass
 
     def start(self, bash_cmd):
         self.cmd     = bash_cmd
         self.logfile = open(LOG_F, "a")
-        self.logfile.write(f"\n\n{'='*60}\n"
-                           f"[{datetime.now().isoformat()}] START: {bash_cmd}\n"
-                           f"{'='*60}\n")
+        header = (f"\n\n{'='*60}\n"
+                  f"[{datetime.now().isoformat()}] START: {bash_cmd}\n"
+                  f"{'='*60}\n")
+        self.logfile.write(header)
         self.logfile.flush()
+        sys.stdout.write(header); sys.stdout.flush()
         self.p = subprocess.Popen(
             bash_cmd, shell=True, cwd=REPO_DIR,
-            stdout=self.logfile, stderr=self.logfile,
-            preexec_fn=os.setsid)          # own process group for clean kill
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=1, universal_newlines=True,
+            preexec_fn=os.setsid)
+        self._reader = threading.Thread(target=self._pipe_output, daemon=True)
+        self._reader.start()
         log(f"Started: {bash_cmd}  PID {self.p.pid}", G)
 
     def stop(self):
@@ -154,6 +172,9 @@ class Proc:
                 pass
             self.p.wait()
         finally:
+            if self._reader:
+                self._reader.join(timeout=3)
+                self._reader = None
             if self.logfile:
                 self.logfile.close()
                 self.logfile = None
