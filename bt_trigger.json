@@ -1,6 +1,6 @@
 {
-  "id": "iter1c",
+  "id": "iter1d",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/strategy_bt.py --days 30 --save-csv backtester/btc_30d.csv --balance 100 --adx-min 22 --atr-tp 3.5 --partial-at 99",
-  "message": "iter1c: fetch+reset instead of pull--rebase (no unstaged-changes error)"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/strategy_bt.py --days 7 --save-csv backtester/btc_7d.csv --balance 100 --adx-min 22 --atr-tp 3.5 --partial-at 99",
+  "message": "iter1d: 7 days only (10k bars vs 43k) — phone friendly. adxMin 22, atrTp 3.5, partial disabled"
 }

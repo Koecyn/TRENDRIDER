@@ -301,7 +301,7 @@ class TrendRiderAdaptive(Strategy):
 def main():
     ap = argparse.ArgumentParser(
         description='TRENDRIDER DOWNTREND — regime-adaptive directional ATR')
-    ap.add_argument('--days',     type=int,   default=30)
+    ap.add_argument('--days',     type=int,   default=7)
     ap.add_argument('--start',    type=str,   default=None)
     ap.add_argument('--csv',      type=str,   default=None)
     ap.add_argument('--save-csv', type=str,   default=None)
