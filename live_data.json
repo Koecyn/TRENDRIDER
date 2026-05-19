@@ -1,9 +1,9 @@
 {
-  "ts": "2026-05-18T14:18:12.133195",
+  "ts": "2026-05-18T18:03:39.459955",
   "status": "stopped",
   "last_command_id": "20260518_test_002",
   "pid": 0,
-  "bash": "python -c \"print('Hello from Claude')\"",
+  "bash": "",
   "tail": [
     "",
     "",
