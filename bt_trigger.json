@@ -1,6 +1,6 @@
 {
-  "id": "iter4_downtrend_bias",
+  "id": "iter5_validate",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100",
-  "message": "iter4: DOWNTREND variant with -1 to +1 ATR bias. stop/target sized to expected directional components. adxMin=22, minBias=-0.1"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --days 30 --start 2026-03-19 --save-csv backtester/btc_mar.csv --balance 100",
+  "message": "iter5: out-of-sample validation on March 19 - April 18 (different month, before the 30d training window)"
 }
