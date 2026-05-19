@@ -1,6 +1,6 @@
 {
-  "id": "20260519_023135",
+  "id": "20260519_023734",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "iter-1: signal diagnostics +  min_notional"
+  "message": "8-decimal precision + raw volume display"
 }
