@@ -310,6 +310,15 @@ def main():
                     break
 
                 if cmd in ("RUN", "RELOAD") and bash:
+                    # Pull latest code so parameter changes in strategy files take effect
+                    git_unlock()
+                    pr = git(["pull", "--rebase", "origin", CODE_BRANCH])
+                    if pr.returncode == 0:
+                        log("Code updated", G)
+                    else:
+                        git(["rebase", "--abort"])
+                        git(["reset", "--hard", f"origin/{CODE_BRANCH}"])
+                        log("Hard-reset to origin", Y)
                     result = runner.run(bash)
                     push_results({
                         "ts":         datetime.now().isoformat(),

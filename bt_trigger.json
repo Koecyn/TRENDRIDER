@@ -1,6 +1,6 @@
 {
-  "id": "init",
+  "id": "iter1_save_and_run",
   "command": "RUN",
-  "bash": "python backtester/strategy_bt.py --days 30 --balance 100",
-  "message": "Initial run — 30 days real Binance.US data"
+  "bash": "python backtester/strategy_bt.py --days 30 --save-csv backtester/btc_30d.csv --balance 100 --adx-min 22 --atr-tp 3.5 --partial-at 99",
+  "message": "iter1: adxMin 18→22 (fewer false signals), atrTp 2.8→3.5 (let winners run), partialAt 99 (disable partial — it was giving back gains on the remaining 50%)"
 }

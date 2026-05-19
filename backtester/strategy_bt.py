@@ -299,13 +299,42 @@ def save_csv(df, path):
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description='TRENDRIDER v7 — backtesting.py')
-    ap.add_argument('--days',     type=int,   default=30)
-    ap.add_argument('--start',    type=str,   default=None)
-    ap.add_argument('--csv',      type=str,   default=None)
-    ap.add_argument('--save-csv', type=str,   default=None)
-    ap.add_argument('--balance',  type=float, default=100.0)
-    ap.add_argument('--optimize', action='store_true')
+    ap.add_argument('--days',        type=int,   default=30)
+    ap.add_argument('--start',       type=str,   default=None)
+    ap.add_argument('--csv',         type=str,   default=None)
+    ap.add_argument('--save-csv',    type=str,   default=None)
+    ap.add_argument('--balance',     type=float, default=100.0)
+    ap.add_argument('--optimize',    action='store_true')
+    # Per-run parameter overrides — no code edit needed between iterations
+    ap.add_argument('--adx-min',     type=float, default=None)
+    ap.add_argument('--rsi-ob',      type=float, default=None)
+    ap.add_argument('--rsi-os',      type=float, default=None)
+    ap.add_argument('--atr-stop',    type=float, default=None)
+    ap.add_argument('--atr-tp',      type=float, default=None)
+    ap.add_argument('--partial-at',  type=float, default=None)
+    ap.add_argument('--trail-atr',   type=float, default=None)
+    ap.add_argument('--max-hold',    type=int,   default=None)
     args = ap.parse_args()
+
+    # Apply CLI overrides to P and Strategy class
+    overrides = {
+        'adxMin':      args.adx_min,
+        'rsiOB':       args.rsi_ob,
+        'rsiOS':       args.rsi_os,
+        'atrStop':     args.atr_stop,
+        'atrTp':       args.atr_tp,
+        'partialAt':   args.partial_at,
+        'trailAtr':    args.trail_atr,
+        'maxHoldBars': args.max_hold,
+    }
+    applied = {}
+    for k, v in overrides.items():
+        if v is not None:
+            P[k] = v
+            setattr(TrendRider, k if k != 'maxHoldBars' else 'maxHoldBars', v)
+            applied[k] = v
+    if applied:
+        print(f"Parameter overrides: {applied}")
 
     if args.csv:
         df = load_csv(args.csv)
