@@ -1,0 +1,6 @@
+{
+  "id": "init",
+  "command": "RUN",
+  "bash": "python backtester/strategy_bt.py --days 30 --balance 100",
+  "message": "Initial run — 30 days real Binance.US data"
+}

@@ -6,4 +6,6 @@ __pycache__/
 live_data.json
 state_snapshot.json
 data_archive.jsonl.gz
+bt_results.json
+backtester/bt_run.log
 *.html
