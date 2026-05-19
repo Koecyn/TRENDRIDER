@@ -24,7 +24,7 @@ P = {
     'emaTrend':      50,
     'rsiOB':         70,
     'rsiOS':         28,
-    'volMin':        0.95,
+    'volMin':        0.50,
     'atrStop':       1.9,
     'atrTp':         2.8,
     'partialAt':     1.0,
@@ -329,7 +329,7 @@ def _draw_tty(state):
         rc = G if ind['rsi'] < 40 else (R if ind['rsi'] > 65 else Z)
         print(f"  RSI {rc}{ind['rsi']:.8f}{Z}   "
               f"VolRatio {vc}{ind['vol']:.3f}×{Z}  "
-              f"LiveBTC {ind.get('live_vol',0):.8f}  "
+              f"LastBTC {ind.get('last_vol',0):.8f}  "
               f"10BarAvg {ind.get('vol_avg',0):.8f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
@@ -409,7 +409,7 @@ def _draw_compact(state):
               f"RSI {rc}{ind['rsi']:.8f}{Z}  "
               f"ATR ${ind['atr']:.8f}  ADX {ind['adx']:.8f}")
         print(f"  VolRatio {vc}{ind['vol']:.3f}×{Z}  "
-              f"LiveBTC {ind.get('live_vol',0):.8f}  "
+              f"LastBTC {ind.get('last_vol',0):.8f}  "
               f"10BarAvg {ind.get('vol_avg',0):.8f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
@@ -474,10 +474,6 @@ def main():
         candles.append({'time': k[0], 'open': float(k[1]), 'high': float(k[2]),
                         'low':  float(k[3]), 'close': float(k[4]), 'volume': float(k[5])})
     print(f"Loaded {len(candles)} candles — connecting WebSocket…", flush=True)
-    # Volume diagnostic: show what the REST klines actually have
-    vols = [float(k[5]) for k in raw[-20:]]
-    print(f"REST volume (last 20 bars): min={min(vols):.8f}  max={max(vols):.8f}  avg={sum(vols)/len(vols):.8f} BTC", flush=True)
-    print(f"REST volume raw tail: {[f'{v:.5f}' for v in vols[-5:]]}", flush=True)
     time.sleep(2)
 
     # Detect existing BTC position and cost basis
@@ -501,7 +497,6 @@ def main():
     lock  = threading.Lock()
     state = {
         'price':         float(raw[-1][4]),
-        'live_vol':      0.0,
         'btc':           btc,
         'usdt':          usdt,
         'pos':           None,
@@ -531,18 +526,12 @@ def main():
     last_bars  = [len(candles)]
     last_draw  = [0.0]
 
-    ws_ticks = [0]
-
     def on_kline(msg):
         if msg.get('e') == 'error':
             return
         k = msg['k']
-        ws_ticks[0] += 1
-        if ws_ticks[0] <= 5:
-            print(f"WS tick#{ws_ticks[0]}: price={k['c']} vol(BTC)={k['v']} closed={k['x']}", flush=True)
         with lock:
-            state['price']    = float(k['c'])
-            state['live_vol'] = float(k['v'])   # live accumulating volume of current bar
+            state['price'] = float(k['c'])
             if k['x']:
                 candles.append({
                     'time':   k['t'], 'open':   float(k['o']),
@@ -584,6 +573,7 @@ def main():
                 volumes = np.array([c['volume'] for c in clist])
                 idx     = len(clist) - 1
                 vol_avg = float(np.mean(volumes[max(0, idx-10):idx]))
+                vol_ratio = calc_vol_ratio(volumes)[idx]
                 with lock:
                     state['ind'] = {
                         'fast':    calc_ema(closes, P['emaFast'])[idx],
@@ -591,11 +581,11 @@ def main():
                         'trend':   calc_ema(closes, P['emaTrend'])[idx],
                         'rsi':     calc_rsi(closes)[idx],
                         'atr':     calc_atr(clist)[idx],
-                        'vol':     (state['live_vol'] / vol_avg if vol_avg > 0 else 0.0),
+                        'vol':     vol_ratio,
                         'adx':     calc_adx(clist)[idx],
                         'candles': len(clist),
-                        'live_vol': state['live_vol'],   # BTC traded in CURRENT open bar
-                        'vol_avg':  vol_avg,             # 10-bar avg of CLOSED bars
+                        'last_vol': float(volumes[idx]),   # last CLOSED bar BTC volume
+                        'vol_avg':  vol_avg,               # 10-bar avg of closed bars
                     }
 
             # ── Position management ───────────────────────────────────────────
