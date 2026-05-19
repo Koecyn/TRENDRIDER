@@ -313,6 +313,9 @@ def _draw_tty(state):
     status  = state.get('status', 'INIT')
     pending = state.get('pending_order')
     total   = usdt + btc * price
+    tqty    = state.get('trade_qty', 0.0)
+    tpx     = state.get('trade_px', 0.0)
+    tside   = state.get('trade_side', '---')
 
     print(f"{C}{'═'*W}{Z}")
     print(f"  {B}TRENDRIDER v7{Z}  BTCUSDT  {C}${price:,.2f}{Z}  "
@@ -327,10 +330,12 @@ def _draw_tty(state):
         print(f"  EMA {fc}{dir_arrow}{Z} F:{ind['fast']:,.2f}  S:{ind['slow']:,.2f}  "
               f"T:{ind['trend']:,.2f}   ATR ${ind['atr']:.8f}   ADX {ind['adx']:.8f}")
         rc = G if ind['rsi'] < 40 else (R if ind['rsi'] > 65 else Z)
+        sc = G if tside == 'BUY' else R
         print(f"  RSI {rc}{ind['rsi']:.8f}{Z}   "
               f"VolRatio {vc}{ind['vol']:.3f}×{Z}  "
               f"LastBTC {ind.get('last_vol',0):.8f}  "
               f"10BarAvg {ind.get('vol_avg',0):.8f}")
+        print(f"  Last trade: {sc}{tside}{Z}  {tqty:.8f} BTC @ ${tpx:,.2f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
 
@@ -392,6 +397,9 @@ def _draw_compact(state):
     now     = datetime.now().strftime('%H:%M:%S')
     wins    = sum(1 for t in trades if t['pnl'] > 0)
     net     = sum(t['pnl'] for t in trades)
+    tqty    = state.get('trade_qty', 0.0)
+    tpx     = state.get('trade_px', 0.0)
+    tside   = state.get('trade_side', '---')
 
     sep = f"{C}{'─'*W}{Z}"
     print(sep)
@@ -408,9 +416,11 @@ def _draw_compact(state):
               f"T:{ind['trend']:,.2f}  "
               f"RSI {rc}{ind['rsi']:.8f}{Z}  "
               f"ATR ${ind['atr']:.8f}  ADX {ind['adx']:.8f}")
+        sc = G if tside == 'BUY' else R
         print(f"  VolRatio {vc}{ind['vol']:.3f}×{Z}  "
               f"LastBTC {ind.get('last_vol',0):.8f}  "
-              f"10BarAvg {ind.get('vol_avg',0):.8f}")
+              f"10BarAvg {ind.get('vol_avg',0):.8f}  "
+              f"| Trade {sc}{tside}{Z} {tqty:.8f}BTC@${tpx:,.2f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
 
@@ -497,6 +507,9 @@ def main():
     lock  = threading.Lock()
     state = {
         'price':         float(raw[-1][4]),
+        'trade_qty':     0.0,
+        'trade_px':      0.0,
+        'trade_side':    '---',
         'btc':           btc,
         'usdt':          usdt,
         'pos':           None,
@@ -540,10 +553,19 @@ def main():
                 })
                 state['bars'] = len(candles)
 
+    def on_trade(msg):
+        if msg.get('e') == 'error':
+            return
+        with lock:
+            state['trade_qty'] = float(msg['q'])   # BTC amount of this single trade
+            state['trade_px']  = float(msg['p'])   # price it executed at
+            state['trade_side'] = 'BUY' if not msg.get('m') else 'SELL'  # m=True → maker=seller
+
     twm = ThreadedWebsocketManager(api_key=key, api_secret=sec, tld='us')
     twm.start()
     twm.start_kline_socket(callback=on_kline, symbol=SYMBOL,
                            interval=Client.KLINE_INTERVAL_1MINUTE)
+    twm.start_trade_socket(callback=on_trade, symbol=SYMBOL)
 
     last_bal_refresh = time.time()
 
