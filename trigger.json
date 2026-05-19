@@ -1,6 +1,6 @@
 {
-  "id": "20260519_030811",
+  "id": "20260519_031035",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "fresh restart after git resync"
+  "message": "rsiOB 70->75"
 }
