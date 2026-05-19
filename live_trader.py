@@ -474,6 +474,10 @@ def main():
         candles.append({'time': k[0], 'open': float(k[1]), 'high': float(k[2]),
                         'low':  float(k[3]), 'close': float(k[4]), 'volume': float(k[5])})
     print(f"Loaded {len(candles)} candles — connecting WebSocket…", flush=True)
+    # Volume diagnostic: show what the REST klines actually have
+    vols = [float(k[5]) for k in raw[-20:]]
+    print(f"REST volume (last 20 bars): min={min(vols):.8f}  max={max(vols):.8f}  avg={sum(vols)/len(vols):.8f} BTC", flush=True)
+    print(f"REST volume raw tail: {[f'{v:.5f}' for v in vols[-5:]]}", flush=True)
     time.sleep(2)
 
     # Detect existing BTC position and cost basis
@@ -527,10 +531,15 @@ def main():
     last_bars  = [len(candles)]
     last_draw  = [0.0]
 
+    ws_ticks = [0]
+
     def on_kline(msg):
         if msg.get('e') == 'error':
             return
         k = msg['k']
+        ws_ticks[0] += 1
+        if ws_ticks[0] <= 5:
+            print(f"WS tick#{ws_ticks[0]}: price={k['c']} vol(BTC)={k['v']} closed={k['x']}", flush=True)
         with lock:
             state['price']    = float(k['c'])
             state['live_vol'] = float(k['v'])   # live accumulating volume of current bar
