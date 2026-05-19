@@ -309,13 +309,31 @@ class TrendRiderAdaptive(Strategy):
 def main():
     ap = argparse.ArgumentParser(
         description='TRENDRIDER DOWNTREND — regime-adaptive directional ATR')
-    ap.add_argument('--days',     type=int,   default=7)
-    ap.add_argument('--start',    type=str,   default=None)
-    ap.add_argument('--csv',      type=str,   default=None)
-    ap.add_argument('--save-csv', type=str,   default=None)
-    ap.add_argument('--balance',  type=float, default=100.0)
-    ap.add_argument('--optimize', action='store_true')
+    ap.add_argument('--days',      type=int,   default=30)
+    ap.add_argument('--start',     type=str,   default=None)
+    ap.add_argument('--csv',       type=str,   default=None)
+    ap.add_argument('--save-csv',  type=str,   default=None)
+    ap.add_argument('--balance',   type=float, default=100.0)
+    ap.add_argument('--optimize',  action='store_true')
+    ap.add_argument('--adx-min',   type=float, default=None)
+    ap.add_argument('--min-bias',  type=float, default=None)
+    ap.add_argument('--atr-stop',  type=float, default=None)
+    ap.add_argument('--atr-tp',    type=float, default=None)
+    ap.add_argument('--max-hold',  type=int,   default=None)
+    ap.add_argument('--partial-at',type=float, default=None)
     args = ap.parse_args()
+
+    overrides = {'adxMin': args.adx_min, 'minBias': args.min_bias,
+                 'atrStop': args.atr_stop, 'atrTp': args.atr_tp,
+                 'maxHoldBars': args.max_hold, 'partialAt': args.partial_at}
+    applied = {}
+    for k, v in overrides.items():
+        if v is not None:
+            P[k] = v
+            setattr(TrendRiderAdaptive, k, v)
+            applied[k] = v
+    if applied:
+        print(f"Parameter overrides: {applied}")
 
     if args.csv:
         if load_csv is None:

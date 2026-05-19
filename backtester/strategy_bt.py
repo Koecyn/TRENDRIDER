@@ -258,12 +258,14 @@ def fetch_binance(days=30, start=None):
         from datetime import timezone
         start_ms = int(datetime.strptime(start, '%Y-%m-%d')
                        .replace(tzinfo=timezone.utc).timestamp() * 1000)
+        end_ms = min(start_ms + days * 86400 * 1000, now_ms)
     else:
+        end_ms   = now_ms
         start_ms = now_ms - days * 86400 * 1000
 
     print(f"Fetching BTCUSDT 1m from Binance.US...")
     raw, cur = [], start_ms
-    while cur < now_ms:
+    while cur < end_ms:
         chunk = client.get_klines(symbol='BTCUSDT', interval='1m',
                                   startTime=cur, limit=1000)
         if not chunk:
@@ -271,7 +273,7 @@ def fetch_binance(days=30, start=None):
         raw.extend(chunk)
         cur = chunk[-1][0] + 60000
         print(f"  {len(raw):,} bars...", end='\r', flush=True)
-    print(f"\n  {len(raw):,} bars fetched.")
+    print(f"  {len(raw):,} bars fetched.")
     return raw_to_df(raw)
 
 def raw_to_df(raw):
