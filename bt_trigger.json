@@ -1,6 +1,6 @@
 {
-  "id": "iter2",
+  "id": "iter3",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/strategy_bt.py --csv backtester/btc_30d.csv --balance 100 --adx-min 22 --atr-stop 1.0 --atr-tp 1.5 --partial-at 99 --max-hold 10",
-  "message": "iter2: scalp approach on 30d CSV. stop 1.0, target 1.5, maxHold 10, no partial. tight in/out for bear micro-bounces"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/strategy_bt.py --csv backtester/btc_30d.csv --balance 100 --adx-min 22 --atr-stop 0.8 --atr-tp 1.5 --partial-at 99 --max-hold 8",
+  "message": "iter3: tighter stop 0.8 (cut losers faster), same target 1.5, maxHold 8. R:R=1.875 needs only 35% win rate to profit"
 }
