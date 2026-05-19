@@ -1,6 +1,6 @@
 {
-  "id": "iter1d",
+  "id": "iter2",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/strategy_bt.py --days 7 --save-csv backtester/btc_7d.csv --balance 100 --adx-min 22 --atr-tp 3.5 --partial-at 99",
-  "message": "iter1d: 7 days only (10k bars vs 43k) — phone friendly. adxMin 22, atrTp 3.5, partial disabled"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/strategy_bt.py --csv backtester/btc_30d.csv --balance 100 --adx-min 22 --atr-stop 1.0 --atr-tp 1.5 --partial-at 99 --max-hold 10",
+  "message": "iter2: scalp approach on 30d CSV. stop 1.0, target 1.5, maxHold 10, no partial. tight in/out for bear micro-bounces"
 }
