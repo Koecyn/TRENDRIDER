@@ -4,9 +4,10 @@ live_trader.py — TRENDRIDER Micro-Trend Scalper v7
 Binance.US | WebSocket 1-min klines | MAKER-only entries | Long-only
 EMA_CROSS + EMA_PULLBACK | Partial profit + trailing stop
 """
-import os, sys, time, math, threading
+import os, sys, time, math, threading, json
 from datetime import datetime
 from collections import deque
+from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 from binance.client import Client
@@ -83,6 +84,14 @@ def calc_atr(clist, period=14):
         else:
             out[i] = (out[i-1] * (period - 1) + tr) / period
     return out
+
+_SNAP_F = Path(__file__).parent / "state_snapshot.json"
+
+def _to_json(v):
+    if hasattr(v, 'item'): return v.item()
+    if isinstance(v, dict): return {k: _to_json(x) for k, x in v.items()}
+    if isinstance(v, list): return [_to_json(x) for x in v]
+    return v
 
 def calc_vol_ratio(volumes, period=10):
     n   = len(volumes)
@@ -761,6 +770,12 @@ def main():
                             'ind':           dict(state['ind']),
                             'pending_order': dict(state['pending_order']) if state['pending_order'] else None}
                 draw(snap)
+                try:
+                    out = _to_json(snap)
+                    out['ts'] = datetime.now().isoformat()
+                    _SNAP_F.write_text(json.dumps(out))
+                except Exception:
+                    pass
 
     except KeyboardInterrupt:
         pass

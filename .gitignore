@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 .env
 live_data.json
+state_snapshot.json
+data_archive.jsonl.gz

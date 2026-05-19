@@ -10,7 +10,7 @@ Because only one side ever writes to each branch, fast-forward push
 always succeeds and divergence is impossible.
 """
 
-import os, sys, time, json, subprocess, signal, threading
+import os, sys, time, json, gzip, subprocess, signal, threading
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -25,6 +25,8 @@ BRANCH      = CODE_BRANCH          # kept for compat
 GITHUB_USER = "Koecyn"
 TRIGGER_F   = REPO_DIR / "trigger.json"
 DATA_F      = REPO_DIR / "live_data.json"
+SNAP_F      = REPO_DIR / "state_snapshot.json"
+ARCHIVE_F   = REPO_DIR / "data_archive.jsonl.gz"
 LOG_F       = REPO_DIR / "process.log"
 POLL_S      = 15
 STOP_WAIT_S = 50
@@ -81,15 +83,24 @@ def git_push_data():
     if not DATA_F.exists():
         return
 
-    # Write blob
+    # Hash live_data.json
     r = git(["hash-object", "-w", str(DATA_F)])
     blob = r.stdout.strip()
     if not blob:
         log("hash-object failed", R)
         return
 
-    # Build tree with one file
-    r = git(["mktree"], stdin=f"100644 blob {blob}\tlive_data.json\n")
+    tree_entries = f"100644 blob {blob}\tlive_data.json\n"
+
+    # Hash archive if it exists
+    if ARCHIVE_F.exists():
+        r2 = git(["hash-object", "-w", str(ARCHIVE_F)])
+        ab = r2.stdout.strip()
+        if ab:
+            tree_entries += f"100644 blob {ab}\tdata_archive.jsonl.gz\n"
+
+    # Build tree
+    r = git(["mktree"], stdin=tree_entries)
     tree = r.stdout.strip()
     if not tree:
         log("mktree failed", R)
@@ -140,6 +151,13 @@ def read_trigger():
 
 # ── Data writer ───────────────────────────────────────────────────────────────
 def write_data(status, last_id, pid, bash_cmd):
+    snap = {}
+    if SNAP_F.exists():
+        try:
+            snap = json.loads(SNAP_F.read_text())
+        except Exception:
+            pass
+
     tail = []
     if LOG_F.exists():
         try:
@@ -147,15 +165,26 @@ def write_data(status, last_id, pid, bash_cmd):
             tail  = lines[-30:]
         except Exception:
             pass
+
     payload = {
         "ts":              datetime.now().isoformat(),
         "status":          status,
         "last_command_id": last_id,
         "pid":             pid,
         "bash":            bash_cmd,
+        "snap":            snap,
         "tail":            tail,
     }
     DATA_F.write_text(json.dumps(payload, indent=2))
+
+    # Append to compressed archive
+    if snap:
+        try:
+            record = json.dumps({"ts": payload["ts"], "status": status, **snap}) + "\n"
+            with gzip.open(ARCHIVE_F, "ab") as f:
+                f.write(record.encode())
+        except Exception as e:
+            log(f"archive append failed: {e}", Y)
 
 # ── Process manager ───────────────────────────────────────────────────────────
 class Proc:
