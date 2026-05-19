@@ -1,6 +1,6 @@
 {
-  "id": "iter10_stop15",
+  "id": "iter11_stop12",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.5",
-  "message": "iter10: atrStop 1.9->1.5. directional ATR already sizes to expected downswing — 1.5x might cut losers faster"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.2",
+  "message": "iter11: atrStop 1.2 — probing if tighter directional stop keeps improving Sharpe past 2.0"
 }
