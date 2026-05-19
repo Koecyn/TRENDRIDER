@@ -1,6 +1,6 @@
 {
-  "id": "20260519_011635",
+  "id": "20260519_012513",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "deploy v7 \u2014 WebSocket EMA_CROSS + EMA_PULLBACK"
+  "message": "v7 WebSocket + split-screen display"
 }
