@@ -1,6 +1,6 @@
 {
-  "id": "20260519_031035",
+  "id": "20260519_031207",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "rsiOB 70->75"
+  "message": "volMin 0.50->0.25"
 }
