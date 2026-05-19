@@ -1,6 +1,6 @@
 {
-  "id": "20260519_031319",
+  "id": "20260519_031907",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "rsiOB 75->80"
+  "message": "unstick git push"
 }
