@@ -2,8 +2,7 @@
 """
 live_trader.py — TRENDRIDER Micro-Trend Scalper v7
 Binance.US | WebSocket 1-min klines | MAKER-only entries | Long-only
-Faithful Python port of strategy.js (EMA_CROSS + EMA_PULLBACK active;
-EMA_CROSS_S / DIST_TOP disabled — shorts not enabled on account)
+EMA_CROSS + EMA_PULLBACK | Partial profit + trailing stop
 """
 import os, sys, time, math, threading
 from datetime import datetime
@@ -15,6 +14,8 @@ from binance import ThreadedWebsocketManager
 from binance.exceptions import BinanceAPIException
 
 load_dotenv()
+
+IS_TTY = sys.stdout.isatty()   # False when run as subprocess → compact output
 
 # ── Strategy parameters (ported 1:1 from strategy.js PARAMS) ─────────────────
 P = {
@@ -34,12 +35,12 @@ P = {
     'adxMin':        18,
 }
 
-SYMBOL       = "BTCUSDT"
-EQUITY_PCT   = 0.95
-TAKER_FEE    = 0.00020
-SELL_WINDOW  = 30
+SYMBOL        = "BTCUSDT"
+EQUITY_PCT    = 0.95
+TAKER_FEE     = 0.00020
+SELL_WINDOW   = 30
 ORDER_TIMEOUT = 45
-W            = 70
+W             = 70
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
 
@@ -161,9 +162,7 @@ def get_signal(clist):
     base = {'atr': a, 'rsi': r, 'adx': dx, 'vol': v,
             'time': cn['time'], 'barsHeld': 0, 'partialTaken': False}
 
-    # EMA_CROSS — 2-bar confirmed bullish cross
-    if (f > s and f1 <= s1 and
-            cn['close'] > tr and
+    if (f > s and f1 <= s1 and cn['close'] > tr and
             v >= P['volMin'] and r < P['rsiOB']):
         return {**base, 'setup': 'EMA_CROSS', 'direction': 'LONG',
                 'entry':    cn['close'],
@@ -171,9 +170,7 @@ def get_signal(clist):
                 'target':   cn['close'] + a * P['atrTp'],
                 'partialAt': cn['close'] + a * P['partialAt']}
 
-    # EMA_PULLBACK — dip to fast EMA after established cross
-    if (f > s and f1 > s1 and
-            cn['close'] > tr and
+    if (f > s and f1 > s1 and cn['close'] > tr and
             cn['low'] <= f * 1.002 and cn['close'] > f and
             v >= P['volMin'] and P['rsiOS'] < r < 55):
         return {**base, 'setup': 'EMA_PULLBACK', 'direction': 'LONG',
@@ -250,7 +247,7 @@ def sell_best(client, flt, qty, entry_price, label=""):
                 quantity=qty_s, price=fmt_px(limit_px, tick))
             order_id = o['orderId']
         except BinanceAPIException as e:
-            print(f"{R}[{label}] sell maker err: {e.message}{Z}", flush=True)
+            print(f"{R}[{label}] sell err: {e.message}{Z}", flush=True)
             time.sleep(1)
             continue
 
@@ -264,7 +261,6 @@ def sell_best(client, flt, qty, entry_price, label=""):
                 fill_px = float(o['cummulativeQuoteQty']) / float(o['executedQty'])
                 return fill_px, float(o['executedQty']), 'MAKER'
 
-        # Timed out — market only if profit beats fee
         _, ask = best_bid_ask(client)
         fee_cost = ask * qty * TAKER_FEE
         profit   = (ask - entry_price) * qty
@@ -275,8 +271,8 @@ def sell_best(client, flt, qty, entry_price, label=""):
                 o = client.order_market_sell(symbol=SYMBOL, quantity=qty_s)
                 fills = o.get('fills', [])
                 if fills:
-                    tq  = sum(float(f['qty'])   for f in fills)
-                    wp  = sum(float(f['price']) * float(f['qty']) for f in fills) / tq
+                    tq = sum(float(f['qty'])   for f in fills)
+                    wp = sum(float(f['price']) * float(f['qty']) for f in fills) / tq
                     return wp, tq, 'MARKET'
             except BinanceAPIException as e:
                 print(f"{R}Market sell err: {e.message}{Z}", flush=True)
@@ -284,67 +280,147 @@ def sell_best(client, flt, qty, entry_price, label=""):
         deadline = time.time() + SELL_WINDOW
         print(f"{Y}[{label}] not profitable for market — re-placing maker{Z}", flush=True)
 
-# ── Dashboard ─────────────────────────────────────────────────────────────────
-def draw(state):
+# ── Dashboard — full screen (TTY) ─────────────────────────────────────────────
+def _draw_tty(state):
     sys.stdout.write('\033[2J\033[H')
-    price  = state.get('price', 0)
-    btc    = state.get('btc', 0.0)
-    usdt   = state.get('usdt', 0.0)
-    pos    = state.get('pos')
-    trades = state.get('trades', [])
-    ind    = state.get('ind', {})
-    bars   = state.get('bars', 0)
-    status = state.get('status', 'INIT')
-    total  = usdt + btc * price
+    price   = state.get('price', 0)
+    btc     = state.get('btc', 0.0)
+    usdt    = state.get('usdt', 0.0)
+    pos     = state.get('pos')
+    trades  = state.get('trades', [])
+    ind     = state.get('ind', {})
+    bars    = state.get('bars', 0)
+    status  = state.get('status', 'INIT')
+    pending = state.get('pending_order')
+    total   = usdt + btc * price
 
     print(f"{C}{'═'*W}{Z}")
     print(f"  {B}TRENDRIDER v7{Z}  BTCUSDT  {C}${price:,.2f}{Z}  "
           f"{datetime.now().strftime('%H:%M:%S')}  [{status}]")
-    print(f"  Wallet  {G}${usdt:.4f} USDT{Z}  {btc:.6f} BTC  "
-          f"Total ${total:.4f}")
+    print(f"  Wallet  {G}${usdt:.4f} USDT{Z}  {btc:.6f} BTC  Total ${total:.4f}")
     print(f"{C}{'─'*W}{Z}")
 
     if ind:
         fc = G if ind.get('fast', 0) > ind.get('slow', 0) else R
-        print(f"  EMA  {fc}F{ind['fast']:,.2f}{Z} / S{ind['slow']:,.2f} / "
-              f"T{ind['trend']:,.2f}   ATR ${ind['atr']:.2f}   "
+        dir_arrow = '↑' if ind.get('fast', 0) > ind.get('slow', 0) else '↓'
+        print(f"  EMA {fc}{dir_arrow}{Z} F:{ind['fast']:,.0f}  S:{ind['slow']:,.0f}  "
+              f"T:{ind['trend']:,.0f}   ATR ${ind['atr']:.2f}   "
               f"ADX {ind['adx']:.1f}   Vol×{ind['vol']:.2f}")
         rc = G if ind['rsi'] < 40 else (R if ind['rsi'] > 65 else Z)
-        print(f"  RSI {rc}{ind['rsi']:.1f}{Z}   "
-              f"Candles {ind.get('candles', bars)}/{bars}")
+        print(f"  RSI {rc}{ind['rsi']:.1f}{Z}   Candles {ind.get('candles', bars)}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
 
     print(f"{C}{'─'*W}{Z}")
 
+    # Pending order
+    if pending:
+        elapsed = time.time() - pending.get('placed_at', time.time())
+        remain  = max(0, ORDER_TIMEOUT - elapsed)
+        print(f"  {Y}⏳ PENDING BUY  LIMIT_MAKER @ ${pending['px']:,.2f}  "
+              f"qty {pending['qty']:.6f}  ({remain:.0f}s){Z}")
+        print(f"{C}{'─'*W}{Z}")
+
+    # Active position
     if pos:
         held = pos.get('barsHeld', 0)
         qty  = pos.get('qty', 0.0)
         unr  = (price - pos['entry']) * qty
         uc   = G if unr >= 0 else R
-        pt   = '✓ partial taken' if pos.get('partialTaken') else '○ partial pending'
-        print(f"  {G}▶ POSITION{Z}  {pos['setup']}  "
+        pt   = f"{G}✓ partial taken{Z}" if pos.get('partialTaken') else f"{Y}○ partial pending{Z}"
+        stop_dist = price - pos['stop']
+        tgt_dist  = pos['target'] - price
+        print(f"  {G}▶ POSITION{Z}  {B}{pos['setup']}{Z}  "
               f"entry ${pos['entry']:,.2f}  qty {qty:.6f}")
-        print(f"    stop ${pos['stop']:,.2f}  "
-              f"target ${pos['target']:,.2f}  "
+        print(f"    stop ${pos['stop']:,.2f} (${stop_dist:.2f} away)  "
+              f"target ${pos['target']:,.2f} (${tgt_dist:.2f} away)  "
               f"bars {held}/{P['maxHoldBars']}")
         print(f"    unrealized {uc}{unr:+.5f}{Z}  {pt}")
-    else:
+    elif not pending:
         print(f"  {Y}{state.get('sig_msg', 'scanning…')}{Z}")
 
     print(f"{C}{'─'*W}{Z}")
+
+    # Trade history
     wins = sum(1 for t in trades if t['pnl'] > 0)
     net  = sum(t['pnl'] for t in trades)
     nc   = G if net >= 0 else R
     print(f"  Trades {len(trades)}  Wins {wins}  Net {nc}{net:+.5f}{Z}")
-    if trades:
-        t  = trades[-1]
+    for t in reversed(trades[-3:]):
         tc = G if t['pnl'] > 0 else R
-        print(f"  Last [{t['setup']}] {t['outcome']}  "
+        print(f"  [{t['setup']}] {t['outcome']}  "
               f"${t['entry']:,.2f}→${t['exit']:,.2f}  "
               f"{tc}{t['pnl']:+.5f}{Z}  via {t.get('via','?')}")
     print(f"{C}{'═'*W}{Z}")
     sys.stdout.flush()
+
+# ── Dashboard — compact scrolling (subprocess / tail -f) ─────────────────────
+def _draw_compact(state):
+    price   = state.get('price', 0)
+    btc     = state.get('btc', 0.0)
+    usdt    = state.get('usdt', 0.0)
+    pos     = state.get('pos')
+    trades  = state.get('trades', [])
+    ind     = state.get('ind', {})
+    bars    = state.get('bars', 0)
+    status  = state.get('status', '')
+    pending = state.get('pending_order')
+    total   = usdt + btc * price
+    now     = datetime.now().strftime('%H:%M:%S')
+    wins    = sum(1 for t in trades if t['pnl'] > 0)
+    net     = sum(t['pnl'] for t in trades)
+
+    sep = f"{C}{'─'*W}{Z}"
+    print(sep)
+    print(f"  {B}TRENDRIDER v7{Z}  {now}  [{status}]")
+    print(f"  BTC ${price:,.2f}  |  "
+          f"Wallet {G}${usdt:.4f} USDT{Z}  {btc:.6f} BTC  Total ${total:.4f}")
+
+    if ind:
+        ar = '↑' if ind.get('fast', 0) > ind.get('slow', 0) else '↓'
+        fc = G if ar == '↑' else R
+        rc = G if ind['rsi'] < 40 else (R if ind['rsi'] > 65 else Z)
+        print(f"  EMA{fc}{ar}{Z} F:{ind['fast']:,.0f} S:{ind['slow']:,.0f} "
+              f"T:{ind['trend']:,.0f}  "
+              f"RSI {rc}{ind['rsi']:.1f}{Z}  ATR ${ind['atr']:.1f}  "
+              f"ADX {ind['adx']:.1f}  Vol×{ind['vol']:.2f}")
+    else:
+        print(f"  Warming up… {bars}/55 candles needed")
+
+    if pending:
+        elapsed = time.time() - pending.get('placed_at', time.time())
+        remain  = max(0, ORDER_TIMEOUT - elapsed)
+        print(f"  {Y}⏳ PENDING BUY  @ ${pending['px']:,.2f}  "
+              f"qty {pending['qty']:.6f}  ({remain:.0f}s remaining){Z}")
+
+    if pos:
+        qty  = pos.get('qty', 0.0)
+        unr  = (price - pos['entry']) * qty
+        uc   = G if unr >= 0 else R
+        pt   = '✓partial' if pos.get('partialTaken') else '○partial'
+        print(f"  {G}▶ {pos['setup']}{Z}  entry ${pos['entry']:,.2f}  "
+              f"stop ${pos['stop']:,.2f}  target ${pos['target']:,.2f}  "
+              f"bars {pos.get('barsHeld',0)}/{P['maxHoldBars']}  "
+              f"PnL {uc}{unr:+.5f}{Z}  {pt}")
+    elif not pending:
+        print(f"  {Y}FLAT — {state.get('sig_msg','scanning…')}{Z}")
+
+    nc = G if net >= 0 else R
+    print(f"  Trades {len(trades)}  Wins {wins}  Net {nc}{net:+.5f}{Z}", end="")
+    if trades:
+        t  = trades[-1]
+        tc = G if t['pnl'] > 0 else R
+        print(f"   last [{t['setup']}] {t['outcome']} "
+              f"${t['entry']:,.0f}→${t['exit']:,.0f} "
+              f"{tc}{t['pnl']:+.5f}{Z}", end="")
+    print()
+    sys.stdout.flush()
+
+def draw(state):
+    if IS_TTY:
+        _draw_tty(state)
+    else:
+        _draw_compact(state)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
@@ -356,40 +432,36 @@ def main():
     client = Client(key, sec, tld='us')
     flt    = get_filters(client)
 
-    print(f"{B}TRENDRIDER v7 starting…{Z}")
+    print(f"{B}TRENDRIDER v7 starting…{Z}", flush=True)
     cancel_open_orders(client)
     btc, usdt = get_balances(client)
-    print(f"Balance: ${usdt:.4f} USDT  {btc:.6f} BTC")
+    print(f"Balance: ${usdt:.4f} USDT  {btc:.6f} BTC", flush=True)
     print(f"Filters: step={flt['step']}  tick={flt['tick']}  "
-          f"min_notional=${flt['min_notional']}")
+          f"min_notional=${flt['min_notional']}", flush=True)
 
-    # Pre-fill 200 1-min candles via REST
-    print("Fetching 200 1-min klines…")
+    print("Fetching 200 1-min klines…", flush=True)
     raw     = client.get_klines(symbol=SYMBOL,
                                 interval=Client.KLINE_INTERVAL_1MINUTE, limit=200)
     candles = deque(maxlen=300)
     for k in raw:
         candles.append({'time': k[0], 'open': float(k[1]), 'high': float(k[2]),
                         'low':  float(k[3]), 'close': float(k[4]), 'volume': float(k[5])})
-    print(f"Loaded {len(candles)} candles — connecting WebSocket…")
+    print(f"Loaded {len(candles)} candles — connecting WebSocket…", flush=True)
     time.sleep(2)
 
-    # Detect existing BTC position from open orders / last trade
+    # Detect existing BTC position and cost basis
     existing_entry = None
     if btc >= flt['min_qty']:
         try:
             my_trades = client.get_my_trades(symbol=SYMBOL, limit=50)
-            bought = sold = 0.0
-            cost   = 0.0
+            bought = sold = cost = 0.0
             for t in reversed(my_trades):
                 q = float(t['qty'])
                 if t['isBuyer']:
-                    bought += q
-                    cost   += q * float(t['price'])
+                    bought += q; cost += q * float(t['price'])
                 else:
                     sold += q
-                net_q = bought - sold
-                if net_q >= btc * 0.95:
+                if (bought - sold) >= btc * 0.95:
                     existing_entry = cost / bought if bought > 0 else None
                     break
         except BinanceAPIException:
@@ -397,30 +469,36 @@ def main():
 
     lock  = threading.Lock()
     state = {
-        'price':   float(raw[-1][4]),
-        'btc':     btc, 'usdt': usdt,
-        'pos':     None, 'trades': [],
-        'ind':     {}, 'bars': len(candles),
-        'status':  'STARTING', 'sig_msg': 'Scanning…',
+        'price':         float(raw[-1][4]),
+        'btc':           btc,
+        'usdt':          usdt,
+        'pos':           None,
+        'trades':        [],
+        'ind':           {},
+        'bars':          len(candles),
+        'status':        'STARTING',
+        'sig_msg':       'Scanning…',
+        'pending_order': None,
     }
 
     if btc >= flt['min_qty'] and btc * float(raw[-1][4]) >= flt['min_notional']:
         ep = existing_entry or float(raw[-1][4])
+        atr_est = 50.0
         state['pos'] = {
             'setup': 'EXISTING', 'direction': 'LONG',
             'entry': ep, 'qty': btc,
-            'stop':     ep - P['atrStop'] * 50,
-            'target':   ep + P['atrTp']   * 50,
-            'partialAt': ep + P['partialAt'] * 50,
-            'atr': 50.0, 'rsi': 50.0, 'adx': 20.0, 'vol': 1.0,
+            'stop':      ep - P['atrStop']  * atr_est,
+            'target':    ep + P['atrTp']    * atr_est,
+            'partialAt': ep + P['partialAt']* atr_est,
+            'atr': atr_est, 'rsi': 50.0, 'adx': 20.0, 'vol': 1.0,
             'barsHeld': 0, 'partialTaken': False,
         }
-        print(f"{Y}Existing BTC detected — entry est. ${ep:,.2f}{Z}")
+        print(f"{Y}Existing BTC detected — entry est. ${ep:,.2f}{Z}", flush=True)
 
-    stop_event  = threading.Event()
-    last_bars   = [len(candles)]   # mutable for closure
+    stop_event = threading.Event()
+    last_bars  = [len(candles)]
+    last_draw  = [0.0]
 
-    # ── WebSocket kline handler ───────────────────────────────────────────────
     def on_kline(msg):
         if msg.get('e') == 'error':
             return
@@ -453,18 +531,16 @@ def main():
                 bar_count = state['bars']
                 clist     = list(candles)
 
-            # Balance refresh every 30s
+            # Refresh balances every 30s
             if time.time() - last_bal_refresh > 30:
                 try:
                     b, u = get_balances(client)
-                    with lock:
-                        state['btc']  = b
-                        state['usdt'] = u
+                    with lock: state['btc'] = b; state['usdt'] = u
                     last_bal_refresh = time.time()
                 except BinanceAPIException:
                     pass
 
-            # Indicator snapshot for display
+            # Recompute indicators
             if len(clist) >= 55:
                 closes  = np.array([c['close']  for c in clist])
                 volumes = np.array([c['volume'] for c in clist])
@@ -486,16 +562,13 @@ def main():
                 riskUnit = abs(pos['entry'] - pos['stop'])
                 pnlR     = (price - pos['entry']) / riskUnit if riskUnit > 0 else 0
 
-                # Update trailing stop
                 stop = pos['stop']
                 if pnlR >= P['trailActivate']:
                     trail = price - pos['atr'] * P['trailAtr']
                     stop  = max(stop, trail)
                     with lock:
-                        if state['pos']:
-                            state['pos']['stop'] = stop
+                        if state['pos']: state['pos']['stop'] = stop
 
-                # Check exit conditions
                 outcome = None
                 if price <= stop:
                     outcome = 'STOPPED'
@@ -514,18 +587,16 @@ def main():
                             state['trades'].append({
                                 'setup': pos['setup'], 'outcome': outcome,
                                 'entry': pos['entry'], 'exit': fp,
-                                'pnl':   pnl,          'via':  via,
+                                'pnl': pnl, 'via': via,
                             })
                             state['pos']    = None
                             state['status'] = 'RUNNING'
                         b, u = get_balances(client)
-                        with lock:
-                            state['btc'] = b; state['usdt'] = u
+                        with lock: state['btc'] = b; state['usdt'] = u
 
-                # Partial profit — take 50% at partialAt
                 elif not pos.get('partialTaken') and price >= pos.get('partialAt', float('inf')):
-                    qty      = pos.get('qty', 0.0)
-                    half     = floor_qty(qty * 0.5, flt['step'])
+                    qty  = pos.get('qty', 0.0)
+                    half = floor_qty(qty * 0.5, flt['step'])
                     if half >= flt['min_qty'] and half * price >= flt['min_notional']:
                         with lock: state['status'] = 'PARTIAL'
                         fp, fq, via = sell_best(client, flt, half, pos['entry'], 'PARTIAL')
@@ -537,22 +608,20 @@ def main():
                             state['trades'].append({
                                 'setup': pos['setup'], 'outcome': 'PARTIAL',
                                 'entry': pos['entry'], 'exit': fp,
-                                'pnl':   pnl,          'via':  via,
+                                'pnl': pnl, 'via': via,
                             })
                             state['status'] = 'RUNNING'
                         b, u = get_balances(client)
-                        with lock:
-                            state['btc'] = b; state['usdt'] = u
+                        with lock: state['btc'] = b; state['usdt'] = u
 
-            # ── Increment barsHeld on new bar ─────────────────────────────────
+            # ── New bar: increment barsHeld + signal check ────────────────────
             if bar_count > last_bars[0]:
                 last_bars[0] = bar_count
                 with lock:
                     if state['pos']:
                         state['pos']['barsHeld'] = state['pos'].get('barsHeld', 0) + 1
 
-                # Signal check — only when flat
-                if not pos:
+                if not pos and not state.get('pending_order'):
                     sig = get_signal(clist)
                     if sig:
                         with lock: u = state['usdt']
@@ -571,7 +640,13 @@ def main():
                                     quantity=fmt_qty(qty, flt['step']),
                                     price=fmt_px(bid, flt['tick']))
                                 oid      = o['orderId']
-                                deadline = time.time() + ORDER_TIMEOUT
+                                placed   = time.time()
+                                with lock:
+                                    state['pending_order'] = {
+                                        'px': bid, 'qty': qty,
+                                        'oid': oid, 'placed_at': placed,
+                                    }
+                                deadline = placed + ORDER_TIMEOUT
                                 filled   = False
                                 while time.time() < deadline and not stop_event.is_set():
                                     time.sleep(0.25)
@@ -580,47 +655,56 @@ def main():
                                         fp  = float(o['cummulativeQuoteQty']) / float(o['executedQty'])
                                         fq  = float(o['executedQty'])
                                         a   = sig['atr']
-                                        new_pos = {**sig,
-                                                   'entry':     fp,
-                                                   'stop':      fp - a * P['atrStop'],
-                                                   'target':    fp + a * P['atrTp'],
-                                                   'partialAt': fp + a * P['partialAt'],
-                                                   'qty':       fq}
                                         with lock:
-                                            state['pos']    = new_pos
-                                            state['status'] = 'RUNNING'
+                                            state['pos'] = {
+                                                **sig,
+                                                'entry':     fp,
+                                                'stop':      fp - a * P['atrStop'],
+                                                'target':    fp + a * P['atrTp'],
+                                                'partialAt': fp + a * P['partialAt'],
+                                                'qty':       fq,
+                                            }
+                                            state['pending_order'] = None
+                                            state['status']        = 'RUNNING'
                                         b, u = get_balances(client)
-                                        with lock:
-                                            state['btc'] = b; state['usdt'] = u
+                                        with lock: state['btc'] = b; state['usdt'] = u
                                         filled = True
                                         break
-                                    # Cancel if price surged past entry zone
                                     with lock: p_now = state['price']
                                     if p_now > sig['target']:
                                         break
                                 if not filled:
                                     try: client.cancel_order(symbol=SYMBOL, orderId=oid)
                                     except BinanceAPIException: pass
-                                    with lock: state['status'] = 'RUNNING'
+                                    with lock:
+                                        state['pending_order'] = None
+                                        state['status']        = 'RUNNING'
                             except BinanceAPIException as e:
                                 print(f"{R}BUY err: {e.message}{Z}", flush=True)
-                                with lock: state['status'] = 'RUNNING'
+                                with lock:
+                                    state['pending_order'] = None
+                                    state['status']        = 'RUNNING'
                         else:
                             with lock:
                                 state['sig_msg'] = (f"Signal {sig['setup']} — "
-                                                    f"qty ${notional:.2f} < min "
-                                                    f"${flt['min_notional']:.0f}")
+                                                    f"qty ${notional:.2f} < "
+                                                    f"${flt['min_notional']:.0f} min")
                     else:
                         with lock:
                             state['sig_msg'] = 'No signal — scanning…'
 
-            # ── Redraw dashboard ──────────────────────────────────────────────
-            with lock:
-                snap = {**state,
-                        'pos':    dict(state['pos'])    if state['pos']    else None,
-                        'trades': list(state['trades']),
-                        'ind':    dict(state['ind'])}
-            draw(snap)
+            # ── Draw dashboard ────────────────────────────────────────────────
+            now = time.time()
+            draw_interval = 0.25 if IS_TTY else 5.0
+            if now - last_draw[0] >= draw_interval:
+                last_draw[0] = now
+                with lock:
+                    snap = {**state,
+                            'pos':           dict(state['pos']) if state['pos'] else None,
+                            'trades':        list(state['trades']),
+                            'ind':           dict(state['ind']),
+                            'pending_order': dict(state['pending_order']) if state['pending_order'] else None}
+                draw(snap)
 
     except KeyboardInterrupt:
         pass
@@ -632,7 +716,7 @@ def main():
         cancel_open_orders(client)
         btc, _ = get_balances(client)
         with lock:
-            p  = state.get('price', 0)
+            p   = state.get('price', 0)
             pos = state.get('pos')
         if btc >= flt['min_qty'] and btc * p >= flt['min_notional']:
             entry = pos['entry'] if pos else p
