@@ -317,17 +317,20 @@ def _draw_tty(state):
     print(f"{C}{'═'*W}{Z}")
     print(f"  {B}TRENDRIDER v7{Z}  BTCUSDT  {C}${price:,.2f}{Z}  "
           f"{datetime.now().strftime('%H:%M:%S')}  [{status}]")
-    print(f"  Wallet  {G}${usdt:.4f} USDT{Z}  {btc:.6f} BTC  Total ${total:.4f}")
+    print(f"  Wallet  {G}${usdt:.8f} USDT{Z}  {btc:.8f} BTC  Total ${total:.8f}")
     print(f"{C}{'─'*W}{Z}")
 
     if ind:
         fc = G if ind.get('fast', 0) > ind.get('slow', 0) else R
         dir_arrow = '↑' if ind.get('fast', 0) > ind.get('slow', 0) else '↓'
-        print(f"  EMA {fc}{dir_arrow}{Z} F:{ind['fast']:,.0f}  S:{ind['slow']:,.0f}  "
-              f"T:{ind['trend']:,.0f}   ATR ${ind['atr']:.2f}   "
-              f"ADX {ind['adx']:.1f}   Vol×{ind['vol']:.2f}")
+        vc = G if ind.get('vol', 0) >= P['volMin'] else R
+        print(f"  EMA {fc}{dir_arrow}{Z} F:{ind['fast']:,.2f}  S:{ind['slow']:,.2f}  "
+              f"T:{ind['trend']:,.2f}   ATR ${ind['atr']:.8f}   ADX {ind['adx']:.8f}")
         rc = G if ind['rsi'] < 40 else (R if ind['rsi'] > 65 else Z)
-        print(f"  RSI {rc}{ind['rsi']:.1f}{Z}   Candles {ind.get('candles', bars)}")
+        print(f"  RSI {rc}{ind['rsi']:.8f}{Z}   "
+              f"Vol×{vc}{ind['vol']:.8f}{Z}  "
+              f"VolBTC {ind.get('raw_vol',0):.8f}  "
+              f"Avg {ind.get('vol_avg',0):.8f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
 
@@ -394,16 +397,20 @@ def _draw_compact(state):
     print(sep)
     print(f"  {B}TRENDRIDER v7{Z}  {now}  [{status}]")
     print(f"  BTC ${price:,.2f}  |  "
-          f"Wallet {G}${usdt:.4f} USDT{Z}  {btc:.6f} BTC  Total ${total:.4f}")
+          f"Wallet {G}${usdt:.8f} USDT{Z}  {btc:.8f} BTC  Total ${total:.8f}")
 
     if ind:
         ar = '↑' if ind.get('fast', 0) > ind.get('slow', 0) else '↓'
         fc = G if ar == '↑' else R
         rc = G if ind['rsi'] < 40 else (R if ind['rsi'] > 65 else Z)
-        print(f"  EMA{fc}{ar}{Z} F:{ind['fast']:,.0f} S:{ind['slow']:,.0f} "
-              f"T:{ind['trend']:,.0f}  "
-              f"RSI {rc}{ind['rsi']:.1f}{Z}  ATR ${ind['atr']:.1f}  "
-              f"ADX {ind['adx']:.1f}  Vol×{ind['vol']:.2f}")
+        vc = G if ind.get('vol', 0) >= P['volMin'] else R
+        print(f"  EMA{fc}{ar}{Z} F:{ind['fast']:,.2f} S:{ind['slow']:,.2f} "
+              f"T:{ind['trend']:,.2f}  "
+              f"RSI {rc}{ind['rsi']:.8f}{Z}  "
+              f"ATR ${ind['atr']:.8f}  ADX {ind['adx']:.8f}")
+        print(f"  Vol×{vc}{ind['vol']:.8f}{Z}  "
+              f"VolBTC {ind.get('raw_vol',0):.8f}  "
+              f"AvgBTC {ind.get('vol_avg',0):.8f}")
     else:
         print(f"  Warming up… {bars}/55 candles needed")
 
@@ -575,6 +582,8 @@ def main():
                         'vol':     calc_vol_ratio(volumes)[idx],
                         'adx':     calc_adx(clist)[idx],
                         'candles': len(clist),
+                        'raw_vol': float(volumes[idx]),      # actual BTC volume this bar
+                        'vol_avg': float(np.mean(volumes[max(0,idx-10):idx])),
                     }
 
             # ── Position management ───────────────────────────────────────────
