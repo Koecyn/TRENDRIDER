@@ -2,13 +2,18 @@
 """
 strategy_bt.py — TRENDRIDER v7 wrapped for backtesting.py
 
+Fees: maker = 0% (LIMIT_MAKER only), taker = 0.02% (never used), min notional $1.
+Data: real Binance.US BTCUSDT 1m klines via public API (no keys needed).
+
 Usage:
-  python strategy_bt.py                        # last 30 days, Binance.US
-  python strategy_bt.py --days 90
-  python strategy_bt.py --start 2026-01-01
-  python strategy_bt.py --csv data.csv
-  python strategy_bt.py --csv data.csv --optimize
-  python strategy_bt.py --csv data.csv --save-csv data.csv   # fetch + cache
+  # Fetch real data from Binance.US and run:
+  python strategy_bt.py --days 30
+  python strategy_bt.py --days 90 --start 2026-01-01
+
+  # Fetch once, save to CSV, reuse locally (fastest iteration):
+  python strategy_bt.py --days 90 --save-csv btc_90d.csv
+  python strategy_bt.py --csv btc_90d.csv
+  python strategy_bt.py --csv btc_90d.csv --optimize
 """
 
 import os, sys, argparse
@@ -287,9 +292,11 @@ def main():
         print(f"Price scaled by 1/{scale} (median ${med:,.0f} → ${med/scale:.2f}) — "
               f"~{round(0.99 * args.balance / (med / scale))} units per trade")
 
-    # margin=1.0 = spot only, flat cash, no leverage, no borrowing
+    # Binance.US: maker fee = 0%, taker fee = 0.02%, min notional = $1
+    # Strategy places LIMIT_MAKER orders only → commission = 0.0
+    # margin=1.0 = spot only, flat cash, no leverage
     bt = Backtest(df, TrendRider, cash=args.balance,
-                  commission=0.0002, margin=1.0, exclusive_orders=True)
+                  commission=0.0, margin=1.0, exclusive_orders=True)
 
     if args.optimize:
         print("Running optimization...")
