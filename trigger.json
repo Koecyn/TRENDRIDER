@@ -1,6 +1,6 @@
 {
-  "id": "20260519_024900",
+  "id": "20260519_025325",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "diag: print REST vol range + first 5 WS ticks"
+  "message": "fix vol display + volMin 0.95->0.50"
 }
