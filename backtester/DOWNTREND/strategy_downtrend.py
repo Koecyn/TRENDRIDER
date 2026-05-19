@@ -47,10 +47,11 @@ P = {
     'partialAt':     1.0,    # partial exit at 1× range upside
     'trailAtr':      0.65,   # trail = price - a_dn_1m_entry × trailAtr
     'trailActivate': 0.25,
-    'maxHoldBars':   60,     # optimised: 10-bar range needs room; 60 min max hold
+    'maxHoldBars':   60,     # 10-bar range needs room; 60 min max hold
     'adxMin':        22,
-    'minBias':       0.05,   # skip entry if 1-min bias < minBias (confirmed optimal)
-    'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR (confirmed optimal)
+    'minBias':       0.05,   # skip entry if 1-min bias < minBias
+    'minBias60m':    0.0,    # skip entry if 60-min bias < this (0 = block hourly downtrends)
+    'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR
 }
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -194,6 +195,7 @@ class TrendRiderAdaptive(Strategy):
     trailActivate = P['trailActivate']
     maxHoldBars   = P['maxHoldBars']
     minBias       = P['minBias']
+    minBias60m    = P['minBias60m']
     targetWindow  = P['targetWindow']
 
     def init(self):
@@ -212,6 +214,9 @@ class TrendRiderAdaptive(Strategy):
         # 1-min Wilder ATR + bias → stop sizing (tight)
         self.atr_1m   = self.I(calc_atr,      h, l, c, 14,               name='ATR_1m')
         self.bias_1m  = self.I(calc_atr_bias, h, l, c, 14,               name='Bias_1m')
+
+        # 60-min bias → hourly trend gate (blocks counter-trend longs in downtrends)
+        self.bias_60m = self.I(calc_atr_bias, h, l, c, 60,               name='Bias_60m')
 
         # N-bar rolling range → target sizing (wide, ~2-3× 1-min ATR)
         self.rng_mtf  = self.I(calc_range_mtf, h, l, self.targetWindow, 14, name='RNG_MTF')
@@ -237,6 +242,7 @@ class TrendRiderAdaptive(Strategy):
         self._d_pullback    = 0
         self._d_bias_sum    = 0.0
         self._d_bias_n      = 0
+        self._d_low_bias60m = 0
         self._d_ratio_sum   = 0.0   # rng_mtf / atr_1m ratio
         self._d_ratio_n     = 0
 
@@ -251,6 +257,7 @@ class TrendRiderAdaptive(Strategy):
 
         a_1m  = self.atr_1m[-1]
         b_1m  = self.bias_1m[-1]   # directional bias from 1-min data
+        b_60m = self.bias_60m[-1]  # 60-min bias — hourly trend direction
         r_mtf = self.rng_mtf[-1]   # N-bar rolling range (target scale)
 
         FLOOR = 0.15
@@ -296,6 +303,14 @@ class TrendRiderAdaptive(Strategy):
 
         if b_1m < self.minBias:
             self._d_low_bias += 1
+            return
+
+        # ── Hourly trend gate — 60-min bias ───────────────────────────────
+        # Blocks counter-trend longs when the hourly ATR bias is bearish.
+        # In a sustained downtrend, bias_60m stays negative even during
+        # brief 1-min bullish micro-regimes.
+        if b_60m < self.minBias60m:
+            self._d_low_bias60m += 1
             return
 
         # ── Signal detection ──────────────────────────────────────────────
@@ -350,12 +365,15 @@ def main():
     ap.add_argument('--max-hold',       type=int,   default=None)
     ap.add_argument('--partial-at',     type=float, default=None)
     ap.add_argument('--target-window',  type=int,   default=None,
-                    help='N-bar rolling range window for targets (default 5 = 5-min; 10 = 10-min)')
+                    help='N-bar rolling range window for targets (default 10 = 10-min)')
+    ap.add_argument('--min-bias-60m',  type=float, default=None,
+                    help='Min 60-min bias to allow entry (0=block hourly downtrends, default 0)')
     args = ap.parse_args()
 
     overrides = {
         'adxMin':       args.adx_min,
         'minBias':      args.min_bias,
+        'minBias60m':   args.min_bias_60m,
         'atrStop':      args.atr_stop,
         'atrTp':        args.atr_tp,
         'maxHoldBars':  args.max_hold,
@@ -420,11 +438,12 @@ def main():
         print(f"\n── Regime diagnostic ({st._d_bars} bars) ──")
         print(f"  Avg ATR bias (-1=down, 0=flat, +1=up): {avg_bias:+.3f}  ({regime})")
         print(f"  Avg RNG_{P['targetWindow']}m / ATR_1m ratio: {avg_ratio:.2f}×  "
-              f"(target window {avg_ratio:.1f}× wider than stop)")
+              f"(target {avg_ratio:.1f}× wider than stop)")
         print(f"  In position:            {st._d_in_pos:6d}  ({100*st._d_in_pos/total:.1f}%)")
         print(f"  ATR not ready:          {st._d_no_atr:6d}  ({100*st._d_no_atr/total:.1f}%)")
         print(f"  ADX < {P['adxMin']} blocked:   {st._d_low_adx:6d}  ({100*st._d_low_adx/total:.1f}%)")
-        print(f"  Bias < {P['minBias']} (too bearish):  {st._d_low_bias:6d}  ({100*st._d_low_bias/total:.1f}%)")
+        print(f"  Bias1m < {P['minBias']} (bearish):  {st._d_low_bias:6d}  ({100*st._d_low_bias/total:.1f}%)")
+        print(f"  Bias60m < {P['minBias60m']} (hrly dn):  {st._d_low_bias60m:6d}  ({100*st._d_low_bias60m/total:.1f}%)")
         print(f"  EMA bear (f≤s):         {st._d_ema_bear:6d}  ({100*st._d_ema_bear/total:.1f}%)")
         print(f"  Price < EMA50:          {st._d_below_tr:6d}  ({100*st._d_below_tr/total:.1f}%)")
         print(f"  RSI/pullback blocked:   {st._d_rsi_block:6d}  ({100*st._d_rsi_block/total:.1f}%)")
