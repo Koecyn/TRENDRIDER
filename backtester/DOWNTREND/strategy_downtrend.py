@@ -2,26 +2,21 @@
 """
 DOWNTREND/strategy_downtrend.py — TRENDRIDER v7, regime-adaptive variant.
 
-Key difference from strategy_bt.py:
-  Uses DIRECTIONAL ATR — stop is sized by downside volatility, target by
-  upside volatility. In a downtrend the market's upward ATR shrinks, so
-  targets tighten automatically. In an uptrend, upward ATR expands and
-  targets widen. A minBias gate skips entries when the market is too
-  one-sided to the downside to be tradeable long.
+Multi-timeframe ATR:
+  Signals fire on 1-min data.
+  Stops  are sized to 1-min ATR  (tight, protects against fast drops).
+  Targets are sized to 5-min ATR (wide, captures real BTC moves; default period=70).
 
-  bias = atr_up / (atr_up + atr_dn)
-    → 1.0 : all upward movement (pure uptrend)
-    → 0.5 : balanced (ranging / flat)
-    → 0.0 : all downward movement (pure downtrend)
+  stop   = entry - atr_dn_1m * atrStop   (1-min downside ATR)
+  target = entry + atr_up_5m * atrTp     (5-min upside ATR)
 
-  stop   = entry - atr_dn * atrStop   (sized to actual downward swings)
-  target = entry + atr_up * atrTp     (sized to actual upward swings)
+Directional ATR bias [-1, +1]:
+  bias = (atr_up - atr_dn) / (atr_up + atr_dn)
+  +1 = pure uptrend (lows held), 0 = ranging, -1 = pure downtrend (highs capped)
 
 Usage:
   python DOWNTREND/strategy_downtrend.py --csv btc_30d.csv
-  python DOWNTREND/strategy_downtrend.py --csv btc_90d.csv --balance 100
-  python DOWNTREND/strategy_downtrend.py --csv btc_90d.csv --optimize
-  python DOWNTREND/strategy_downtrend.py --days 30          # live fetch
+  python DOWNTREND/strategy_downtrend.py --csv btc_30d.csv --target-period 140
 """
 
 import sys, argparse
@@ -30,7 +25,6 @@ import numpy as np
 import pandas as pd
 from backtesting import Backtest, Strategy
 
-# Allow importing sibling modules (data fetching shared with strategy_bt.py)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
     from strategy_bt import fetch_binance, load_csv, save_csv
@@ -45,14 +39,15 @@ P = {
     'rsiOB':         80,
     'rsiOS':         28,
     'volMin':        0.0,
-    'atrStop':       1.9,    # multiplier applied to atr_dn for stop
-    'atrTp':         2.8,    # multiplier applied to atr_up for target
-    'partialAt':     1.0,    # partial exit at 1× atr_up
-    'trailAtr':      0.65,
+    'atrStop':       1.0,    # multiplier × 1-min downside ATR for stop
+    'atrTp':         2.8,    # multiplier × 5-min upside ATR for target
+    'partialAt':     1.0,    # partial exit at 1× 5-min upside ATR
+    'trailAtr':      0.65,   # trail stop at entry_dn_1m × trailAtr below price
     'trailActivate': 0.25,
     'maxHoldBars':   25,
     'adxMin':        22,
-    'minBias':       -0.1,   # skip entry if bias < -0.1 (market too bearish to go long)
+    'minBias':       0.05,   # skip entry if 1-min bias < minBias
+    'targetPeriod':  70,     # bars for 5-min ATR (70 × 1-min ≈ 5-min Wilder)
 }
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -167,7 +162,6 @@ def calc_vol_ratio(volumes, period=10):
 
 # ── Strategy ──────────────────────────────────────────────────────────────────
 class TrendRiderAdaptive(Strategy):
-    # Tunable params
     adxMin        = P['adxMin']
     rsiOB         = P['rsiOB']
     atrStop       = P['atrStop']
@@ -176,7 +170,8 @@ class TrendRiderAdaptive(Strategy):
     trailAtr      = P['trailAtr']
     trailActivate = P['trailActivate']
     maxHoldBars   = P['maxHoldBars']
-    minBias       = P['minBias']   # min upside fraction to allow entry
+    minBias       = P['minBias']
+    targetPeriod  = P['targetPeriod']
 
     def init(self):
         c = np.array(self.data.Close)
@@ -188,10 +183,16 @@ class TrendRiderAdaptive(Strategy):
         self.ema13    = self.I(calc_ema,      c,       P['emaSlow'],  name='EMA13')
         self.ema50    = self.I(calc_ema,      c,       P['emaTrend'], name='EMA50')
         self.rsi      = self.I(calc_rsi,      c,                      name='RSI')
-        self.atr      = self.I(calc_atr,      h, l, c,                name='ATR')
-        self.atr_bias = self.I(calc_atr_bias, h, l, c,                name='ATR_Bias')
         self.adx      = self.I(calc_adx,      h, l, c,                name='ADX')
         self.vol      = self.I(calc_vol_ratio,v,                       name='VolRatio')
+
+        # 1-min ATR + bias → stop sizing (tight, protects against fast drops)
+        self.atr_1m   = self.I(calc_atr,      h, l, c, 14,                name='ATR_1m')
+        self.bias_1m  = self.I(calc_atr_bias, h, l, c, 14,                name='Bias_1m')
+
+        # 5-min ATR + bias → target sizing (captures real BTC moves)
+        self.atr_5m   = self.I(calc_atr,      h, l, c, self.targetPeriod, name='ATR_5m')
+        self.bias_5m  = self.I(calc_atr_bias, h, l, c, self.targetPeriod, name='Bias_5m')
 
         self._stop          = 0.0
         self._target        = 0.0
@@ -199,7 +200,8 @@ class TrendRiderAdaptive(Strategy):
         self._partial_taken = False
         self._bars_held     = 0
         self._entry         = 0.0
-        self._atr_up_entry  = 0.0
+        self._a_dn_1m_entry = 0.0   # 1-min downside component at entry (for trailing)
+        self._a_up_5m_entry = 0.0   # 5-min upside component at entry (for partial)
 
         # Diagnostics
         self._d_bars        = 0
@@ -214,6 +216,8 @@ class TrendRiderAdaptive(Strategy):
         self._d_pullback    = 0
         self._d_bias_sum    = 0.0
         self._d_bias_n      = 0
+        self._d_ratio_sum   = 0.0   # atr_5m / atr_1m ratio accumulator
+        self._d_ratio_n     = 0
 
     def next(self):
         price = self.data.Close[-1]
@@ -224,15 +228,16 @@ class TrendRiderAdaptive(Strategy):
         dx      = self.adx[-1]
         lo      = self.data.Low[-1]
 
-        a    = self.atr[-1]
-        bias = self.atr_bias[-1]   # -1 (downtrend) → 0 (flat) → +1 (uptrend)
+        a_1m   = self.atr_1m[-1]
+        b_1m   = self.bias_1m[-1]   # 1-min bias for stop sizing + entry gate
+        a_5m   = self.atr_5m[-1]
+        b_5m   = self.bias_5m[-1]   # 5-min bias for target sizing
 
-        # Expected directional components from total ATR + bias
-        # atr * (1+bias)/2 = upward expected move   (0 when bias=-1, atr when bias=+1)
-        # atr * (1-bias)/2 = downward expected move  (atr when bias=-1, 0 when bias=+1)
-        FLOOR = 0.15   # never let either component drop below 15% of total ATR
-        a_up_exp = max(a * (1 + bias) / 2, a * FLOOR)
-        a_dn_exp = max(a * (1 - bias) / 2, a * FLOOR)
+        FLOOR = 0.15
+        # 1-min expected downward move → stop distance
+        a_dn_1m = max(a_1m * (1 - b_1m) / 2, a_1m * FLOOR)
+        # 5-min expected upward move → target distance
+        a_up_5m = max(a_5m * (1 + b_5m) / 2, a_5m * FLOOR)
 
         self._d_bars += 1
 
@@ -244,7 +249,7 @@ class TrendRiderAdaptive(Strategy):
             riskUnit = abs(self._entry - self._stop)
             pnlR = (price - self._entry) / riskUnit if riskUnit > 0 else 0
             if pnlR >= self.trailActivate:
-                trail = price - self._a_up_entry * self.trailAtr
+                trail = price - self._a_dn_1m_entry * self.trailAtr
                 self._stop = max(self._stop, trail)
 
             if not self._partial_taken and price >= self._partial_at:
@@ -256,18 +261,20 @@ class TrendRiderAdaptive(Strategy):
             return
 
         # ── Gate: indicators must be warmed up ───────────────────────────
-        if a <= 0:
+        if a_1m <= 0 or a_5m <= 0:
             self._d_no_atr += 1
             return
         if dx < self.adxMin:
             self._d_low_adx += 1
             return
 
-        # ── Regime gate — bias on [-1, +1] scale ─────────────────────────
-        self._d_bias_sum += bias
+        # ── Regime gate — 1-min bias on [-1, +1] scale ───────────────────
+        self._d_bias_sum += b_1m
         self._d_bias_n   += 1
+        self._d_ratio_sum += a_5m / a_1m
+        self._d_ratio_n  += 1
 
-        if bias < self.minBias:   # too bearish to go long
+        if b_1m < self.minBias:
             self._d_low_bias += 1
             return
 
@@ -296,36 +303,46 @@ class TrendRiderAdaptive(Strategy):
 
         if setup:
             self._entry         = price
-            # Stop/target sized to expected directional components
-            self._stop          = price - a_dn_exp * self.atrStop
-            self._target        = price + a_up_exp * self.atrTp
-            self._partial_at    = price + a_up_exp * self.partialAt
+            self._a_dn_1m_entry = a_dn_1m
+            self._a_up_5m_entry = a_up_5m
+            # Stop: 1-min downside ATR (tight, near current price action)
+            self._stop          = price - a_dn_1m * self.atrStop
+            # Target: 5-min upside ATR (captures real BTC range moves)
+            self._target        = price + a_up_5m * self.atrTp
+            self._partial_at    = price + a_up_5m * self.partialAt
             self._partial_taken = False
             self._bars_held     = 0
-            self._a_up_entry    = a_up_exp
             self.buy(size=0.99)
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(
-        description='TRENDRIDER DOWNTREND — regime-adaptive directional ATR')
-    ap.add_argument('--days',      type=int,   default=30)
-    ap.add_argument('--start',     type=str,   default=None)
-    ap.add_argument('--csv',       type=str,   default=None)
-    ap.add_argument('--save-csv',  type=str,   default=None)
-    ap.add_argument('--balance',   type=float, default=100.0)
-    ap.add_argument('--optimize',  action='store_true')
-    ap.add_argument('--adx-min',   type=float, default=None)
-    ap.add_argument('--min-bias',  type=float, default=None)
-    ap.add_argument('--atr-stop',  type=float, default=None)
-    ap.add_argument('--atr-tp',    type=float, default=None)
-    ap.add_argument('--max-hold',  type=int,   default=None)
-    ap.add_argument('--partial-at',type=float, default=None)
+        description='TRENDRIDER DOWNTREND — multi-timeframe directional ATR')
+    ap.add_argument('--days',          type=int,   default=30)
+    ap.add_argument('--start',         type=str,   default=None)
+    ap.add_argument('--csv',           type=str,   default=None)
+    ap.add_argument('--save-csv',      type=str,   default=None)
+    ap.add_argument('--balance',       type=float, default=100.0)
+    ap.add_argument('--optimize',      action='store_true')
+    ap.add_argument('--adx-min',       type=float, default=None)
+    ap.add_argument('--min-bias',      type=float, default=None)
+    ap.add_argument('--atr-stop',      type=float, default=None)
+    ap.add_argument('--atr-tp',        type=float, default=None)
+    ap.add_argument('--max-hold',      type=int,   default=None)
+    ap.add_argument('--partial-at',    type=float, default=None)
+    ap.add_argument('--target-period', type=int,   default=None,
+                    help='Bars for 5-min ATR target (default 70; use 140 for 10-min)')
     args = ap.parse_args()
 
-    overrides = {'adxMin': args.adx_min, 'minBias': args.min_bias,
-                 'atrStop': args.atr_stop, 'atrTp': args.atr_tp,
-                 'maxHoldBars': args.max_hold, 'partialAt': args.partial_at}
+    overrides = {
+        'adxMin':      args.adx_min,
+        'minBias':     args.min_bias,
+        'atrStop':     args.atr_stop,
+        'atrTp':       args.atr_tp,
+        'maxHoldBars': args.max_hold,
+        'partialAt':   args.partial_at,
+        'targetPeriod':args.target_period,
+    }
     applied = {}
     for k, v in overrides.items():
         if v is not None:
@@ -347,7 +364,6 @@ def main():
         if args.save_csv:
             save_csv(df, args.save_csv)
 
-    # Scale prices so backtesting.py produces integer unit counts > 0
     med   = df['Close'].median()
     scale = max(1, round(med / (args.balance / 100)))
     if scale > 1:
@@ -363,10 +379,11 @@ def main():
         stats = bt.optimize(
             adxMin    = range(12, 25, 3),
             rsiOB     = range(72, 88, 4),
-            atrStop   = [1.2, 1.5, 1.9, 2.3],
+            atrStop   = [0.8, 1.0, 1.2, 1.5],
             atrTp     = [2.0, 2.5, 2.8, 3.5],
-            minBias   = [0.25, 0.35, 0.45],
+            minBias   = [0.0, 0.05, 0.10, 0.20],
             trailAtr  = [0.5, 0.65, 0.8],
+            targetPeriod = [35, 70, 140],
             maximize  = 'Sharpe Ratio',
             constraint= lambda p: p.atrTp > p.atrStop,
             return_heatmap=False,
@@ -380,20 +397,22 @@ def main():
         st = stats._strategy
         total = st._d_bars or 1
         avg_bias = st._d_bias_sum / st._d_bias_n if st._d_bias_n else 0
+        avg_ratio = st._d_ratio_sum / st._d_ratio_n if st._d_ratio_n else 0
         regime = ('uptrend'   if avg_bias >  0.1 else
                   'downtrend' if avg_bias < -0.1 else 'ranging/flat')
         print(f"\n── Regime diagnostic ({st._d_bars} bars) ──")
         print(f"  Avg ATR bias (-1=down, 0=flat, +1=up): {avg_bias:+.3f}  ({regime})")
-        print(f"  In position:          {st._d_in_pos:6d}  ({100*st._d_in_pos/total:.1f}%)")
-        print(f"  ATR not ready:        {st._d_no_atr:6d}  ({100*st._d_no_atr/total:.1f}%)")
-        print(f"  ADX < {P['adxMin']} blocked:  {st._d_low_adx:6d}  ({100*st._d_low_adx/total:.1f}%)")
-        print(f"  Bias < {P['minBias']} (too bearish): {st._d_low_bias:6d}  ({100*st._d_low_bias/total:.1f}%)")
-        print(f"  EMA bear (f≤s):       {st._d_ema_bear:6d}  ({100*st._d_ema_bear/total:.1f}%)")
-        print(f"  Price < EMA50:        {st._d_below_tr:6d}  ({100*st._d_below_tr/total:.1f}%)")
-        print(f"  RSI/pullback blocked: {st._d_rsi_block:6d}  ({100*st._d_rsi_block/total:.1f}%)")
-        print(f"  EMA_CROSS fired:      {st._d_cross:6d}")
-        print(f"  EMA_PULLBACK fired:   {st._d_pullback:6d}")
-        print(f"  Total trades:         {int(stats['# Trades']):6d}")
+        print(f"  Avg ATR_5m/ATR_1m ratio: {avg_ratio:.2f}x  (target {avg_ratio:.1f}× wider than stop)")
+        print(f"  In position:            {st._d_in_pos:6d}  ({100*st._d_in_pos/total:.1f}%)")
+        print(f"  ATR not ready:          {st._d_no_atr:6d}  ({100*st._d_no_atr/total:.1f}%)")
+        print(f"  ADX < {P['adxMin']} blocked:   {st._d_low_adx:6d}  ({100*st._d_low_adx/total:.1f}%)")
+        print(f"  Bias < {P['minBias']} (too bearish):  {st._d_low_bias:6d}  ({100*st._d_low_bias/total:.1f}%)")
+        print(f"  EMA bear (f≤s):         {st._d_ema_bear:6d}  ({100*st._d_ema_bear/total:.1f}%)")
+        print(f"  Price < EMA50:          {st._d_below_tr:6d}  ({100*st._d_below_tr/total:.1f}%)")
+        print(f"  RSI/pullback blocked:   {st._d_rsi_block:6d}  ({100*st._d_rsi_block/total:.1f}%)")
+        print(f"  EMA_CROSS fired:        {st._d_cross:6d}")
+        print(f"  EMA_PULLBACK fired:     {st._d_pullback:6d}")
+        print(f"  Total trades:           {int(stats['# Trades']):6d}")
 
         out_html = Path(__file__).parent / 'trendrider_downtrend.html'
         bt.plot(filename=str(out_html), open_browser=False)
