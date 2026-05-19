@@ -1,6 +1,6 @@
 {
-  "id": "20260519_024403",
+  "id": "20260519_024900",
   "command": "RELOAD",
   "bash": "python live_trader.py",
-  "message": "fix vol display: LiveBTC from live WS ticks, VolRatio labels"
+  "message": "diag: print REST vol range + first 5 WS ticks"
 }
