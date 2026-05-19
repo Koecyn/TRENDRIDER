@@ -1,6 +1,6 @@
 {
-  "id": "iter16_mtf20",
+  "id": "iter17_oos_march",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_30d.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 20 --max-hold 100",
-  "message": "iter16: targetWindow=20 — 10->4.78, 15->4.86 (+0.08 only), checking if 20 peaks or drops"
+  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --start 2026-03-01 --days 30 --save-csv backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 10 --max-hold 60",
+  "message": "iter17: OOS validation — March 2026 data, targetWindow=10 locked (in-sample Sharpe=4.78)"
 }

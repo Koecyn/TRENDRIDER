@@ -47,10 +47,10 @@ P = {
     'partialAt':     1.0,    # partial exit at 1× range upside
     'trailAtr':      0.65,   # trail = price - a_dn_1m_entry × trailAtr
     'trailActivate': 0.25,
-    'maxHoldBars':   25,
+    'maxHoldBars':   60,     # optimised: 10-bar range needs room; 60 min max hold
     'adxMin':        22,
-    'minBias':       0.05,   # skip entry if 1-min bias < minBias
-    'targetWindow':  5,      # bars in rolling range for target (5=5-min, 10=10-min)
+    'minBias':       0.05,   # skip entry if 1-min bias < minBias (confirmed optimal)
+    'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR (confirmed optimal)
 }
 
 # ── Indicators ────────────────────────────────────────────────────────────────
