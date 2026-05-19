@@ -156,6 +156,17 @@ class TrendRider(Strategy):
         self._entry         = 0.0
         self._atr_at_entry  = 0.0
 
+        # Diagnostic counters — readable via stats._strategy after bt.run()
+        self._d_bars        = 0
+        self._d_in_pos      = 0
+        self._d_no_atr      = 0
+        self._d_low_adx     = 0
+        self._d_ema_bear    = 0   # f <= s (downtrend, no cross possible)
+        self._d_below_tr    = 0   # price below EMA50 trend filter
+        self._d_rsi_block   = 0   # RSI out of range
+        self._d_cross       = 0   # EMA_CROSS fired
+        self._d_pullback    = 0   # EMA_PULLBACK fired
+
     def next(self):
         price = self.data.Close[-1]
         f,  f1 = self.ema5[-1],  self.ema5[-2]
@@ -167,9 +178,12 @@ class TrendRider(Strategy):
         v       = self.vol[-1]
         lo      = self.data.Low[-1]
 
+        self._d_bars += 1
+
         # ── Manage open position ──────────────────────────────────────────────
         if self.position:
             self._bars_held += 1
+            self._d_in_pos  += 1
 
             # Trailing stop
             riskUnit = abs(self._entry - self._stop)
@@ -189,17 +203,37 @@ class TrendRider(Strategy):
             return
 
         # ── Signal detection ──────────────────────────────────────────────────
-        if a <= 0 or dx < self.adxMin:
+        if a <= 0:
+            self._d_no_atr += 1
+            return
+        if dx < self.adxMin:
+            self._d_low_adx += 1
             return
 
         setup = None
-        if (f > s and f1 <= s1 and price > tr and
-                v >= P['volMin'] and r < self.rsiOB):
-            setup = 'EMA_CROSS'
-        elif (f > s and f1 > s1 and price > tr and
-                lo <= f * 1.002 and price > f and
-                v >= P['volMin'] and P['rsiOS'] < r < 55):
-            setup = 'EMA_PULLBACK'
+        if f <= s:
+            self._d_ema_bear += 1
+        elif price <= tr:
+            self._d_below_tr += 1
+        else:
+            # Fast above slow, price above trend — check specific setups
+            if f1 <= s1:
+                # Fresh EMA cross
+                if r < self.rsiOB:
+                    setup = 'EMA_CROSS'
+                else:
+                    self._d_rsi_block += 1
+            else:
+                # Pullback to EMA5
+                if lo <= f * 1.002 and price > f and P['rsiOS'] < r < 55:
+                    setup = 'EMA_PULLBACK'
+                else:
+                    self._d_rsi_block += 1
+
+        if setup == 'EMA_CROSS':
+            self._d_cross += 1
+        elif setup == 'EMA_PULLBACK':
+            self._d_pullback += 1
 
         if setup:
             self._entry         = price
@@ -209,7 +243,6 @@ class TrendRider(Strategy):
             self._partial_taken = False
             self._bars_held     = 0
             self._atr_at_entry  = a
-            # size=0.99 means 99% of available equity (fractional, not units)
             self.buy(size=0.99)
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
@@ -315,8 +348,23 @@ def main():
     else:
         stats = bt.run()
         print(stats)
-        bt.plot(filename='trendrider_backtest.html', open_browser=False)
-        print("\nChart saved → trendrider_backtest.html")
+
+        # ── Signal diagnostic ──────────────────────────────────────────────
+        st = stats._strategy
+        total = st._d_bars or 1
+        print(f"\n── Signal diagnostic ({st._d_bars} bars evaluated) ──")
+        print(f"  In position (skipped):  {st._d_in_pos:6d}  ({100*st._d_in_pos/total:.1f}%)")
+        print(f"  ATR not ready:          {st._d_no_atr:6d}  ({100*st._d_no_atr/total:.1f}%)")
+        print(f"  ADX < {P['adxMin']} (blocked):    {st._d_low_adx:6d}  ({100*st._d_low_adx/total:.1f}%)")
+        print(f"  EMA bear (f≤s):         {st._d_ema_bear:6d}  ({100*st._d_ema_bear/total:.1f}%)")
+        print(f"  Price < EMA50 trend:    {st._d_below_tr:6d}  ({100*st._d_below_tr/total:.1f}%)")
+        print(f"  RSI/pullback blocked:   {st._d_rsi_block:6d}  ({100*st._d_rsi_block/total:.1f}%)")
+        print(f"  EMA_CROSS fired:        {st._d_cross:6d}")
+        print(f"  EMA_PULLBACK fired:     {st._d_pullback:6d}")
+        print(f"  Total trades:           {int(stats['# Trades']):6d}")
+
+        bt.plot(filename='backtester/trendrider_backtest.html', open_browser=False)
+        print("\nChart saved → backtester/trendrider_backtest.html")
 
 if __name__ == '__main__':
     main()
