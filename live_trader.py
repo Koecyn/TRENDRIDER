@@ -36,7 +36,7 @@ P = {
 }
 
 SYMBOL        = "BTCUSDT"
-EQUITY_PCT    = 0.95
+EQUITY_PCT    = 1.0       # use full balance — maximises notional on small account
 TAKER_FEE     = 0.00020
 SELL_WINDOW   = 30
 ORDER_TIMEOUT = 45
@@ -155,9 +155,9 @@ def get_signal(clist):
     cn = clist[i]
 
     if any(np.isnan(x) for x in [f, f1, s, s1, tr, r, a, dx]):
-        return None
+        return None, 'indicators not ready'
     if dx < P['adxMin']:
-        return None
+        return None, f'ADX {dx:.1f} < {P["adxMin"]} (choppy)'
 
     base = {'atr': a, 'rsi': r, 'adx': dx, 'vol': v,
             'time': cn['time'], 'barsHeld': 0, 'partialTaken': False}
@@ -168,7 +168,7 @@ def get_signal(clist):
                 'entry':    cn['close'],
                 'stop':     cn['close'] - a * P['atrStop'],
                 'target':   cn['close'] + a * P['atrTp'],
-                'partialAt': cn['close'] + a * P['partialAt']}
+                'partialAt': cn['close'] + a * P['partialAt']}, None
 
     if (f > s and f1 > s1 and cn['close'] > tr and
             cn['low'] <= f * 1.002 and cn['close'] > f and
@@ -177,13 +177,33 @@ def get_signal(clist):
                 'entry':    cn['close'],
                 'stop':     cn['close'] - a * P['atrStop'],
                 'target':   cn['close'] + a * P['atrTp'],
-                'partialAt': cn['close'] + a * P['partialAt']}
+                'partialAt': cn['close'] + a * P['partialAt']}, None
 
-    return None
+    # Explain why no setup fired
+    reasons = []
+    cross_now  = f > s;  cross_prev = f1 <= s1
+    above_tr   = cn['close'] > tr
+    vol_ok     = v >= P['volMin']
+    if not above_tr:
+        reasons.append(f'price ${cn["close"]:,.0f} < EMA50 ${tr:,.0f}')
+    if not vol_ok:
+        reasons.append(f'Vol×{v:.3f} < {P["volMin"]}')
+    if cross_now and cross_prev:             # EMA_PULLBACK territory
+        if r >= 55:
+            reasons.append(f'RSI {r:.1f} ≥ 55 (pullback needs <55)')
+        elif r < P['rsiOS']:
+            reasons.append(f'RSI {r:.1f} < {P["rsiOS"]} (oversold)')
+        if not (cn['low'] <= f * 1.002):
+            reasons.append('no EMA touch (pullback needs low≤EMA5)')
+    if cross_now and not cross_prev and r >= P['rsiOB']:
+        reasons.append(f'RSI {r:.1f} ≥ {P["rsiOB"]} (overbought)')
+    if not cross_now:
+        reasons.append(f'EMA bearish (F{f:,.0f}<S{s:,.0f})')
+    return None, ' | '.join(reasons) if reasons else 'no setup'
 
 # ── Exchange helpers ──────────────────────────────────────────────────────────
 def get_filters(client):
-    f = {'min_notional': 10.0, 'step': 0.00001, 'tick': 0.01, 'min_qty': 0.00001}
+    f = {'min_notional': 1.0, 'step': 0.00001, 'tick': 0.01, 'min_qty': 0.00001}
     for flt in client.get_symbol_info(SYMBOL)['filters']:
         ft = flt['filterType']
         if ft == 'LOT_SIZE':
@@ -192,7 +212,7 @@ def get_filters(client):
         elif ft == 'PRICE_FILTER':
             f['tick'] = float(flt['tickSize'])
         elif ft in ('MIN_NOTIONAL', 'NOTIONAL'):
-            f['min_notional'] = float(flt.get('minNotional', 10.0))
+            f['min_notional'] = float(flt.get('minNotional', 1.0))
     return f
 
 def floor_qty(qty, step):
@@ -622,7 +642,7 @@ def main():
                         state['pos']['barsHeld'] = state['pos'].get('barsHeld', 0) + 1
 
                 if not pos and not state.get('pending_order'):
-                    sig = get_signal(clist)
+                    sig, reason = get_signal(clist)
                     if sig:
                         with lock: u = state['usdt']
                         stop_dist = sig['atr'] * P['atrStop']
@@ -685,13 +705,16 @@ def main():
                                     state['pending_order'] = None
                                     state['status']        = 'RUNNING'
                         else:
+                            low_funds = notional < flt['min_notional']
                             with lock:
-                                state['sig_msg'] = (f"Signal {sig['setup']} — "
-                                                    f"qty ${notional:.2f} < "
-                                                    f"${flt['min_notional']:.0f} min")
+                                state['sig_msg'] = (
+                                    f"⚠ LOW FUNDS: ${notional:.2f} notional < "
+                                    f"${flt['min_notional']:.0f} min — signal {sig['setup']} fired"
+                                    if low_funds else
+                                    f"Signal {sig['setup']} — qty too small")
                     else:
                         with lock:
-                            state['sig_msg'] = 'No signal — scanning…'
+                            state['sig_msg'] = f'FLAT — {reason}'
 
             # ── Draw dashboard ────────────────────────────────────────────────
             now = time.time()
