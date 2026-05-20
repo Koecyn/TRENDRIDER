@@ -1,6 +1,6 @@
 {
-  "id": "iter44",
+  "id": "iter45",
   "command": "RUN",
   "bash": "",
-  "message": "PF=0.32 \u2014 tighten atrStop 1.0\u21920.8 to improve R:R"
+  "message": "PF=0.32 \u2014 tighten atrStop 0.8\u21920.6 to improve R:R"
 }
