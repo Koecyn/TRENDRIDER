@@ -246,7 +246,8 @@ class TrendRiderAdaptive(Strategy):
         self._d_bias_sum    = 0.0
         self._d_bias_n      = 0
         self._d_low_bias60m = 0
-        self._d_slope_block = 0     # EMA200 declining over 30 bars
+        self._d_slope_block = 0     # EMA200 declining over 8 hrs
+        self._d_below_e200  = 0     # price below EMA200 (macro bear regime)
         self._d_ratio_sum   = 0.0   # rng_mtf / atr_1m ratio
         self._d_ratio_n     = 0
 
@@ -309,6 +310,13 @@ class TrendRiderAdaptive(Strategy):
         e200_prev = self.ema200[-slope_n] if len(self.ema200) > slope_n else e200
         if e200 < e200_prev:
             self._d_slope_block += 1
+            return
+
+        # Block entries when price is below EMA200 — instant macro bear filter.
+        # The slope gate catches sustained downtrends; this catches the moment
+        # price dips below the macro line during any decline.
+        if price < e200:
+            self._d_below_e200 += 1
             return
 
         # ── Regime gate — 1-min bias ──────────────────────────────────────
@@ -466,7 +474,8 @@ def main():
         print(f"  ADX < {P['adxMin']} blocked:   {st._d_low_adx:6d}  ({100*st._d_low_adx/total:.1f}%)")
         print(f"  Bias1m < {P['minBias']} (bearish):  {st._d_low_bias:6d}  ({100*st._d_low_bias/total:.1f}%)")
         print(f"  Bias60m < {P['minBias60m']} (hrly dn):  {st._d_low_bias60m:6d}  ({100*st._d_low_bias60m/total:.1f}%)")
-        print(f"  EMA200 declining (30b): {st._d_slope_block:6d}  ({100*st._d_slope_block/total:.1f}%)")
+        print(f"  EMA200 slope blocked:   {st._d_slope_block:6d}  ({100*st._d_slope_block/total:.1f}%)")
+        print(f"  Price < EMA200:         {st._d_below_e200:6d}  ({100*st._d_below_e200/total:.1f}%)")
         print(f"  EMA bear (f≤s):         {st._d_ema_bear:6d}  ({100*st._d_ema_bear/total:.1f}%)")
         print(f"  Price < EMA50:          {st._d_below_tr:6d}  ({100*st._d_below_tr/total:.1f}%)")
         print(f"  RSI/pullback blocked:   {st._d_rsi_block:6d}  ({100*st._d_rsi_block/total:.1f}%)")

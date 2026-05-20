@@ -389,7 +389,8 @@ class MarketPipeline:
                  exchange,
                  on_signal: Callable[[Signal], None],
                  on_bar:    Callable[[Bar], None],
-                 on_tick:   Callable[[Tick], None]):
+                 on_tick:   Callable[[Tick], None],
+                 on_book:   Optional[Callable[[list, list], None]] = None):
 
         self._cfg      = cfg
         self._ex       = exchange
@@ -400,6 +401,7 @@ class MarketPipeline:
         self.on_signal = on_signal
         self.on_bar    = on_bar
         self.on_tick   = on_tick
+        self.on_book   = on_book  # optional: simulator.on_book(bids, asks)
 
         self.trade_queue: asyncio.Queue = asyncio.Queue(maxsize=50_000)
         self.book_queue:  asyncio.Queue = asyncio.Queue(maxsize=10_000)
@@ -534,6 +536,10 @@ class MarketPipeline:
                 sig = self._signals.on_book(bids, asks, ts)
                 if sig:
                     self.on_signal(sig)
+
+                # Forward book snapshot to simulator for AMD sizing
+                if self.on_book:
+                    self.on_book(bids, asks)
 
                 processed += 1
 

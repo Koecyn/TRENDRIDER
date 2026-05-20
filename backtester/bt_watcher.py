@@ -74,22 +74,26 @@ def git_unlock():
 def inject_token():
     token = os.getenv("GITHUB_TOKEN", "").strip()
     if not token:
-        creds = Path.home() / ".git-credentials"
-        if creds.exists():
-            for line in creds.read_text().splitlines():
-                m = __import__('re').search(r"https://[^:]+:([^@]+)@", line)
-                if m:
-                    token = m.group(1).strip()
-                    break
+        # Ask git's own credential system (works with store, keychain, etc.)
+        r = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            capture_output=True, text=True, cwd=REPO_DIR,
+        )
+        for line in r.stdout.splitlines():
+            if line.startswith("password="):
+                token = line.split("=", 1)[1].strip()
+                break
     if not token:
+        log("No token found via env or git credential — push may fail", Y)
         return
     r = git(["remote", "get-url", "origin"])
     url = r.stdout.strip()
-    import re as _re
-    url = _re.sub(r"https://[^@]*@", "https://", url)
+    url = re.sub(r"https://[^@]*@", "https://", url)
     if url.startswith("https://"):
         git(["remote", "set-url", "origin",
              url.replace("https://", f"https://{GITHUB_USER}:{token}@", 1)])
+        log("Token injected into remote URL", G)
 
 def fetch_trigger():
     """Pull latest bt_trigger.json from CODE_BRANCH without touching working tree."""

@@ -406,9 +406,6 @@ class Simulator:
 
     def on_tick(self, tick: Tick):
         """Receive every tick for position management."""
-        self._last_bids = []   # will be refreshed via on_book if pipeline exposes it
-        self._last_asks = []
-
         if self.state in (State.PHASE1, State.PHASE2) and self.position:
             self._manage_position(tick)
 
@@ -568,7 +565,8 @@ class Simulator:
         if not pos:
             return
 
-        # PnL (maker fee = 0 on Binance.US; apply to both legs for conservatism)
+        # All orders are post-only limit (maker): entries and stop/exits are limit orders.
+        # Binance.US maker fee = 0%. Both legs charged for completeness.
         notional_entry = pos.entry_price * pos.qty
         notional_exit  = exit_price      * pos.qty
         fee            = (notional_entry + notional_exit) * self._maker_fee

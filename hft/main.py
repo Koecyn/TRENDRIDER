@@ -45,6 +45,7 @@ async def run(cfg: dict, api_key: str = "", api_secret: str = ""):
         on_signal = sim.on_signal,
         on_bar    = sim.on_bar,
         on_tick   = sim.on_tick,
+        on_book   = sim.on_book,
     )
 
     # Status print every 30 seconds
