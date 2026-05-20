@@ -123,7 +123,8 @@ async def run(cfg: dict, cfg_path: str, api_key: str = "", api_secret: str = "")
 
     reload_event = asyncio.Event()
     config_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
+    loop         = asyncio.get_running_loop()
+    _main_task   = [None]   # filled after gather starts; used for cancellation
 
     # ── Signal handlers ───────────────────────────────────────────────────────
 
@@ -136,9 +137,12 @@ async def run(cfg: dict, cfg_path: str, api_key: str = "", api_secret: str = "")
         loop.call_soon_threadsafe(config_event.set)
 
     def _on_shutdown():
-        log.info("Shutdown signal received — stopping")
+        log.info("Shutting down — cancelling all tasks")
         pipeline.stop()
         _remove_pid()
+        t = _main_task[0]
+        if t and not t.done():
+            t.cancel()
 
     loop.add_signal_handler(signal.SIGUSR1, _on_usr1)
     loop.add_signal_handler(signal.SIGHUP,  _on_hup)
@@ -259,15 +263,24 @@ async def run(cfg: dict, cfg_path: str, api_key: str = "", api_secret: str = "")
     log.info("Upgrade: bash hft/upgrade.sh  |  Config-only: kill -HUP $(cat hft/hft.pid)")
 
     try:
-        await asyncio.gather(
+        _main_task[0] = asyncio.ensure_future(asyncio.gather(
             pipeline.run(),
             status_loop(),
             reload_watcher(),
             config_watcher(),
             repo_watcher(),
-        )
+            return_exceptions=True,
+        ))
+        await _main_task[0]
+    except asyncio.CancelledError:
+        pass
     finally:
         _remove_pid()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+        log.info("Engine stopped.")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
