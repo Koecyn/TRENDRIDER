@@ -49,7 +49,7 @@ P = {
     'partialAt':     3.0,
     'trailAtr':      0.65,
     'trailActivate': 0.25,
-    'maxHoldBars':   120,
+    'maxHoldBars':   150,
     'adxMin':        14.0,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
     'minBias':       -0.5,   # allow pullback bars — EMA5 touch IS the entry signal
     'minBias60m':    -0.5,
