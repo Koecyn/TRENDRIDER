@@ -43,7 +43,7 @@ P = {
     'emaSlopeN':     120,    # EMA200 slope lookback bars — longer=more entries in downtrend
     'rsiOB':         50.0,   # EMA_CROSS gate; EMA_PULLBACK uses hard cap 55
     'rsiOS':         28,
-    'volMin':        1.0,    # min vol ratio vs 10-bar avg — confirms bounce has real buying
+    'volMin':        0.75,    # min vol ratio vs 10-bar avg — confirms bounce has real buying
     'atrStop':       1.0,    # × 1-min downside ATR for stop
     'atrTp':         2.8,    # × N-bar rolling range for target
     'partialAt':     3.0,

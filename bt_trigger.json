@@ -1,6 +1,6 @@
 {
-  "id": "iter93",
+  "id": "iter95",
   "command": "RUN",
   "bash": "",
-  "message": "trades=9 < 25 target \u2014 shorten slope lookback 240\u2192120 (more entries)"
+  "message": "trades=9 < 25 \u2014 loosen volMin 1.0\u21920.75"
 }
