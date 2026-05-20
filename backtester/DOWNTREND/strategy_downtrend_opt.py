@@ -39,19 +39,19 @@ P = {
     'emaFast':       5,
     'emaSlow':       13,
     'emaTrend':      50,
-    'emaMacro':      200,    # macro trend EMA
-    'emaSlopeN':     120,    # EMA200 slope lookback bars — longer=more entries in downtrend
-    'rsiOB':         50.0,   # EMA_CROSS gate; EMA_PULLBACK uses hard cap 55
+    'emaMacro':      200,
+    'emaSlopeN':     99999,  # effectively disabled — slope gate blocked 43% of bars
+    'rsiOB':         50.0,   # EMA_CROSS gate
     'rsiOS':         28,
-    'volMin':        0.5,    # min vol ratio vs 10-bar avg — confirms bounce has real buying
-    'atrStop':       1.0,    # × 1-min downside ATR for stop
-    'atrTp':         2.8,    # × N-bar rolling range for target
+    'volMin':        0.0,    # disabled — cutting losers is not a strategy
+    'atrStop':       1.0,
+    'atrTp':         2.8,
     'partialAt':     3.0,
     'trailAtr':      0.65,
     'trailActivate': 0.25,
     'maxHoldBars':   60,
-    'adxMin':        18.0,     # reset to vault winner
-    'minBias':       0.05,   # reset to vault winner
+    'adxMin':        12,     # looser — absorb more setups in the range
+    'minBias':       0.0,    # no directional requirement — range market
     'minBias60m':    0.0,
     'targetWindow':  10,
 }

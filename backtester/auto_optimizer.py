@@ -35,7 +35,7 @@ TARGET_SHARPE  = 2.5
 TARGET_WIN_PCT = 60.0    # must also reach 60% win rate before stopping
 MILESTONE      = 1.6
 MIN_TRADES     = 10
-TARGET_TRADES  = 25      # want at least 25 trades/month before calling it done
+TARGET_TRADES  = 120     # 5/day minimum — absorb liquidity, not cherry-pick
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
 
@@ -263,28 +263,23 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
-    # ── Volume gate: if 0 trades and volMin is blocking, loosen it first ───
-    if trades == 0 and vol_min > 0.5:
-        return {"param": "volMin", "value": round(vol_min - 0.25, 2),
-                "reason": f"0 trades — loosen volMin {vol_min}→{round(vol_min-0.25,2)}"}
-
-    # ── Trade volume: if trades too few, loosen the gates in correct order ──
+    # ── Trade volume: if trades too few, loosen the structural gates ────────
     # emaSlopeN: in a downtrend, LONGER lookback gives MORE passes (compares
     # to older/lower EMA200). Vault winner was 240. Shorter = more blocks.
-    # So to get more trades: raise emaSlopeN back toward 240 if it got too short,
-    # then loosen volMin, then loosen adxMin.
+    # So to get more trades: raise emaSlopeN if it got too short, then loosen
+    # adxMin, then loosen rsiOB (wider pullback band = more entries).
+    # volMin is NEVER used as a lever — cutting losers is not a strategy.
     if sharpe >= MILESTONE and trades < TARGET_TRADES:
         if ema_slope_n < 120:
             new_sn = min(240, int(ema_slope_n * 2))
             return {"param": "emaSlopeN", "value": new_sn,
                     "reason": f"trades={trades} < {TARGET_TRADES} — restore emaSlopeN {ema_slope_n:.0f}→{new_sn} (longer=more entries in downtrend)"}
-        if vol_min > 0.5:
-            new_vm = round(vol_min - 0.25, 2)
-            return {"param": "volMin", "value": new_vm,
-                    "reason": f"trades={trades} < {TARGET_TRADES} — loosen volMin {vol_min}→{new_vm}"}
-        if adx_min > 18:
+        if adx_min > 8:
             return {"param": "adxMin", "value": adx_min - 2,
                     "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{adx_min-2}"}
+        if rsi_ob < 65:
+            return {"param": "rsiOB", "value": rsi_ob + 3,
+                    "reason": f"trades={trades} < {TARGET_TRADES} — widen rsiOB {rsi_ob}→{rsi_ob+3} (more pullback entries)"}
 
     # ── RESCUE: over-tightened params hurt win rate → full reset + pivot ──
     # Tighter stops cause more false exits in volatile BTC. Lower rsiOB
@@ -325,9 +320,6 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         if rsi_ob > 47:
             return {"param": "rsiOB", "value": rsi_ob - 1,
                     "reason": f"win={win_rate:.0%} < 60% — lower rsiOB {rsi_ob}→{rsi_ob-1} (tighter pullback band)"}
-        if vol_min < 1.5:
-            return {"param": "volMin", "value": round(vol_min + 0.1, 2),
-                    "reason": f"win={win_rate:.0%} < 60% — raise volMin {vol_min}→{round(vol_min+0.1,2)} (confirm buying pressure)"}
 
     # ── Low win rate: tighten signal quality filters ─────────────────────
     # Applies regardless of trade count — too few qualifying signals
@@ -454,9 +446,9 @@ def main():
         push_results(iter_id, result)
 
         if sharpe >= MILESTONE and trades >= MIN_TRADES:
-            log(f"MILESTONE: Sharpe={sharpe:.3f} ≥ {MILESTONE} — pushing toward {TARGET_SHARPE}", G)
+            log(f"MILESTONE: Sharpe={sharpe:.3f} ≥ {MILESTONE} | trades={trades}/{TARGET_TRADES} — pushing toward {TARGET_SHARPE}", G)
 
-        if sharpe >= TARGET_SHARPE and trades >= MIN_TRADES and win >= TARGET_WIN_PCT:
+        if sharpe >= TARGET_SHARPE and trades >= TARGET_TRADES and win >= TARGET_WIN_PCT:
             log(f"TARGET REACHED — Sharpe={sharpe:.3f} win={win:.1f}% ({trades} trades)", G)
             TRIGGER_F.write_text(json.dumps(
                 {"id": iter_id+"_DONE", "command": "STOP",

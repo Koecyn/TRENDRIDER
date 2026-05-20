@@ -1,6 +1,6 @@
 {
-  "id": "iter96_081007_DONE",
-  "command": "STOP",
+  "id": "iter97",
+  "command": "RUN",
   "bash": "",
-  "message": "Sharpe=3.659 win=60.0% \u2014 DONE"
+  "message": "120 trades/month target — emaSlopeN disabled, volMin=0, adxMin=12, minBias=0"
 }
