@@ -50,7 +50,7 @@ P = {
     'trailAtr':      0.65,   # trail = price - a_dn_1m_entry × trailAtr
     'trailActivate': 0.25,
     'maxHoldBars':   60,     # 10-bar range needs room; 60 min max hold
-    'adxMin':        22,
+    'adxMin':        20.0,
     'minBias':       0.05,   # skip entry if 1-min bias < minBias
     'minBias60m':    0.0,    # skip entry if 60-min bias < this
     'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR
