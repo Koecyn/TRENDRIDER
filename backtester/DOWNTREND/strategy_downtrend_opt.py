@@ -52,7 +52,7 @@ P = {
     'maxHoldBars':   90,
     'adxMin':        14.0,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
     'minBias':       -0.5,   # allow pullback bars — EMA5 touch IS the entry signal
-    'minBias60m':    0.0,
+    'minBias60m':    -0.5,
     'targetWindow':  10,
 }
 

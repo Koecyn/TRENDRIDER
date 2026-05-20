@@ -111,6 +111,7 @@ def run_backtest() -> dict:
         *fetch_flag,
         "--balance",       "100",
         "--min-bias",      str(read_param("minBias")      or "0.0"),
+        "--min-bias-60m",  str(read_param("minBias60m")   or "0.0"),
         "--adx-min",       str(read_param("adxMin")       or "22"),
         "--atr-stop",      str(read_param("atrStop")      or "1.0"),
         "--atr-tp",        str(read_param("atrTp")        or "2.8"),
