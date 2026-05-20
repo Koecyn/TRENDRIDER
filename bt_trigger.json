@@ -1,6 +1,6 @@
 {
-  "id": "iter96",
-  "command": "RUN",
+  "id": "iter96_081007_DONE",
+  "command": "STOP",
   "bash": "",
-  "message": "trades=9 < 25 \u2014 loosen volMin 0.75\u21920.5"
+  "message": "Sharpe=3.659 win=60.0% \u2014 DONE"
 }
