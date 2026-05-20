@@ -1,6 +1,6 @@
 {
-  "id": "iter67_231435_DONE",
-  "command": "STOP",
+  "id": "iter68",
+  "command": "RUN",
   "bash": "",
-  "message": "Sharpe=3.863 \u2014 DONE"
+  "message": "Restart \u2014 target win_rate >= 60% while holding Sharpe >= 2.5"
 }

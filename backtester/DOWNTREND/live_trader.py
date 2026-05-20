@@ -499,7 +499,7 @@ class PositionManager:
         )
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — Bar Buffer & WebSocket Feed (ccxt.pro)
+# SECTION 5 — Bar Buffer & Feed (WebSocket via ccxt.pro, REST fallback for Termux)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class BarBuffer:
@@ -519,7 +519,7 @@ class BarBuffer:
             self._last_ts = ts_ms
             return False
         if ts_ms <= self._last_ts:
-            return False          # same candle updating
+            return False
         self._last_ts = ts_ms
         self.opens.append(o)
         self.highs.append(h)
@@ -539,78 +539,129 @@ class BarBuffer:
         )
 
 
-async def run_feed(args):
-    """Main async loop: stream 1-min OHLCV, compute indicators, call PM on each bar."""
-    import ccxt.pro as ccxtpro
-
-    paper = not args.live
-
+def _make_exchange(args, use_pro: bool):
+    """Build exchange object. use_pro=True → ccxt.pro (WebSocket), False → ccxt (REST)."""
+    creds = {}
     if args.live:
         api_key    = os.environ.get('BINANCE_US_API_KEY',    '')
         api_secret = os.environ.get('BINANCE_US_API_SECRET', '')
         if not api_key or not api_secret:
-            log.error(
-                'Set BINANCE_US_API_KEY and BINANCE_US_API_SECRET env vars for live mode.'
-            )
+            log.error('Set BINANCE_US_API_KEY and BINANCE_US_API_SECRET for live mode.')
             sys.exit(1)
-        exchange = ccxtpro.binanceus({
-            'apiKey':  api_key,
-            'secret':  api_secret,
-            'options': {'defaultType': 'spot'},
-        })
+        creds = {'apiKey': api_key, 'secret': api_secret}
+
+    opts = {**creds, 'options': {'defaultType': 'spot'}}
+
+    if use_pro:
+        import ccxt.pro as ccxtpro
+        return ccxtpro.binanceus(opts)
     else:
-        exchange = ccxtpro.binanceus({
-            'options': {'defaultType': 'spot'},
-        })
+        import ccxt
+        return ccxt.binanceus(opts)
 
-    buf = BarBuffer(maxbars=max(300, P['emaMacro'] + 10))
-    pm  = PositionManager(balance=args.balance, paper=paper)
 
-    mode_str = 'PAPER' if paper else 'LIVE'
-    log.info(
-        f'TrendRider v7 DOWNTREND | mode={mode_str} | '
-        f'symbol={SYMBOL} | balance=${args.balance:.2f}'
-    )
-    log.info('Warming up indicators — waiting for %d bars…', WARMUP_BARS)
+def _on_closed_bar(ts_ms, buf, pm, exchange, bar_count_ref: list):
+    """Called for each newly closed bar. Returns action string."""
+    bar_count_ref[0] += 1
+    bar_count = bar_count_ref[0]
 
-    bar_count = 0
+    if not buf.ready():
+        if bar_count % 50 == 0:
+            log.info('Warmup: %d / %d bars', bar_count, WARMUP_BARS)
+        return 'warmup'
+
+    highs, lows, closes = buf.arrays()
+    ind    = compute_indicators(highs, lows, closes)
+    action = pm.on_bar(ind, exchange)
+
+    ts_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime('%H:%M')
+    log.debug('%s | price=%.2f RSI=%.1f ADX=%.1f bias=%.3f | %s | %s',
+              ts_str, ind['price'], ind['r'], ind['dx'], ind['b_1m'],
+              action, pm.status())
+
+    if bar_count % 60 == 0:
+        log.info('Heartbeat | %s', pm.status())
+
+    return action
+
+
+async def _run_ws(args, buf, pm):
+    """WebSocket feed — preferred when ccxt.pro is available."""
+    exchange = _make_exchange(args, use_pro=True)
+    bar_count = [0]
+    log.info('Feed: WebSocket (ccxt.pro)')
+    try:
+        while True:
+            candles = await exchange.watch_ohlcv(SYMBOL, '1m')
+            for ts_ms, o, h, l, c, v in candles:
+                if buf.push(ts_ms, o, h, l, c, v):
+                    _on_closed_bar(ts_ms, buf, pm, exchange, bar_count)
+    finally:
+        await exchange.close()
+
+
+async def _run_rest(args, buf, pm):
+    """REST polling fallback — works on Termux/ARM where ccxt.pro build fails."""
+    exchange = _make_exchange(args, use_pro=False)
+    bar_count = [0]
+    log.info('Feed: REST polling every 62s (ccxt fallback — no WebSocket needed)')
+
+    # Pre-fill buffer with history so indicators are warm immediately
+    log.info('Fetching %d bars of history to warm indicators…', WARMUP_BARS + 10)
+    try:
+        history = exchange.fetch_ohlcv(SYMBOL, '1m', limit=WARMUP_BARS + 10)
+        for ts_ms, o, h, l, c, v in history[:-1]:   # skip current open bar
+            buf.push(ts_ms, o, h, l, c, v)
+        log.info('History loaded: %d bars', len(buf.closes))
+    except Exception as e:
+        log.warning('History pre-fill failed: %s — will warm up live', e)
 
     try:
         while True:
-            # watch_ohlcv returns list of [ts_ms, o, h, l, c, v] candles
-            candles = await exchange.watch_ohlcv(SYMBOL, '1m')
-            for ts_ms, o, h, l, c, v in candles:
-                new_bar = buf.push(ts_ms, o, h, l, c, v)
-                if not new_bar:
-                    continue
+            # Sleep until 2 seconds after the next minute boundary
+            now      = time.time()
+            next_min = (int(now / 60) + 1) * 60 + 2
+            wait     = next_min - now
+            log.debug('Sleeping %.1fs until next bar close', wait)
+            await asyncio.sleep(wait)
 
-                bar_count += 1
-                if not buf.ready():
-                    if bar_count % 50 == 0:
-                        log.info('Warmup: %d / %d bars', bar_count, WARMUP_BARS)
-                    continue
+            try:
+                candles = exchange.fetch_ohlcv(SYMBOL, '1m', limit=5)
+            except Exception as e:
+                log.error('fetch_ohlcv error: %s — retrying in 10s', e)
+                await asyncio.sleep(10)
+                continue
 
-                highs, lows, closes = buf.arrays()
-                ind = compute_indicators(highs, lows, closes)
-                action = pm.on_bar(ind, exchange)
-
-                ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-                log.debug(
-                    '%s | price=%.2f RSI=%.1f ADX=%.1f bias1m=%.3f | '
-                    'action=%s | %s',
-                    ts.strftime('%H:%M'),
-                    ind['price'], ind['r'], ind['dx'], ind['b_1m'],
-                    action, pm.status()
-                )
-
-                if bar_count % 60 == 0:
-                    log.info('Heartbeat | %s', pm.status())
+            # candles[-1] is the current open bar; candles[-2] is the just-closed bar
+            for ts_ms, o, h, l, c, v in candles[:-1]:
+                if buf.push(ts_ms, o, h, l, c, v):
+                    _on_closed_bar(ts_ms, buf, pm, exchange, bar_count)
 
     except KeyboardInterrupt:
-        log.info('Shutdown requested.')
+        pass
     finally:
-        log.info('Final status | %s', pm.status())
-        await exchange.close()
+        log.info('Final | %s', pm.status())
+
+
+async def run_feed(args):
+    """Entry point: try WebSocket, fall back to REST on import / connection error."""
+    paper = not args.live
+    buf   = BarBuffer(maxbars=max(300, P['emaMacro'] + 10))
+    pm    = PositionManager(balance=args.balance, paper=paper)
+
+    log.info('TrendRider v7 DOWNTREND | mode=%s | symbol=%s | balance=$%.2f',
+             'PAPER' if paper else 'LIVE', SYMBOL, args.balance)
+
+    # Try WebSocket first; fall back to REST if ccxt.pro is unavailable
+    try:
+        import ccxt.pro  # noqa: F401 — just testing importability
+        await _run_ws(args, buf, pm)
+    except (ImportError, ModuleNotFoundError):
+        log.warning('ccxt.pro not available — switching to REST polling (Termux-safe)')
+        await _run_rest(args, buf, pm)
+    except Exception as e:
+        log.error('WebSocket feed failed (%s) — switching to REST polling', e)
+        await _run_rest(args, buf, pm)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 6 — CLI Entry Point

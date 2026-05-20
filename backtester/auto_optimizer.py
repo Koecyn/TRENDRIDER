@@ -30,9 +30,10 @@ RESULTS_F   = REPO / "bt_results.json"
 CSV_PATH    = REPO / "backtester" / "btc_mar30.csv"
 LOG_F       = REPO / "backtester" / "optimizer.log"
 
-TARGET_SHARPE = 2.5
-MILESTONE     = 1.6
-MIN_TRADES    = 10
+TARGET_SHARPE  = 2.5
+TARGET_WIN_PCT = 60.0    # must also reach 60% win rate before stopping
+MILESTONE      = 1.6
+MIN_TRADES     = 10
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
 
@@ -282,6 +283,21 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         return {"param": "rsiOB", "value": new_rsi,
                 "reason": f"PF={pf:.2f} — lower rsiOB {rsi_ob}→{new_rsi} for deeper pullback before entry"}
 
+    # ── Win-rate push: sharpe already ≥ milestone but win rate < 60% ─────
+    # Quality filter: only enter on the strongest trend bars.
+    # Priority order: adxMin → minBias → rsiOB (narrowing RSI pullback band).
+    # Never tighten past hard ceilings — would drop trade count to zero.
+    if sharpe >= MILESTONE and trades >= MIN_TRADES and win_rate < (TARGET_WIN_PCT / 100):
+        if adx_min < 30:
+            return {"param": "adxMin", "value": adx_min + 2,
+                    "reason": f"win={win_rate:.0%} < 60% — tighten adxMin {adx_min}→{adx_min+2} (stronger trend)"}
+        if min_bias < 0.12:
+            return {"param": "minBias", "value": round(min_bias + 0.02, 2),
+                    "reason": f"win={win_rate:.0%} < 60% — raise minBias {min_bias}→{round(min_bias+0.02,2)} (more momentum)"}
+        if rsi_ob > 47:
+            return {"param": "rsiOB", "value": rsi_ob - 1,
+                    "reason": f"win={win_rate:.0%} < 60% — lower rsiOB {rsi_ob}→{rsi_ob-1} (tighter pullback band)"}
+
     # ── Low win rate: tighten signal quality filters ─────────────────────
     # Applies regardless of trade count — too few qualifying signals
     # means we should tighten criteria, not trade less-than-ideal setups.
@@ -409,12 +425,12 @@ def main():
         if sharpe >= MILESTONE and trades >= MIN_TRADES:
             log(f"MILESTONE: Sharpe={sharpe:.3f} ≥ {MILESTONE} — pushing toward {TARGET_SHARPE}", G)
 
-        if sharpe >= TARGET_SHARPE and trades >= MIN_TRADES:
-            log(f"TARGET REACHED — Sharpe={sharpe:.3f} ≥ {TARGET_SHARPE} ({trades} trades)", G)
+        if sharpe >= TARGET_SHARPE and trades >= MIN_TRADES and win >= TARGET_WIN_PCT:
+            log(f"TARGET REACHED — Sharpe={sharpe:.3f} win={win:.1f}% ({trades} trades)", G)
             TRIGGER_F.write_text(json.dumps(
                 {"id": iter_id+"_DONE", "command": "STOP",
-                 "bash": "", "message": f"Sharpe={sharpe:.3f} — DONE"}, indent=2))
-            commit_and_push(f"SUCCESS Sharpe={sharpe:.3f}")
+                 "bash": "", "message": f"Sharpe={sharpe:.3f} win={win:.1f}% — DONE"}, indent=2))
+            commit_and_push(f"SUCCESS Sharpe={sharpe:.3f} win={win:.1f}%")
             break
 
         history.append({**stats, "iter": iter_id})
