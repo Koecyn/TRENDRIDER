@@ -1,6 +1,6 @@
 {
-  "id": "iter55",
+  "id": "iter57",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=-5.41 win=24% PF=0.37 \u2014 holding params"
+  "message": "atrStop=0.4/rsiOB=55 over-tightened PF=0.37 \u2014 full reset"
 }
