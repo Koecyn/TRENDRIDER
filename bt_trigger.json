@@ -1,6 +1,6 @@
 {
-  "id": "iter141",
+  "id": "iter149",
   "command": "RUN",
   "bash": "",
-  "message": "momentum-exhaustion exit: adaptive trail tightens on RSI peak + vol fade + EMA crossback"
+  "message": "trades=98 < 120 \u2014 loosen adxMin 20.0\u219218.0"
 }
