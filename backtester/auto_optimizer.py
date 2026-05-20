@@ -118,6 +118,7 @@ def run_backtest() -> dict:
         "--target-window", str(int(float(read_param("targetWindow") or "10"))),
         "--max-hold",      str(int(float(read_param("maxHoldBars")  or "60"))),
         "--rsi-ob",        str(read_param("rsiOB")        or "65"),
+        "--vol-min",       str(read_param("volMin")        or "1.0"),
     ]
     log(f"Running backtest... {' '.join(cmd[2:])}", C)
     r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=300)
@@ -246,6 +247,7 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
     atr_stop    = float(read_param("atrStop")       or 1.0)
     tgt_win     = float(read_param("targetWindow")  or 10)
     ema_slope_n = float(read_param("emaSlopeN")     or 480)
+    vol_min     = float(read_param("volMin")        or 1.0)
 
     # ── 0 trades: loosen gates ───────────────────────────────────────────
     if trades == 0:
@@ -259,6 +261,11 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
             return {"param": "minBias", "value": 0.0,
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
+
+    # ── Volume gate: if 0 trades and volMin is blocking, loosen it first ───
+    if trades == 0 and vol_min > 0.5:
+        return {"param": "volMin", "value": round(vol_min - 0.25, 2),
+                "reason": f"0 trades — loosen volMin {vol_min}→{round(vol_min-0.25,2)}"}
 
     # ── Trade volume: if sharpe is good but trades are too few, open gates ──
     # More trades = better Kelly sizing stats + more compounding.
@@ -312,6 +319,9 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         if rsi_ob > 47:
             return {"param": "rsiOB", "value": rsi_ob - 1,
                     "reason": f"win={win_rate:.0%} < 60% — lower rsiOB {rsi_ob}→{rsi_ob-1} (tighter pullback band)"}
+        if vol_min < 1.5:
+            return {"param": "volMin", "value": round(vol_min + 0.1, 2),
+                    "reason": f"win={win_rate:.0%} < 60% — raise volMin {vol_min}→{round(vol_min+0.1,2)} (confirm buying pressure)"}
 
     # ── Low win rate: tighten signal quality filters ─────────────────────
     # Applies regardless of trade count — too few qualifying signals

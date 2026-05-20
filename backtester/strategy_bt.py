@@ -247,23 +247,54 @@ class TrendRider(Strategy):
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 def fetch_binance(days=30, start=None):
-    if not HAS_BINANCE:
-        sys.exit("python-binance not installed: pip install python-binance")
-    from datetime import datetime, timezone
-    # Public endpoint — no API keys needed for historical klines
-    client     = Client("", "", tld='us')
+    """
+    Fetch BTC/USDT 1m OHLCV from Binance.US.
+    Primary: ccxt (no API keys, works on Termux out of the box).
+    Fallback: python-binance library.
 
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    Raw ccxt bar: [timestamp_ms, open, high, low, close, volume]
+    Raw binance bar: [time, open, high, low, close, volume, close_time,
+                      quote_asset_vol, n_trades, taker_buy_base, taker_buy_quote, ignore]
+
+    Both are normalised to DataFrame with columns Open/High/Low/Close/Volume.
+    """
+    from datetime import datetime, timezone
+    now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
     if start:
-        from datetime import timezone
         start_ms = int(datetime.strptime(start, '%Y-%m-%d')
                        .replace(tzinfo=timezone.utc).timestamp() * 1000)
-        end_ms = min(start_ms + days * 86400 * 1000, now_ms)
+        end_ms   = min(start_ms + days * 86400 * 1000, now_ms)
     else:
         end_ms   = now_ms
         start_ms = now_ms - days * 86400 * 1000
 
-    print(f"Fetching BTCUSDT 1m from Binance.US...")
+    # ── Try ccxt first ────────────────────────────────────────────────────
+    try:
+        import ccxt
+        ex  = ccxt.binanceus()
+        print(f"Fetching BTC/USDT 1m via ccxt ({days}d from {start or 'now'})...")
+        raw = []
+        cur = start_ms
+        while cur < end_ms:
+            chunk = ex.fetch_ohlcv('BTC/USDT', '1m', since=cur, limit=1000)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            last_ts = chunk[-1][0]
+            print(f"  {len(raw):,} bars...", end='\r', flush=True)
+            if last_ts >= end_ms - 60000:
+                break
+            cur = last_ts + 60000
+        print(f"  {len(raw):,} bars fetched (ccxt).")
+        return _ccxt_to_df(raw)
+    except Exception as e:
+        print(f"  ccxt fetch failed ({e}) — trying python-binance fallback")
+
+    # ── Fallback: python-binance ──────────────────────────────────────────
+    if not HAS_BINANCE:
+        sys.exit("ccxt and python-binance both unavailable. pip install ccxt")
+    client = Client("", "", tld='us')
+    print(f"Fetching BTCUSDT 1m from Binance.US (python-binance)...")
     raw, cur = [], start_ms
     while cur < end_ms:
         chunk = client.get_klines(symbol='BTCUSDT', interval='1m',
@@ -273,19 +304,35 @@ def fetch_binance(days=30, start=None):
         raw.extend(chunk)
         cur = chunk[-1][0] + 60000
         print(f"  {len(raw):,} bars...", end='\r', flush=True)
-    print(f"  {len(raw):,} bars fetched.")
-    return raw_to_df(raw)
+    print(f"  {len(raw):,} bars fetched (python-binance).")
+    return _binance_to_df(raw)
 
-def raw_to_df(raw):
-    from datetime import datetime, timezone
+
+def _ccxt_to_df(raw):
+    """ccxt bar: [ts_ms, open, high, low, close, volume]"""
+    df = pd.DataFrame(raw, columns=['time','Open','High','Low','Close','Volume'])
+    df['time'] = pd.to_datetime(df['time'], unit='ms', utc=True)
+    df = df.set_index('time')
+    return df.astype(float)
+
+
+def _binance_to_df(raw):
+    """python-binance bar: 12-element list, first 6 are ts/o/h/l/c/v"""
     df = pd.DataFrame(raw, columns=[
         'time','open','high','low','close','volume',
         'close_time','qav','trades','tbav','tbqav','ignore'])
-    df['time']   = pd.to_datetime(df['time'], unit='ms', utc=True)
+    df['time'] = pd.to_datetime(df['time'], unit='ms', utc=True)
     df = df.set_index('time')
     df = df[['open','high','low','close','volume']].astype(float)
-    df.columns  = ['Open','High','Low','Close','Volume']
+    df.columns = ['Open','High','Low','Close','Volume']
     return df
+
+
+def raw_to_df(raw):
+    """Legacy alias — auto-detects ccxt vs python-binance format."""
+    if raw and len(raw[0]) == 6:
+        return _ccxt_to_df(raw)
+    return _binance_to_df(raw)
 
 def load_csv(path):
     df = pd.read_csv(path, index_col=0, parse_dates=True)

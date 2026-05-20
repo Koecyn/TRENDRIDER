@@ -40,20 +40,20 @@ P = {
     'emaSlow':       13,
     'emaTrend':      50,
     'emaMacro':      200,    # macro trend EMA
-    'emaSlopeN':     240,    # EMA200 slope lookback bars (480 = 8 hrs; robust to dead-cat bounces)
-    'rsiOB':         50.0,    # tighter cap: filters overextended crosses common in dead-cat bounces
+    'emaSlopeN':     240,    # EMA200 slope lookback bars
+    'rsiOB':         50.0,   # EMA_CROSS gate; EMA_PULLBACK uses hard cap 55
     'rsiOS':         28,
-    'volMin':        0.0,
+    'volMin':        1.0,    # min vol ratio vs 10-bar avg — confirms bounce has real buying
     'atrStop':       1.0,    # × 1-min downside ATR for stop
-    'atrTp':         2.8,    # × N-bar rolling range (upside component) for target
-    'partialAt':     3.0,    # partial exit at 1× range upside
-    'trailAtr':      0.65,   # trail = price - a_dn_1m_entry × trailAtr
+    'atrTp':         2.8,    # × N-bar rolling range for target
+    'partialAt':     3.0,
+    'trailAtr':      0.65,
     'trailActivate': 0.25,
-    'maxHoldBars':   60,     # 10-bar range needs room; 60 min max hold
-    'adxMin':        18,
-    'minBias':       0.0,   # skip entry if 1-min bias < minBias
-    'minBias60m':    0.0,    # skip entry if 60-min bias < this
-    'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR
+    'maxHoldBars':   60,
+    'adxMin':        22,     # reset to vault winner
+    'minBias':       0.05,   # reset to vault winner
+    'minBias60m':    0.0,
+    'targetWindow':  10,
 }
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -199,6 +199,7 @@ class TrendRiderAdaptive(Strategy):
     minBias       = P['minBias']
     minBias60m    = P['minBias60m']
     targetWindow  = P['targetWindow']
+    volMin        = P['volMin']
 
     def init(self):
         c = np.array(self.data.Close)
@@ -343,6 +344,15 @@ class TrendRiderAdaptive(Strategy):
             self._d_low_bias60m += 1
             return
 
+        # ── Volume confirmation gate ─────────────────────────────────────
+        # Only enter when current bar volume is above the 10-bar average.
+        # Filters pullback bounces that are just noise — real bounces have
+        # increasing buy volume as price reclaims EMA5.
+        vr = self.vol[-1]
+        if vr < self.volMin:
+            self._d_low_bias += 1   # reuse counter for vol block
+            return
+
         # ── Signal detection ──────────────────────────────────────────────
         setup = None
         if f <= s:
@@ -402,6 +412,8 @@ def main():
                     help='EMA200 slope lookback in bars (default 480 = 8 hrs)')
     ap.add_argument('--rsi-ob',        type=float, default=None,
                     help='RSI overbought cap for EMA_CROSS signal (default 65)')
+    ap.add_argument('--vol-min',       type=float, default=None,
+                    help='Min volume ratio vs 10-bar avg for entry (default 1.0)')
     args = ap.parse_args()
 
     overrides = {
@@ -415,6 +427,7 @@ def main():
         'partialAt':    args.partial_at,
         'targetWindow': args.target_window,
         'emaSlopeN':    args.slope_period,
+        'volMin':       args.vol_min,
     }
     applied = {}
     for k, v in overrides.items():

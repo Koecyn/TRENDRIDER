@@ -1,6 +1,6 @@
 {
-  "id": "iter80",
+  "id": "iter68",
   "command": "RUN",
   "bash": "",
-  "message": "0 trades, all gates minimal \u2014 strategy doesn't fire in this regime"
+  "message": "ccxt fetch + volume gate + vault params reset"
 }
