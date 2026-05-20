@@ -44,7 +44,7 @@ P = {
     'rsiOB':         55.0,    # tighter cap: filters overextended crosses common in dead-cat bounces
     'rsiOS':         28,
     'volMin':        0.0,
-    'atrStop':       0.6,    # × 1-min downside ATR for stop
+    'atrStop':       0.4,    # × 1-min downside ATR for stop
     'atrTp':         2.8,    # × N-bar rolling range (upside component) for target
     'partialAt':     3.0,    # partial exit at 1× range upside
     'trailAtr':      0.65,   # trail = price - a_dn_1m_entry × trailAtr
