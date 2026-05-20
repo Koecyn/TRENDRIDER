@@ -106,13 +106,15 @@ def run_backtest() -> dict:
         sys.executable,
         str(STRATEGY),
         *fetch_flag,
-        "--balance", "100",
-        "--min-bias", "0.05",
-        "--adx-min",  str(read_param("adxMin")  or "22"),
-        "--atr-stop", str(read_param("atrStop") or "1.0"),
+        "--balance",       "100",
+        "--min-bias",      str(read_param("minBias")      or "0.05"),
+        "--adx-min",       str(read_param("adxMin")       or "22"),
+        "--atr-stop",      str(read_param("atrStop")      or "1.0"),
+        "--atr-tp",        str(read_param("atrTp")        or "2.8"),
+        "--partial-at",    str(read_param("partialAt")    or "1.0"),
         "--target-window", str(int(float(read_param("targetWindow") or "10"))),
-        "--max-hold", str(int(float(read_param("maxHoldBars") or "60"))),
-        "--rsi-ob",   str(read_param("rsiOB")   or "65"),
+        "--max-hold",      str(int(float(read_param("maxHoldBars")  or "60"))),
+        "--rsi-ob",        str(read_param("rsiOB")        or "65"),
     ]
     log(f"Running backtest... {' '.join(cmd[2:])}", C)
     r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=300)
@@ -229,17 +231,20 @@ def remove_golden_cross_gate():
 # ── Decision engine ───────────────────────────────────────────────────────────
 
 def decide(stats: dict, diag: dict, history: list) -> dict:
-    trades   = int(stats.get("trades", 0))
-    sharpe   = stats.get("sharpe", -99)
-    win_rate = stats.get("win_rate", 0) / 100.0
+    trades     = int(stats.get("trades", 0))
+    sharpe     = stats.get("sharpe", -99)
+    win_rate   = stats.get("win_rate", 0) / 100.0
+    pf         = stats.get("profit_factor", 0)
 
-    adx_min  = float(read_param("adxMin")       or 22)
-    min_bias = float(read_param("minBias")       or 0.05)
-    rsi_ob   = float(read_param("rsiOB")         or 65)
-    atr_tp   = float(read_param("atrTp")         or 2.8)
-    atr_stop = float(read_param("atrStop")       or 1.0)
-    tgt_win  = float(read_param("targetWindow")  or 10)
+    adx_min    = float(read_param("adxMin")       or 22)
+    min_bias   = float(read_param("minBias")       or 0.05)
+    rsi_ob     = float(read_param("rsiOB")         or 65)
+    atr_tp     = float(read_param("atrTp")         or 2.8)
+    atr_stop   = float(read_param("atrStop")       or 1.0)
+    tgt_win    = float(read_param("targetWindow")  or 10)
+    partial_at = float(read_param("partialAt")     or 1.0)
 
+    # ── 0 trades: loosen gates ───────────────────────────────────────────
     if trades == 0:
         if diag["no_golden"] > 30:
             return {"gate": "remove_golden",
@@ -252,6 +257,25 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
+    # ── R:R rescue priority: bad profit factor → disable early partials ──
+    # partialAt=1.0 exits half the position at 1× upside range, which is
+    # smaller than the stop in bear markets. Winners get capped before trail.
+    if trades >= MIN_TRADES and pf < 0.70 and partial_at < 3.0:
+        return {"param": "partialAt", "value": 3.0,
+                "reason": f"PF={pf:.2f} — early partials cap winners; raising partialAt {partial_at:.1f}→3.0"}
+
+    # ── R:R rescue: partialAt wide but still losing → tighten stop ──────
+    if trades >= MIN_TRADES and pf < 0.70 and partial_at >= 3.0 and atr_stop > 0.5:
+        new_stop = round(atr_stop - 0.2, 2)
+        return {"param": "atrStop", "value": new_stop,
+                "reason": f"PF={pf:.2f} — tighten atrStop {atr_stop}→{new_stop} to improve R:R"}
+
+    # ── R:R rescue: stop tight but still losing → widen target window ───
+    if trades >= MIN_TRADES and pf < 0.70 and atr_stop <= 0.5 and tgt_win < 20:
+        return {"param": "targetWindow", "value": int(tgt_win + 5),
+                "reason": f"PF={pf:.2f} — widen targetWindow {tgt_win:.0f}→{int(tgt_win+5)} for bigger targets"}
+
+    # ── High trade count with low win rate: tighten signal quality ───────
     if trades > 40 and win_rate < 0.38:
         if rsi_ob > 55:
             return {"param": "rsiOB", "value": rsi_ob-5,
@@ -263,18 +287,21 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
             return {"param": "minBias", "value": round(min_bias+0.03,2),
                     "reason": f"win={win_rate:.0%} too low — tighten minBias {min_bias}→{round(min_bias+0.03,2)}"}
 
+    # ── Good win rate but sharpe negative: widen target ─────────────────
     if win_rate >= 0.48 and sharpe < 0:
         if atr_tp < 8.0:
             new_tp = round(atr_tp*1.25, 2)
             return {"param": "atrTp", "value": new_tp,
                     "reason": f"win={win_rate:.0%} good, sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp}"}
 
+    # ── Moderate win rate not yet profitable: tighten stop ──────────────
     if 0.40 <= win_rate < 0.48 and sharpe < 0.5:
         if atr_stop > 0.6:
             new_stop = round(atr_stop-0.15, 2)
             return {"param": "atrStop", "value": new_stop,
                     "reason": f"tighten stop atrStop {atr_stop}→{new_stop}"}
 
+    # ── Positive sharpe: push toward TARGET_SHARPE ───────────────────────
     if 0 < sharpe < TARGET_SHARPE:
         if atr_tp < 8.0:
             new_tp = round(atr_tp*1.2, 2)
@@ -292,7 +319,7 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": f"quality over quantity — adxMin {adx_min}→{adx_min+2}"}
 
     return {"action": "none",
-            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} — holding params"}
+            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} PF={pf:.2f} — holding params"}
 
 # ── Commit and push code change ───────────────────────────────────────────────
 
@@ -313,10 +340,23 @@ def commit_and_push(message: str):
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
+def detect_start_iter() -> int:
+    """Read iter number from latest bt_trigger.json on code branch, increment by 1."""
+    try:
+        r = git("show", f"origin/{CODE_BRANCH}:bt_trigger.json")
+        if r.returncode == 0:
+            d = json.loads(r.stdout)
+            m = re.match(r'iter(\d+)', d.get("id", ""))
+            if m:
+                return int(m.group(1)) + 1
+    except Exception:
+        pass
+    return 37  # fallback: known current state
+
 def main():
     log(f"Auto-optimizer starting — target Sharpe ≥ {TARGET_SHARPE} (milestone {MILESTONE})", G)
 
-    iter_num = 22
+    iter_num = detect_start_iter()
     history  = []
 
     while True:
