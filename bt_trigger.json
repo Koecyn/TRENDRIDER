@@ -1,6 +1,6 @@
 {
-  "id": "iter110",
+  "id": "iter112",
   "command": "RUN",
   "bash": "",
-  "message": "remove EMA200 price+golden-cross gates — were blocking 58% of valid bars"
+  "message": "win=38% critical \u2014 tighten adxMin 24.0\u219226 (filter non-trending bars)"
 }
