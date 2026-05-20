@@ -282,17 +282,31 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         return {"param": "rsiOB", "value": new_rsi,
                 "reason": f"PF={pf:.2f} — lower rsiOB {rsi_ob}→{new_rsi} for deeper pullback before entry"}
 
-    # ── Too many losing trades: tighten signal filters ───────────────────
-    if trades > 40 and win_rate < 0.38:
-        if rsi_ob > 55:
+    # ── Low win rate: tighten signal quality filters ─────────────────────
+    # Applies regardless of trade count — too few qualifying signals
+    # means we should tighten criteria, not trade less-than-ideal setups.
+    if trades >= MIN_TRADES and win_rate < 0.38:
+        if rsi_ob > 50:
             return {"param": "rsiOB", "value": rsi_ob-5,
-                    "reason": f"win={win_rate:.0%} too low — tighten rsiOB {rsi_ob}→{rsi_ob-5}"}
+                    "reason": f"win={win_rate:.0%} low — tighten rsiOB {rsi_ob}→{rsi_ob-5}"}
         if adx_min < 30:
             return {"param": "adxMin", "value": adx_min+2,
-                    "reason": f"win={win_rate:.0%} too low — tighten adxMin {adx_min}→{adx_min+2}"}
+                    "reason": f"win={win_rate:.0%} low — tighten adxMin {adx_min}→{adx_min+2}"}
         if min_bias < 0.15:
             return {"param": "minBias", "value": round(min_bias+0.03,2),
-                    "reason": f"win={win_rate:.0%} too low — tighten minBias {min_bias}→{round(min_bias+0.03,2)}"}
+                    "reason": f"win={win_rate:.0%} low — tighten minBias {min_bias}→{round(min_bias+0.03,2)}"}
+
+    # ── Near breakeven (sharpe -1 to 0): widen target to push positive ───
+    # With R:R near 1.6:1 and win rate near breakeven, widening the target
+    # lets winners run further and can push expectancy positive.
+    if -1.0 < sharpe < 0 and trades >= MIN_TRADES and pf >= 0.80:
+        if atr_tp < 8.0:
+            new_tp = round(atr_tp * 1.25, 2)
+            return {"param": "atrTp", "value": new_tp,
+                    "reason": f"sharpe={sharpe:.2f} near-breakeven PF={pf:.2f} — widen atrTp {atr_tp}→{new_tp}"}
+        if adx_min < 28 and trades > 15:
+            return {"param": "adxMin", "value": adx_min+2,
+                    "reason": f"sharpe={sharpe:.2f} — tighten adxMin {adx_min}→{adx_min+2} for quality"}
 
     # ── Good win rate but sharpe negative: widen target ──────────────────
     if win_rate >= 0.48 and sharpe < 0:
