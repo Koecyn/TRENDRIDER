@@ -2,5 +2,5 @@
   "id": "iter110",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=-0.02 near-breakeven PF=1.00 \u2014 widen atrTp 2.8\u21923.5"
+  "message": "remove EMA200 price+golden-cross gates — were blocking 58% of valid bars"
 }

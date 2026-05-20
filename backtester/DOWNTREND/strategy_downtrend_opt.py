@@ -314,17 +314,14 @@ class TrendRiderAdaptive(Strategy):
             self._d_slope_block += 1
             return
 
-        # Block entries when price is below EMA200 — instant macro bear filter.
+        # EMA200 macro gates removed — strategy trades micro-bounces within ranges.
+        # Even in a downtrend, $20+ intraday ranges are common. EMA5>EMA13 + ADX
+        # already confirms local momentum; EMA200 was blocking 50%+ of valid bars.
         if price < e200:
-            self._d_below_e200 += 1
-            return
-
-        # Golden cross gate: EMA50 must be above EMA200.
-        # When EMA50 < EMA200 we are in a death-cross bear regime — no longs.
+            self._d_below_e200 += 1   # count for diagnostics only — don't return
         e50 = self.ema50[-1]
         if e50 < e200:
-            self._d_no_golden += 1
-            return
+            self._d_no_golden += 1    # count for diagnostics only — don't return
 
         # ── Regime gate — 1-min bias ──────────────────────────────────────
         self._d_bias_sum += b_1m
