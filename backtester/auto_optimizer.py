@@ -110,7 +110,7 @@ def run_backtest() -> dict:
         str(STRATEGY),
         *fetch_flag,
         "--balance",       "100",
-        "--min-bias",      str(read_param("minBias")      if read_param("minBias") is not None else "0.0"),
+        "--min-bias",      str(read_param("minBias")      or "0.0"),
         "--adx-min",       str(read_param("adxMin")       or "22"),
         "--atr-stop",      str(read_param("atrStop")      or "1.0"),
         "--atr-tp",        str(read_param("atrTp")        or "2.8"),
@@ -203,12 +203,12 @@ def parse_diag(tail: list) -> dict:
 # ── Read / set P dict params ──────────────────────────────────────────────────
 
 def read_param(name: str):
-    m = re.search(rf"'{name}'\s*:\s*([0-9.]+)", STRATEGY.read_text())
+    m = re.search(rf"'{name}'\s*:\s*(-?[0-9.]+)", STRATEGY.read_text())
     return m.group(1) if m else None
 
 def set_param(name: str, value):
     text = STRATEGY.read_text()
-    new  = re.sub(rf"('{name}'\s*:\s*)[0-9.]+", rf"\g<1>{value}", text)
+    new  = re.sub(rf"('{name}'\s*:\s*)-?[0-9.]+", rf"\g<1>{value}", text)
     if new == text:
         log(f"  WARNING: param {name} not found", Y); return False
     STRATEGY.write_text(new)
@@ -242,7 +242,7 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
     pf          = stats.get("profit_factor", 0)
 
     adx_min     = float(read_param("adxMin")       or 22)
-    min_bias    = float(read_param("minBias")       if read_param("minBias") is not None else 0.0)
+    min_bias    = float(read_param("minBias")       or 0.0)
     rsi_ob      = float(read_param("rsiOB")         or 65)
     atr_tp      = float(read_param("atrTp")         or 2.8)
     atr_stop    = float(read_param("atrStop")       or 1.0)
@@ -261,36 +261,37 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
-    # ── Sharpe is negative: widen target before anything else ───────────────
-    # The local bounce IS the entry; the continuation IS the win. Wider target
-    # catches more of that continuation. Don't loosen entries when R:R is broken.
+    # ── Sharpe negative: widen target (cap 4.0), then extend hold time ─────────
+    # Don't keep widening past 4.0 — targets unreachable in 60 bars become timeouts.
+    # After 4.0, extend maxHoldBars so more trades reach target instead.
     if sharpe < 0 and trades >= MIN_TRADES:
-        if atr_tp < 10.0:
-            new_tp = round(atr_tp * 1.2, 2)
+        if atr_tp < 4.0:
+            new_tp = min(4.0, round(atr_tp * 1.2, 2))
             return {"param": "atrTp", "value": new_tp,
-                    "reason": f"sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp} (catch continuation)"}
-        if max_hold < 120:
+                    "reason": f"sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp}"}
+        if max_hold < 180:
             return {"param": "maxHoldBars", "value": max_hold + 30,
-                    "reason": f"sharpe={sharpe:.2f} — extend maxHoldBars {max_hold}→{max_hold+30} (let winners run)"}
+                    "reason": f"sharpe={sharpe:.2f} atrTp={atr_tp:.1f} capped — extend maxHoldBars {max_hold}→{max_hold+30}"}
 
-    # ── Too few trades and sharpe is already positive: loosen entry gate ─────
-    # Only loosen after R:R is working. Never below adxMin=10.
-    if sharpe >= 0 and trades < TARGET_TRADES and adx_min > 10:
-        return {"param": "adxMin", "value": max(10, adx_min - 2),
-                "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{max(10,adx_min-2)}"}
+    # ── Too few trades and sharpe positive: loosen entry gate ───────────────────
+    # Only after R:R is working. Never below adxMin=12 (need some trend confirmation).
+    if sharpe >= 0 and trades < TARGET_TRADES and adx_min > 12:
+        return {"param": "adxMin", "value": max(12, adx_min - 2),
+                "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{max(12,adx_min-2)}"}
 
-    # ── Positive sharpe, pushing toward target ───────────────────────────────
+    # ── Positive sharpe, push toward target ─────────────────────────────────────
+    # atrTp cap 4.0 — beyond that extend hold time instead.
     if 0 < sharpe < TARGET_SHARPE and trades >= MIN_TRADES:
-        if atr_tp < 10.0:
-            new_tp = round(atr_tp * 1.15, 2)
+        if atr_tp < 4.0:
+            new_tp = min(4.0, round(atr_tp * 1.15, 2))
             return {"param": "atrTp", "value": new_tp,
                     "reason": f"sharpe={sharpe:.2f} — push atrTp {atr_tp}→{new_tp}"}
-        if tgt_win < 20:
-            return {"param": "targetWindow", "value": int(tgt_win + 5),
-                    "reason": f"widen targetWindow {tgt_win}→{int(tgt_win+5)} (wider range captures bigger moves)"}
+        if max_hold < 180:
+            return {"param": "maxHoldBars", "value": max_hold + 30,
+                    "reason": f"sharpe={sharpe:.2f} atrTp={atr_tp:.1f} capped — extend maxHoldBars {max_hold}→{max_hold+30}"}
 
-    # ── Volume target met, win rate still low: nudge entry quality up ────────
-    # Never go above vault value (22). adxMin is the last resort lever.
+    # ── Volume target met, win rate still low: nudge entry quality ───────────────
+    # Never above 22 (vault value). adxMin is last resort.
     if trades >= TARGET_TRADES and win_rate < (TARGET_WIN_PCT / 100) and adx_min < 22:
         return {"param": "adxMin", "value": adx_min + 2,
                 "reason": f"trades={trades} ok, win={win_rate:.0%} low — nudge adxMin {adx_min}→{adx_min+2}"}

@@ -45,12 +45,12 @@ P = {
     'rsiOS':         28,
     'volMin':        0.0,    # disabled — cutting losers is not a strategy
     'atrStop':       1.0,
-    'atrTp':         9.25,
+    'atrTp':         3.2,
     'partialAt':     3.0,
     'trailAtr':      0.65,
     'trailActivate': 0.25,
     'maxHoldBars':   60,
-    'adxMin':        14.0,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
+    'adxMin':        18,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
     'minBias':       -0.5,   # allow pullback bars — EMA5 touch IS the entry signal
     'minBias60m':    0.0,
     'targetWindow':  10,

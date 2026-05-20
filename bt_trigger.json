@@ -2,5 +2,5 @@
   "id": "iter128",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=0.37 \u2014 push atrTp 8.04\u21929.25"
+  "message": "reset adxMin=18 atrTp=3.2 minBias=-0.5(fixed); cap atrTp=4.0 in optimizer"
 }
