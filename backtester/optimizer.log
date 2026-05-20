@@ -1,0 +1,129 @@
+[optimizer 14:54:50] Auto-optimizer starting — target Sharpe ≥ 2.5 (milestone 1.6)
+[optimizer 14:54:51] Code synced from repo
+[optimizer 14:54:51] ── iter69 ── running backtest
+[optimizer 14:54:51] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:54:51] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:00] [iter69_145500] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:00]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:01] Results pushed to data/live
+[optimizer 14:55:01]   → 0 trades — loosen adxMin 22.0→20.0
+[optimizer 14:55:01]   SET P['adxMin'] = 20.0
+[optimizer 14:55:03] Pushed to code branch
+[optimizer 14:55:03]   iter70 committed — starting next run
+
+[optimizer 14:55:03] Code synced from repo
+[optimizer 14:55:03] ── iter70 ── running backtest
+[optimizer 14:55:03] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:03] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 20.0 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:05] [iter70_145505] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:05]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:07] Results pushed to data/live
+[optimizer 14:55:07]   → 0 trades — loosen adxMin 20.0→18
+[optimizer 14:55:07]   SET P['adxMin'] = 18
+[optimizer 14:55:08] Pushed to code branch
+[optimizer 14:55:08]   iter71 committed — starting next run
+
+[optimizer 14:55:08] Code synced from repo
+[optimizer 14:55:08] ── iter71 ── running backtest
+[optimizer 14:55:08] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:08] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:10] [iter71_145510] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:10]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:14] Results pushed to data/live
+[optimizer 14:55:14]   → 0 trades — remove minBias gate
+[optimizer 14:55:14]   SET P['minBias'] = 0.0
+[optimizer 14:55:16] Pushed to code branch
+[optimizer 14:55:16]   iter72 committed — starting next run
+
+[optimizer 14:55:16] Code synced from repo
+[optimizer 14:55:16] ── iter72 ── running backtest
+[optimizer 14:55:16] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:16] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:17] [iter72_145517] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:17]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:19] Results pushed to data/live
+[optimizer 14:55:19]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:20] Pushed to code branch
+[optimizer 14:55:20]   iter73 committed — starting next run
+
+[optimizer 14:55:21] Code synced from repo
+[optimizer 14:55:21] ── iter73 ── running backtest
+[optimizer 14:55:21] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:21] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:22] [iter73_145522] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:22]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:24] Results pushed to data/live
+[optimizer 14:55:24]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:25] Pushed to code branch
+[optimizer 14:55:25]   iter74 committed — starting next run
+
+[optimizer 14:55:25] Code synced from repo
+[optimizer 14:55:25] ── iter74 ── running backtest
+[optimizer 14:55:25] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:25] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:27] [iter74_145527] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:27]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:28] Results pushed to data/live
+[optimizer 14:55:28]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:30] Pushed to code branch
+[optimizer 14:55:30]   iter75 committed — starting next run
+
+[optimizer 14:55:30] Code synced from repo
+[optimizer 14:55:30] ── iter75 ── running backtest
+[optimizer 14:55:30] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:30] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:31] [iter75_145531] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:31]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:33] Results pushed to data/live
+[optimizer 14:55:33]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:34] Pushed to code branch
+[optimizer 14:55:34]   iter76 committed — starting next run
+
+[optimizer 14:55:35] Code synced from repo
+[optimizer 14:55:35] ── iter76 ── running backtest
+[optimizer 14:55:35] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:35] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:36] [iter76_145536] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:36]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:38] Results pushed to data/live
+[optimizer 14:55:38]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:39] Pushed to code branch
+[optimizer 14:55:39]   iter77 committed — starting next run
+
+[optimizer 14:55:39] Code synced from repo
+[optimizer 14:55:39] ── iter77 ── running backtest
+[optimizer 14:55:39] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:39] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:41] [iter77_145541] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:41]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:42] Results pushed to data/live
+[optimizer 14:55:42]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:44] Pushed to code branch
+[optimizer 14:55:44]   iter78 committed — starting next run
+
+[optimizer 14:55:44] Code synced from repo
+[optimizer 14:55:44] ── iter78 ── running backtest
+[optimizer 14:55:44] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:44] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:45] [iter78_145545] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:45]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:47] Results pushed to data/live
+[optimizer 14:55:47]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:48] Pushed to code branch
+[optimizer 14:55:48]   iter79 committed — starting next run
+
+[optimizer 14:55:48] Code synced from repo
+[optimizer 14:55:48] ── iter79 ── running backtest
+[optimizer 14:55:48] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:48] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
+[optimizer 14:55:50] [iter79_145550] sharpe=-99.000 | win=0.0% | trades=0 | ret=-99.00%
+[optimizer 14:55:50]   adx=0%blk  slope=0%blk  no_golden=0%blk  cross_fired=0
+[optimizer 14:55:52] Results pushed to data/live
+[optimizer 14:55:52]   → 0 trades, all gates minimal — strategy doesn't fire in this regime
+[optimizer 14:55:53] Pushed to code branch
+[optimizer 14:55:53]   iter80 committed — starting next run
+
+[optimizer 14:55:54] Code synced from repo
+[optimizer 14:55:54] ── iter80 ── running backtest
+[optimizer 14:55:54] btc_mar30.csv not found — fetching from Binance
+[optimizer 14:55:54] Running backtest... --start 2026-03-01 --days 30 --save-csv /home/user/TRENDRIDER/backtester/btc_mar30.csv --balance 100 --min-bias 0.0 --adx-min 18 --atr-stop 1.0 --atr-tp 2.8 --partial-at 3.0 --target-window 10 --max-hold 60 --rsi-ob 50.0
