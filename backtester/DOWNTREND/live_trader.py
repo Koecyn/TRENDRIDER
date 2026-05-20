@@ -284,9 +284,40 @@ class PositionManager:
         self.entry_order_id   = None
         self.stop_order_id    = None
         self.target_order_id  = None
-        self.total_trades  = 0
-        self.winning_trades = 0
-        self.total_pnl_pct  = 0.0
+        self.total_trades   = 0
+        self.winning_trades  = 0
+        self.total_pnl_pct   = 0.0
+        # Kelly tracking
+        self._sum_win_pct   = 0.0   # cumulative winning trade %
+        self._sum_loss_pct  = 0.0   # cumulative losing trade abs %
+        self._n_wins        = 0
+        self._n_losses      = 0
+
+    def kelly_fraction(self) -> float:
+        """
+        Half-Kelly position sizing from running trade stats.
+
+        Kelly% = (p*b - q) / b   where b = avg_win / avg_loss, p = win rate
+        We use half-Kelly as a safety margin, floored at 10%, capped at 50%.
+        Falls back to 25% until we have at least 5 completed trades.
+        """
+        n = self._n_wins + self._n_losses
+        if n < 5:
+            return 0.25   # conservative default until stats are meaningful
+
+        p = self._n_wins / n
+        q = 1.0 - p
+        avg_win  = self._sum_win_pct  / self._n_wins  if self._n_wins  > 0 else 0.0
+        avg_loss = self._sum_loss_pct / self._n_losses if self._n_losses > 0 else 1e-6
+        b = avg_win / avg_loss if avg_loss > 0 else 1.0
+
+        kelly = (p * b - q) / b if b > 0 else 0.0
+        half_kelly = kelly * 0.5
+
+        fraction = max(0.10, min(0.50, half_kelly))
+        log.debug('Kelly: p=%.2f b=%.2f full=%.2f%% half=%.2f%% → using %.2f%%',
+                  p, b, kelly*100, half_kelly*100, fraction*100)
+        return fraction
 
     # ── called on every bar ───────────────────────────────────────────────────
     def on_bar(self, ind: dict, exchange) -> str:
@@ -309,17 +340,22 @@ class PositionManager:
         levels = calc_entry_levels(ind)
         price  = ind['price']
 
-        # size: use 99% of balance, but cap to keep notional ≥ MIN_NOTIONAL
-        usdt_to_spend = self.balance * 0.99
+        # Kelly-sized position: half-Kelly fraction of balance
+        frac = self.kelly_fraction()
+        usdt_to_spend = self.balance * frac
+        # Floor: must meet min notional; if Kelly says too little, skip
         if usdt_to_spend < MIN_NOTIONAL:
-            log.warning(f'Balance ${self.balance:.2f} below min notional — skipping')
-            return 'below_min'
+            # try full 99% before giving up — only applies on tiny accounts
+            if self.balance * 0.99 < MIN_NOTIONAL:
+                log.warning(f'Balance ${self.balance:.2f} below min notional — skipping')
+                return 'below_min'
+            usdt_to_spend = self.balance * 0.99
 
         qty = usdt_to_spend / price
 
         log.info(
-            f'SIGNAL {sig} | price={price:.2f} '
-            f'stop={levels["stop"]:.2f} target={levels["target"]:.2f} '
+            f'SIGNAL {sig} | price={price:.2f} kelly={frac:.0%} '
+            f'size=${usdt_to_spend:.2f} stop={levels["stop"]:.2f} target={levels["target"]:.2f} '
             f'qty={qty:.6f} BTC'
         )
 
@@ -403,13 +439,19 @@ class PositionManager:
         self.total_trades  += 1
         self.total_pnl_pct += pnl_pct
         if pnl_pct > 0:
-            self.winning_trades += 1
-        win_rate = self.winning_trades / self.total_trades * 100
+            self.winning_trades  += 1
+            self._n_wins         += 1
+            self._sum_win_pct    += pnl_pct
+        else:
+            self._n_losses       += 1
+            self._sum_loss_pct   += abs(pnl_pct)
+        win_rate   = self.winning_trades / self.total_trades * 100
+        next_kelly = self.kelly_fraction()
         log.info(
             f'[{"PAPER" if self.paper else "LIVE"}] SELL {self.btc_qty:.6f} BTC '
             f'@ {exit_price:.2f} reason={reason} pnl={pnl_pct:+.3f}% | '
             f'balance=${self.balance:.4f} trades={self.total_trades} '
-            f'W%={win_rate:.0f}%'
+            f'W%={win_rate:.0f}% next_kelly={next_kelly:.0%}'
         )
         self.state   = 'FLAT'
         self.btc_qty = 0.0

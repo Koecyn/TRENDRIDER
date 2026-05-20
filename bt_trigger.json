@@ -2,5 +2,5 @@
   "id": "iter68",
   "command": "RUN",
   "bash": "",
-  "message": "Restart \u2014 target win_rate >= 60% while holding Sharpe >= 2.5"
+  "message": "Opt copy \u2014 volume push + 60% win rate + Kelly sizing"
 }

@@ -24,7 +24,8 @@ from pathlib import Path
 REPO        = Path(__file__).resolve().parent.parent
 CODE_BRANCH = "claude/hft-mean-reversion-strategy-pJ4YU"
 DATA_BRANCH = "data/live"
-STRATEGY    = REPO / "backtester" / "DOWNTREND" / "strategy_downtrend.py"
+STRATEGY    = REPO / "backtester" / "DOWNTREND" / "strategy_downtrend_opt.py"
+STRATEGY_VAULT = REPO / "backtester" / "DOWNTREND" / "strategy_downtrend.py"  # READ ONLY
 TRIGGER_F   = REPO / "bt_trigger.json"
 RESULTS_F   = REPO / "bt_results.json"
 CSV_PATH    = REPO / "backtester" / "btc_mar30.csv"
@@ -34,6 +35,7 @@ TARGET_SHARPE  = 2.5
 TARGET_WIN_PCT = 60.0    # must also reach 60% win rate before stopping
 MILESTONE      = 1.6
 MIN_TRADES     = 10
+TARGET_TRADES  = 25      # want at least 25 trades/month before calling it done
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
 
@@ -257,6 +259,19 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
             return {"param": "minBias", "value": 0.0,
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
+
+    # ── Trade volume: if sharpe is good but trades are too few, open gates ──
+    # More trades = better Kelly sizing stats + more compounding.
+    # Only loosen when quality is already confirmed (sharpe ≥ milestone).
+    # Priority: shorten emaSlopeN first (was the breakthrough lever) → adxMin.
+    if sharpe >= MILESTONE and trades < TARGET_TRADES:
+        if ema_slope_n > 60:
+            new_sn = max(60, int(ema_slope_n * 0.5))
+            return {"param": "emaSlopeN", "value": new_sn,
+                    "reason": f"trades={trades} < {TARGET_TRADES} target — shorten slope lookback {ema_slope_n:.0f}→{new_sn} (more entries)"}
+        if adx_min > 18:
+            return {"param": "adxMin", "value": adx_min - 2,
+                    "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{adx_min-2} (more entries)"}
 
     # ── RESCUE: over-tightened params hurt win rate → full reset + pivot ──
     # Tighter stops cause more false exits in volatile BTC. Lower rsiOB
