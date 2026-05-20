@@ -261,16 +261,9 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
-    # ── Too few trades: loosen the entry gate ───────────────────────────────
-    # The EMA_PULLBACK signal is the quality gate. ADX is just a dead-flat filter.
-    # Never go below adxMin=10 — that's genuinely random noise bars.
-    if trades < TARGET_TRADES and adx_min > 10:
-        return {"param": "adxMin", "value": max(10, adx_min - 2),
-                "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{max(10,adx_min-2)}"}
-
-    # ── Sharpe is negative but we have trades: widen target first ───────────
+    # ── Sharpe is negative: widen target before anything else ───────────────
     # The local bounce IS the entry; the continuation IS the win. Wider target
-    # catches more of that continuation before the trade times out.
+    # catches more of that continuation. Don't loosen entries when R:R is broken.
     if sharpe < 0 and trades >= MIN_TRADES:
         if atr_tp < 10.0:
             new_tp = round(atr_tp * 1.2, 2)
@@ -280,9 +273,13 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
             return {"param": "maxHoldBars", "value": max_hold + 30,
                     "reason": f"sharpe={sharpe:.2f} — extend maxHoldBars {max_hold}→{max_hold+30} (let winners run)"}
 
+    # ── Too few trades and sharpe is already positive: loosen entry gate ─────
+    # Only loosen after R:R is working. Never below adxMin=10.
+    if sharpe >= 0 and trades < TARGET_TRADES and adx_min > 10:
+        return {"param": "adxMin", "value": max(10, adx_min - 2),
+                "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{max(10,adx_min-2)}"}
+
     # ── Positive sharpe, pushing toward target ───────────────────────────────
-    # Primary lever: widen target to capture more of the move.
-    # Secondary: tighten stop only if win rate is already decent.
     if 0 < sharpe < TARGET_SHARPE and trades >= MIN_TRADES:
         if atr_tp < 10.0:
             new_tp = round(atr_tp * 1.15, 2)
@@ -292,8 +289,8 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
             return {"param": "targetWindow", "value": int(tgt_win + 5),
                     "reason": f"widen targetWindow {tgt_win}→{int(tgt_win+5)} (wider range captures bigger moves)"}
 
-    # ── Good trades, win rate still low: try tightening entry quality ────────
-    # Only use adxMin after target is already wide. Never go above 22.
+    # ── Volume target met, win rate still low: nudge entry quality up ────────
+    # Never go above vault value (22). adxMin is the last resort lever.
     if trades >= TARGET_TRADES and win_rate < (TARGET_WIN_PCT / 100) and adx_min < 22:
         return {"param": "adxMin", "value": adx_min + 2,
                 "reason": f"trades={trades} ok, win={win_rate:.0%} low — nudge adxMin {adx_min}→{adx_min+2}"}

@@ -1,6 +1,6 @@
 {
-  "id": "iter118",
+  "id": "iter119",
   "command": "RUN",
   "bash": "",
-  "message": "trades=74 < 120 \u2014 loosen adxMin 18.0\u219216.0"
+  "message": "fix decide() order: widen atrTp when sharpe<0, only loosen adxMin when sharpe>=0"
 }
