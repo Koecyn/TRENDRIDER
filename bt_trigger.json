@@ -1,6 +1,6 @@
 {
-  "id": "iter114",
+  "id": "iter115",
   "command": "RUN",
   "bash": "",
-  "message": "win=33% critical \u2014 raise minBias 0.04\u21920.08 (require upward pressure)"
+  "message": "adxMin=14 minBias=0.0 atrTp=4.0 — lead with target width not entry filters"
 }

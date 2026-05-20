@@ -247,117 +247,59 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
     atr_tp      = float(read_param("atrTp")         or 2.8)
     atr_stop    = float(read_param("atrStop")       or 1.0)
     tgt_win     = float(read_param("targetWindow")  or 10)
+    max_hold    = int(float(read_param("maxHoldBars") or 60))
     ema_slope_n = float(read_param("emaSlopeN")     or 480)
     vol_min     = float(read_param("volMin")        or 1.0)
 
     # ── 0 trades: loosen gates ───────────────────────────────────────────
     if trades == 0:
-        if diag["no_golden"] > 30:
-            return {"gate": "remove_golden",
-                    "reason": f"golden cross gate blocked {diag['no_golden']:.0f}% — removing"}
-        if adx_min > 18:
-            return {"param": "adxMin", "value": max(18, adx_min-2),
-                    "reason": f"0 trades — loosen adxMin {adx_min}→{max(18,adx_min-2)}"}
+        if adx_min > 10:
+            return {"param": "adxMin", "value": max(10, adx_min - 4),
+                    "reason": f"0 trades — loosen adxMin {adx_min}→{max(10,adx_min-4)}"}
         if min_bias > 0.0:
             return {"param": "minBias", "value": 0.0,
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
-    # ── QUALITY TRIAGE (runs before volume push) ─────────────────────────────
-    # Win rate < 40% = broken signal quality. Tighten hard before anything else.
-    # ADX < 20 means non-trending bar — most EMA_PULLBACK false signals come from
-    # weak-ADX bars. Large steps (4) to converge faster.
-    if trades >= MIN_TRADES and win_rate < 0.40:
-        if adx_min < 26:
-            new_adx = min(26, adx_min + 4)
-            return {"param": "adxMin", "value": new_adx,
-                    "reason": f"win={win_rate:.0%} critical — tighten adxMin {adx_min}→{new_adx} (filter non-trending bars)"}
-        if min_bias < 0.08:
-            return {"param": "minBias", "value": round(min_bias + 0.04, 2),
-                    "reason": f"win={win_rate:.0%} critical — raise minBias {min_bias}→{round(min_bias+0.04,2)} (require upward pressure)"}
-        if rsi_ob > 46:
-            return {"param": "rsiOB", "value": rsi_ob - 3,
-                    "reason": f"win={win_rate:.0%} critical — lower rsiOB {rsi_ob}→{rsi_ob-3} (deeper pullback only)"}
+    # ── Too few trades: loosen the entry gate ───────────────────────────────
+    # The EMA_PULLBACK signal is the quality gate. ADX is just a dead-flat filter.
+    # Never go below adxMin=10 — that's genuinely random noise bars.
+    if trades < TARGET_TRADES and adx_min > 10:
+        return {"param": "adxMin", "value": max(10, adx_min - 2),
+                "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{max(10,adx_min-2)}"}
 
-    # ── Trade volume: only loosen once quality is acceptable (win ≥ 40%) ────
-    # emaSlopeN: in a downtrend, LONGER lookback gives MORE passes (compares
-    # to older/lower EMA200). Vault winner was 240. Shorter = more blocks.
-    # volMin is NEVER used as a lever — cutting losers is not a strategy.
-    if sharpe >= MILESTONE and trades < TARGET_TRADES and win_rate >= 0.40:
-        if ema_slope_n < 120:
-            new_sn = min(240, int(ema_slope_n * 2))
-            return {"param": "emaSlopeN", "value": new_sn,
-                    "reason": f"trades={trades} < {TARGET_TRADES} — restore emaSlopeN {ema_slope_n:.0f}→{new_sn} (longer=more entries in downtrend)"}
-        if adx_min > 8:
-            return {"param": "adxMin", "value": adx_min - 2,
-                    "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{adx_min-2}"}
-        if rsi_ob < 65:
-            return {"param": "rsiOB", "value": rsi_ob + 3,
-                    "reason": f"trades={trades} < {TARGET_TRADES} — widen rsiOB {rsi_ob}→{rsi_ob+3} (more pullback entries)"}
-
-    # ── RESCUE: over-tightened params hurt win rate → full reset + pivot ──
-    if pf < 0.42 and atr_stop < 0.6:
-        return {"action": "multi",
-                "params": [("atrStop", 1.0), ("targetWindow", 10), ("rsiOB", 50)],
-                "reason": f"atrStop={atr_stop:.1f}/rsiOB={rsi_ob:.0f} over-tightened PF={pf:.2f} — full reset"}
-
-    # ── Win-rate push: sharpe ≥ milestone, quality needs improvement ─────
-    # Priority: adxMin → minBias → rsiOB.
-    if sharpe >= MILESTONE and trades >= MIN_TRADES and win_rate < (TARGET_WIN_PCT / 100):
-        if adx_min < 30:
-            return {"param": "adxMin", "value": adx_min + 2,
-                    "reason": f"win={win_rate:.0%} < 60% — tighten adxMin {adx_min}→{adx_min+2} (stronger trend)"}
-        if min_bias < 0.12:
-            return {"param": "minBias", "value": round(min_bias + 0.02, 2),
-                    "reason": f"win={win_rate:.0%} < 60% — raise minBias {min_bias}→{round(min_bias+0.02,2)} (more momentum)"}
-        if rsi_ob > 47:
-            return {"param": "rsiOB", "value": rsi_ob - 1,
-                    "reason": f"win={win_rate:.0%} < 60% — lower rsiOB {rsi_ob}→{rsi_ob-1} (tighter pullback band)"}
-
-    # ── Near breakeven (sharpe -1 to 0): widen target to push positive ───
-    # With R:R near 1.6:1 and win rate near breakeven, widening the target
-    # lets winners run further and can push expectancy positive.
-    if -1.0 < sharpe < 0 and trades >= MIN_TRADES and pf >= 0.80:
-        if atr_tp < 8.0:
-            new_tp = round(atr_tp * 1.25, 2)
+    # ── Sharpe is negative but we have trades: widen target first ───────────
+    # The local bounce IS the entry; the continuation IS the win. Wider target
+    # catches more of that continuation before the trade times out.
+    if sharpe < 0 and trades >= MIN_TRADES:
+        if atr_tp < 10.0:
+            new_tp = round(atr_tp * 1.2, 2)
             return {"param": "atrTp", "value": new_tp,
-                    "reason": f"sharpe={sharpe:.2f} near-breakeven PF={pf:.2f} — widen atrTp {atr_tp}→{new_tp}"}
-        if adx_min < 28 and trades > 15:
-            return {"param": "adxMin", "value": adx_min+2,
-                    "reason": f"sharpe={sharpe:.2f} — tighten adxMin {adx_min}→{adx_min+2} for quality"}
+                    "reason": f"sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp} (catch continuation)"}
+        if max_hold < 120:
+            return {"param": "maxHoldBars", "value": max_hold + 30,
+                    "reason": f"sharpe={sharpe:.2f} — extend maxHoldBars {max_hold}→{max_hold+30} (let winners run)"}
 
-    # ── Good win rate but sharpe negative: widen target ──────────────────
-    if win_rate >= 0.48 and sharpe < 0:
-        if atr_tp < 8.0:
-            new_tp = round(atr_tp*1.25, 2)
-            return {"param": "atrTp", "value": new_tp,
-                    "reason": f"win={win_rate:.0%} good, sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp}"}
-
-    # ── Moderate win rate not yet profitable: tighten stop slightly ──────
-    if 0.40 <= win_rate < 0.48 and sharpe < 0.5 and atr_stop > 0.8:
-        new_stop = round(atr_stop-0.15, 2)
-        return {"param": "atrStop", "value": new_stop,
-                "reason": f"tighten stop atrStop {atr_stop}→{new_stop}"}
-
-    # ── Positive sharpe: push toward TARGET_SHARPE ───────────────────────
-    if 0 < sharpe < TARGET_SHARPE:
-        if atr_tp < 8.0:
-            new_tp = round(atr_tp*1.2, 2)
+    # ── Positive sharpe, pushing toward target ───────────────────────────────
+    # Primary lever: widen target to capture more of the move.
+    # Secondary: tighten stop only if win rate is already decent.
+    if 0 < sharpe < TARGET_SHARPE and trades >= MIN_TRADES:
+        if atr_tp < 10.0:
+            new_tp = round(atr_tp * 1.15, 2)
             return {"param": "atrTp", "value": new_tp,
                     "reason": f"sharpe={sharpe:.2f} — push atrTp {atr_tp}→{new_tp}"}
-        if tgt_win < 30:
-            return {"param": "targetWindow", "value": int(tgt_win+5),
-                    "reason": f"widen targetWindow {tgt_win}→{int(tgt_win+5)}"}
-        if atr_stop > 0.7 and win_rate < 0.55:
-            new_stop = round(atr_stop-0.1, 2)
-            return {"param": "atrStop", "value": new_stop,
-                    "reason": f"sharpe={sharpe:.2f} — tighten atrStop {atr_stop}→{new_stop}"}
-        if adx_min < 32 and trades > 15:
-            return {"param": "adxMin", "value": adx_min+2,
-                    "reason": f"quality over quantity — adxMin {adx_min}→{adx_min+2}"}
+        if tgt_win < 20:
+            return {"param": "targetWindow", "value": int(tgt_win + 5),
+                    "reason": f"widen targetWindow {tgt_win}→{int(tgt_win+5)} (wider range captures bigger moves)"}
+
+    # ── Good trades, win rate still low: try tightening entry quality ────────
+    # Only use adxMin after target is already wide. Never go above 22.
+    if trades >= TARGET_TRADES and win_rate < (TARGET_WIN_PCT / 100) and adx_min < 22:
+        return {"param": "adxMin", "value": adx_min + 2,
+                "reason": f"trades={trades} ok, win={win_rate:.0%} low — nudge adxMin {adx_min}→{adx_min+2}"}
 
     return {"action": "none",
-            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} PF={pf:.2f} — holding params"}
+            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} trades={trades} PF={pf:.2f} — holding params"}
 
 # ── Commit and push code change ───────────────────────────────────────────────
 

@@ -45,13 +45,13 @@ P = {
     'rsiOS':         28,
     'volMin':        0.0,    # disabled — cutting losers is not a strategy
     'atrStop':       1.0,
-    'atrTp':         3.5,
+    'atrTp':         4.0,
     'partialAt':     3.0,
     'trailAtr':      0.65,
     'trailActivate': 0.25,
     'maxHoldBars':   60,
-    'adxMin':        26,     # quality floor — ADX<20 = non-trending, most false signals
-    'minBias':       0.08,    # no directional requirement — range market
+    'adxMin':        14,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
+    'minBias':       0.0,    # no directional requirement — range market
     'minBias60m':    0.0,
     'targetWindow':  10,
 }
