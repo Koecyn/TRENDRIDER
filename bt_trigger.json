@@ -1,6 +1,6 @@
 {
-  "id": "iter136",
+  "id": "iter137",
   "command": "RUN",
   "bash": "",
-  "message": "minBias60m=-0.5: unlock hourly bearish bars; bias60m was blocking 42%"
+  "message": "sharpe=-0.62 atrTp=4.0 capped \u2014 extend maxHoldBars 90\u2192120"
 }
