@@ -425,15 +425,19 @@ class MarketPipeline:
         log.info(f"Trade producer started → {self._sym}")
         while self._running:
             try:
-                trades = await self._ex.watch_trades(self._sym)
+                trades = await asyncio.wait_for(
+                    self._ex.watch_trades(self._sym), timeout=5.0)
                 for t in trades:
                     if self.trade_queue.full():
-                        log.warning("trade_queue full — dropping oldest")
                         try:
                             self.trade_queue.get_nowait()
                         except asyncio.QueueEmpty:
                             pass
                     await self.trade_queue.put(t)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
                 log.error(f"trade_producer error: {exc}", exc_info=True)
                 await asyncio.sleep(1)
@@ -442,7 +446,8 @@ class MarketPipeline:
         log.info(f"Book producer started → {self._sym} depth={self._depth}")
         while self._running:
             try:
-                book = await self._ex.watch_order_book(self._sym, self._depth)
+                book = await asyncio.wait_for(
+                    self._ex.watch_order_book(self._sym, self._depth), timeout=5.0)
                 if self.book_queue.full():
                     try:
                         self.book_queue.get_nowait()
@@ -453,6 +458,10 @@ class MarketPipeline:
                     "asks": list(book["asks"]),
                     "ts":   book.get("timestamp") or int(time.time() * 1000),
                 })
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
                 log.error(f"book_producer error: {exc}", exc_info=True)
                 await asyncio.sleep(1)
