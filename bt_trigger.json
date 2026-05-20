@@ -1,6 +1,6 @@
 {
-  "id": "iter104",
+  "id": "iter105",
   "command": "RUN",
   "bash": "",
-  "message": "trades=93 < 120 \u2014 loosen adxMin 14.0\u219212.0"
+  "message": "quality triage first: adxMin=18 baseline; win<40% tightens before volume loosens"
 }

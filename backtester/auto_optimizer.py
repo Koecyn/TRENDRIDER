@@ -263,13 +263,27 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
-    # ── Trade volume: if trades too few, loosen the structural gates ────────
+    # ── QUALITY TRIAGE (runs before volume push) ─────────────────────────────
+    # Win rate < 40% = broken signal quality. Tighten hard before anything else.
+    # ADX < 20 means non-trending bar — most EMA_PULLBACK false signals come from
+    # weak-ADX bars. Large steps (4) to converge faster.
+    if trades >= MIN_TRADES and win_rate < 0.40:
+        if adx_min < 26:
+            new_adx = min(26, adx_min + 4)
+            return {"param": "adxMin", "value": new_adx,
+                    "reason": f"win={win_rate:.0%} critical — tighten adxMin {adx_min}→{new_adx} (filter non-trending bars)"}
+        if min_bias < 0.08:
+            return {"param": "minBias", "value": round(min_bias + 0.04, 2),
+                    "reason": f"win={win_rate:.0%} critical — raise minBias {min_bias}→{round(min_bias+0.04,2)} (require upward pressure)"}
+        if rsi_ob > 46:
+            return {"param": "rsiOB", "value": rsi_ob - 3,
+                    "reason": f"win={win_rate:.0%} critical — lower rsiOB {rsi_ob}→{rsi_ob-3} (deeper pullback only)"}
+
+    # ── Trade volume: only loosen once quality is acceptable (win ≥ 40%) ────
     # emaSlopeN: in a downtrend, LONGER lookback gives MORE passes (compares
     # to older/lower EMA200). Vault winner was 240. Shorter = more blocks.
-    # So to get more trades: raise emaSlopeN if it got too short, then loosen
-    # adxMin, then loosen rsiOB (wider pullback band = more entries).
     # volMin is NEVER used as a lever — cutting losers is not a strategy.
-    if sharpe >= MILESTONE and trades < TARGET_TRADES:
+    if sharpe >= MILESTONE and trades < TARGET_TRADES and win_rate >= 0.40:
         if ema_slope_n < 120:
             new_sn = min(240, int(ema_slope_n * 2))
             return {"param": "emaSlopeN", "value": new_sn,
@@ -282,34 +296,13 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": f"trades={trades} < {TARGET_TRADES} — widen rsiOB {rsi_ob}→{rsi_ob+3} (more pullback entries)"}
 
     # ── RESCUE: over-tightened params hurt win rate → full reset + pivot ──
-    # Tighter stops cause more false exits in volatile BTC. Lower rsiOB
-    # admits weaker pullbacks. Both hurt in this regime.
     if pf < 0.42 and atr_stop < 0.6:
         return {"action": "multi",
-                "params": [("atrStop", 1.0), ("targetWindow", 10), ("rsiOB", 65)],
+                "params": [("atrStop", 1.0), ("targetWindow", 10), ("rsiOB", 50)],
                 "reason": f"atrStop={atr_stop:.1f}/rsiOB={rsi_ob:.0f} over-tightened PF={pf:.2f} — full reset"}
 
-    # ── Signal quality: emaSlopeN controls how reactive slope gate is ────
-    # Halving lookback from 480 (8h) → 240 (4h) → 120 (2h) filters only
-    # bars where EMA200 has been rising for the past N bars. In a bear month
-    # this keeps us out of weak bounces and only trades real bull windows.
-    if trades >= MIN_TRADES and pf < 0.60 and atr_stop >= 0.8 and ema_slope_n > 120:
-        new_slope = max(120, int(ema_slope_n * 0.5))
-        return {"param": "emaSlopeN", "value": new_slope,
-                "reason": f"PF={pf:.2f} — tighten slope lookback emaSlopeN {ema_slope_n:.0f}→{new_slope} (filters weak bear bounces)"}
-
-    # ── Signal quality: lower rsiOB for better pullback entry ───────────
-    # A lower RSI threshold means we only enter after a more significant
-    # pullback in the EMA uptrend — better entry price, better R:R.
-    if trades >= MIN_TRADES and pf < 0.60 and atr_stop >= 0.8 and rsi_ob > 50:
-        new_rsi = rsi_ob - 5
-        return {"param": "rsiOB", "value": new_rsi,
-                "reason": f"PF={pf:.2f} — lower rsiOB {rsi_ob}→{new_rsi} for deeper pullback before entry"}
-
-    # ── Win-rate push: sharpe already ≥ milestone but win rate < 60% ─────
-    # Quality filter: only enter on the strongest trend bars.
-    # Priority order: adxMin → minBias → rsiOB (narrowing RSI pullback band).
-    # Never tighten past hard ceilings — would drop trade count to zero.
+    # ── Win-rate push: sharpe ≥ milestone, quality needs improvement ─────
+    # Priority: adxMin → minBias → rsiOB.
     if sharpe >= MILESTONE and trades >= MIN_TRADES and win_rate < (TARGET_WIN_PCT / 100):
         if adx_min < 30:
             return {"param": "adxMin", "value": adx_min + 2,
@@ -320,20 +313,6 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         if rsi_ob > 47:
             return {"param": "rsiOB", "value": rsi_ob - 1,
                     "reason": f"win={win_rate:.0%} < 60% — lower rsiOB {rsi_ob}→{rsi_ob-1} (tighter pullback band)"}
-
-    # ── Low win rate: tighten signal quality filters ─────────────────────
-    # Applies regardless of trade count — too few qualifying signals
-    # means we should tighten criteria, not trade less-than-ideal setups.
-    if trades >= MIN_TRADES and win_rate < 0.38:
-        if rsi_ob > 50:
-            return {"param": "rsiOB", "value": rsi_ob-5,
-                    "reason": f"win={win_rate:.0%} low — tighten rsiOB {rsi_ob}→{rsi_ob-5}"}
-        if adx_min < 30:
-            return {"param": "adxMin", "value": adx_min+2,
-                    "reason": f"win={win_rate:.0%} low — tighten adxMin {adx_min}→{adx_min+2}"}
-        if min_bias < 0.15:
-            return {"param": "minBias", "value": round(min_bias+0.03,2),
-                    "reason": f"win={win_rate:.0%} low — tighten minBias {min_bias}→{round(min_bias+0.03,2)}"}
 
     # ── Near breakeven (sharpe -1 to 0): widen target to push positive ───
     # With R:R near 1.6:1 and win rate near breakeven, widening the target
@@ -413,7 +392,7 @@ def detect_start_iter() -> int:
     return 37  # fallback: known current state
 
 def main():
-    log(f"Auto-optimizer starting — target Sharpe ≥ {TARGET_SHARPE} (milestone {MILESTONE})", G)
+    log(f"Auto-optimizer starting — target Sharpe ≥ {TARGET_SHARPE}, win ≥ {TARGET_WIN_PCT}%, trades ≥ {TARGET_TRADES}", G)
 
     iter_num = detect_start_iter()
     history  = []

@@ -50,7 +50,7 @@ P = {
     'trailAtr':      0.65,
     'trailActivate': 0.25,
     'maxHoldBars':   60,
-    'adxMin':        12.0,     # looser — absorb more setups in the range
+    'adxMin':        18,     # quality floor — ADX<20 = non-trending, most false signals
     'minBias':       0.0,    # no directional requirement — range market
     'minBias60m':    0.0,
     'targetWindow':  10,
