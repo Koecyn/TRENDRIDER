@@ -137,12 +137,20 @@ async def run(cfg: dict, cfg_path: str, api_key: str = "", api_secret: str = "")
         loop.call_soon_threadsafe(config_event.set)
 
     def _on_shutdown():
-        log.info("Shutting down — cancelling all tasks")
+        log.info("Shutting down")
         pipeline.stop()
         _remove_pid()
-        t = _main_task[0]
-        if t and not t.done():
-            t.cancel()
+
+        async def _force_close():
+            try:
+                await exchange.close()   # kills WebSocket → unblocks watch_trades/book
+            except Exception:
+                pass
+            t = _main_task[0]
+            if t and not t.done():
+                t.cancel()
+
+        loop.create_task(_force_close())
 
     loop.add_signal_handler(signal.SIGUSR1, _on_usr1)
     loop.add_signal_handler(signal.SIGHUP,  _on_hup)
