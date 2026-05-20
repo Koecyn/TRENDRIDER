@@ -51,7 +51,7 @@ P = {
     'trailActivate': 0.25,
     'maxHoldBars':   60,     # 10-bar range needs room; 60 min max hold
     'adxMin':        18,
-    'minBias':       0.05,   # skip entry if 1-min bias < minBias
+    'minBias':       0.0,   # skip entry if 1-min bias < minBias
     'minBias60m':    0.0,    # skip entry if 60-min bias < this
     'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR
 }

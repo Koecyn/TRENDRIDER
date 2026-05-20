@@ -1,6 +1,6 @@
 {
-  "id": "iter71",
+  "id": "iter72",
   "command": "RUN",
   "bash": "",
-  "message": "0 trades \u2014 loosen adxMin 20.0\u219218"
+  "message": "0 trades \u2014 remove minBias gate"
 }
