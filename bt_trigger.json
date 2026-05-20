@@ -1,6 +1,6 @@
 {
-  "id": "iter91",
+  "id": "iter89",
   "command": "RUN",
   "bash": "",
-  "message": "trades=8 < 25 \u2014 loosen adxMin 20.0\u219218.0 (more entries)"
+  "message": "Reset emaSlopeN=240; fix slope direction logic; volMin=1.0 test"
 }

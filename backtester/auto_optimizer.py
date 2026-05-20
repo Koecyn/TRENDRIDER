@@ -268,18 +268,23 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         return {"param": "volMin", "value": round(vol_min - 0.25, 2),
                 "reason": f"0 trades — loosen volMin {vol_min}→{round(vol_min-0.25,2)}"}
 
-    # ── Trade volume: if sharpe is good but trades are too few, open gates ──
-    # More trades = better Kelly sizing stats + more compounding.
-    # Only loosen when quality is already confirmed (sharpe ≥ milestone).
-    # Priority: shorten emaSlopeN first (was the breakthrough lever) → adxMin.
+    # ── Trade volume: if trades too few, loosen the gates in correct order ──
+    # emaSlopeN: in a downtrend, LONGER lookback gives MORE passes (compares
+    # to older/lower EMA200). Vault winner was 240. Shorter = more blocks.
+    # So to get more trades: raise emaSlopeN back toward 240 if it got too short,
+    # then loosen volMin, then loosen adxMin.
     if sharpe >= MILESTONE and trades < TARGET_TRADES:
-        if ema_slope_n > 60:
-            new_sn = max(60, int(ema_slope_n * 0.5))
+        if ema_slope_n < 120:
+            new_sn = min(240, int(ema_slope_n * 2))
             return {"param": "emaSlopeN", "value": new_sn,
-                    "reason": f"trades={trades} < {TARGET_TRADES} target — shorten slope lookback {ema_slope_n:.0f}→{new_sn} (more entries)"}
+                    "reason": f"trades={trades} < {TARGET_TRADES} — restore emaSlopeN {ema_slope_n:.0f}→{new_sn} (longer=more entries in downtrend)"}
+        if vol_min > 0.5:
+            new_vm = round(vol_min - 0.25, 2)
+            return {"param": "volMin", "value": new_vm,
+                    "reason": f"trades={trades} < {TARGET_TRADES} — loosen volMin {vol_min}→{new_vm}"}
         if adx_min > 18:
             return {"param": "adxMin", "value": adx_min - 2,
-                    "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{adx_min-2} (more entries)"}
+                    "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{adx_min-2}"}
 
     # ── RESCUE: over-tightened params hurt win rate → full reset + pivot ──
     # Tighter stops cause more false exits in volatile BTC. Lower rsiOB

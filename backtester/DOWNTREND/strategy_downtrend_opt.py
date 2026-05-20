@@ -40,7 +40,7 @@ P = {
     'emaSlow':       13,
     'emaTrend':      50,
     'emaMacro':      200,    # macro trend EMA
-    'emaSlopeN':     60,    # EMA200 slope lookback bars
+    'emaSlopeN':     240,    # EMA200 slope lookback bars — longer=more entries in downtrend
     'rsiOB':         50.0,   # EMA_CROSS gate; EMA_PULLBACK uses hard cap 55
     'rsiOS':         28,
     'volMin':        1.0,    # min vol ratio vs 10-bar avg — confirms bounce has real buying
