@@ -39,8 +39,9 @@ P = {
     'emaFast':       5,
     'emaSlow':       13,
     'emaTrend':      50,
-    'emaMacro':      200,    # macro trend EMA; slope over 30 bars must be flat/rising
-    'rsiOB':         80,
+    'emaMacro':      200,    # macro trend EMA
+    'emaSlopeN':     480,    # EMA200 slope lookback bars (480 = 8 hrs; robust to dead-cat bounces)
+    'rsiOB':         65,    # tighter cap: filters overextended crosses common in dead-cat bounces
     'rsiOS':         28,
     'volMin':        0.0,
     'atrStop':       1.0,    # × 1-min downside ATR for stop
@@ -299,11 +300,14 @@ class TrendRiderAdaptive(Strategy):
             return
 
         # ── Macro trend gate — EMA200 slope ──────────────────────────────
-        # Block entries when EMA200 is lower than 30 bars ago: the macro
-        # trend is in decline and counter-trend longs will likely fail.
+        # Block entries when EMA200 is lower than emaSlopeN bars ago.
+        # In a sustained downtrend EMA200 consistently trends down; in a
+        # ranging market it oscillates. 480-bar (8-hr) lookback is robust
+        # enough to survive dead-cat bounces within a downtrend.
+        slope_n = P['emaSlopeN']
         e200 = self.ema200[-1]
-        e200_30 = self.ema200[-30] if len(self.ema200) > 30 else e200
-        if e200 < e200_30:
+        e200_prev = self.ema200[-slope_n] if len(self.ema200) > slope_n else e200
+        if e200 < e200_prev:
             self._d_slope_block += 1
             return
 
@@ -380,17 +384,23 @@ def main():
                     help='N-bar rolling range window for targets (default 10 = 10-min)')
     ap.add_argument('--min-bias-60m',  type=float, default=None,
                     help='Min 60-min bias to allow entry (0=block hourly downtrends, default 0)')
+    ap.add_argument('--slope-period',  type=int,   default=None,
+                    help='EMA200 slope lookback in bars (default 480 = 8 hrs)')
+    ap.add_argument('--rsi-ob',        type=float, default=None,
+                    help='RSI overbought cap for EMA_CROSS signal (default 65)')
     args = ap.parse_args()
 
     overrides = {
         'adxMin':       args.adx_min,
         'minBias':      args.min_bias,
         'minBias60m':   args.min_bias_60m,
+        'rsiOB':        args.rsi_ob,
         'atrStop':      args.atr_stop,
         'atrTp':        args.atr_tp,
         'maxHoldBars':  args.max_hold,
         'partialAt':    args.partial_at,
         'targetWindow': args.target_window,
+        'emaSlopeN':    args.slope_period,
     }
     applied = {}
     for k, v in overrides.items():

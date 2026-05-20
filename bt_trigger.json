@@ -1,6 +1,6 @@
 {
-  "id": "iter19_ema200_march",
+  "id": "iter20_ema200_8hr_march",
   "command": "RUN",
   "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 10 --max-hold 60",
-  "message": "iter19: March OOS with EMA200 slope gate — does blocking macro downtrend fix win rate?"
+  "message": "iter20: March OOS — EMA200 8-hr slope gate + rsiOB=65 — does this finally fix win rate?"
 }
