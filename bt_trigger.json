@@ -1,6 +1,6 @@
 {
-  "id": "iter167",
+  "id": "iter169",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=-0.12 win=41% trades=99 PF=1.39 \u2014 holding params"
+  "message": "sharpe=-0.12 \u2014 loosen trailAtr 2.0\u21922.5 (winners dying on trail)"
 }
