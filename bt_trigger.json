@@ -1,6 +1,6 @@
 {
-  "id": "iter72",
+  "id": "iter73",
   "command": "RUN",
   "bash": "",
-  "message": "0 trades \u2014 remove minBias gate"
+  "message": "0 trades, all gates minimal \u2014 strategy doesn't fire in this regime"
 }
