@@ -1,6 +1,6 @@
 {
-  "id": "iter60",
+  "id": "iter61",
   "command": "RUN",
   "bash": "",
-  "message": "win=32% too low \u2014 tighten rsiOB 60.0\u219255.0"
+  "message": "sharpe=-0.36 win=36% PF=0.95 \u2014 holding params"
 }
