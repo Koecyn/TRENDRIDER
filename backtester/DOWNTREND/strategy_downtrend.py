@@ -46,7 +46,7 @@ P = {
     'volMin':        0.0,
     'atrStop':       1.0,    # × 1-min downside ATR for stop
     'atrTp':         2.8,    # × N-bar rolling range (upside component) for target
-    'partialAt':     1.0,    # partial exit at 1× range upside
+    'partialAt':     3.0,    # partial exit at 1× range upside
     'trailAtr':      0.65,   # trail = price - a_dn_1m_entry × trailAtr
     'trailActivate': 0.25,
     'maxHoldBars':   60,     # 10-bar range needs room; 60 min max hold

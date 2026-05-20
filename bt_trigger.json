@@ -1,6 +1,6 @@
 {
-  "id": "iter41",
+  "id": "iter43",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=-5.84 win=33% \u2014 holding params"
+  "message": "PF=0.48 \u2014 early partials cap winners; raising partialAt 1.0\u21923.0"
 }
