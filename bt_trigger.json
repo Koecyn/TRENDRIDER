@@ -1,6 +1,6 @@
 {
-  "id": "iter147",
+  "id": "iter141",
   "command": "RUN",
   "bash": "",
-  "message": "trades=128 ok, win=43% low \u2014 nudge adxMin 18.0\u219220.0"
+  "message": "momentum-exhaustion exit: adaptive trail tightens on RSI peak + vol fade + EMA crossback"
 }

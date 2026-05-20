@@ -226,12 +226,13 @@ class TrendRiderAdaptive(Strategy):
         self.rng_mtf  = self.I(calc_range_mtf, h, l, self.targetWindow, 14, name='RNG_MTF')
 
         self._stop          = 0.0
-        self._target        = 0.0
         self._partial_at    = 0.0
         self._partial_taken = False
         self._bars_held     = 0
         self._entry         = 0.0
-        self._a_dn_1m_entry = 0.0   # 1-min downside component at entry (for trailing)
+        self._a_dn_1m_entry = 0.0   # ATR at entry — trail reference
+        self._trail_hi      = 0.0   # peak price since entry — trail anchors here
+        self._peak_rsi      = 0.0   # highest RSI seen since entry
 
         # Diagnostics
         self._d_bars        = 0
@@ -280,17 +281,48 @@ class TrendRiderAdaptive(Strategy):
             self._bars_held += 1
             self._d_in_pos  += 1
 
+            f   = self.ema5[-1];    f1  = self.ema5[-2]
+            s   = self.ema13[-1];   s1  = self.ema13[-2]
+            rsi = self.rsi[-1];     rsi1 = self.rsi[-2]
+            vr  = self.vol[-1];     vr1  = self.vol[-2]
+
+            # Track peak price and peak RSI since entry
+            self._trail_hi  = max(self._trail_hi,  price)
+            self._peak_rsi  = max(self._peak_rsi,  rsi)
+
+            # ── Adaptive trailing stop ────────────────────────────────────
+            # Trail anchors to peak price; width tightens as momentum fades.
+            # Three states: running → near-top → exhaustion
             riskUnit = abs(self._entry - self._stop)
             pnlR = (price - self._entry) / riskUnit if riskUnit > 0 else 0
-            if pnlR >= self.trailActivate:
-                trail = price - self._a_dn_1m_entry * self.trailAtr
-                self._stop = max(self._stop, trail)
 
+            rsi_turning  = rsi < rsi1 and self._peak_rsi > 55  # RSI rolled off peak
+            vol_fading   = vr < vr1 * 0.85                      # volume dropped 15%
+            sell_pressure = rsi_turning and vol_fading           # both: likely sell wall
+
+            if sell_pressure:
+                trail_dist = self._a_dn_1m_entry * 0.5    # tight — wall is reloading
+            elif rsi > 58 or rsi_turning:
+                trail_dist = self._a_dn_1m_entry * 1.0    # moderate — near resistance
+            else:
+                trail_dist = self._a_dn_1m_entry * self.trailAtr  # loose — still running
+
+            if pnlR >= self.trailActivate:
+                new_stop = self._trail_hi - trail_dist
+                self._stop = max(self._stop, new_stop)
+
+            # ── Partial exit: lock half when deep in profit ───────────────
             if not self._partial_taken and price >= self._partial_at:
                 self.position.close(0.5)
                 self._partial_taken = True
 
-            if price <= self._stop or price >= self._target or self._bars_held >= self.maxHoldBars:
+            # ── Hard exits ───────────────────────────────────────────────
+            # 1. Stop hit (adaptive trail or initial stop)
+            # 2. EMA5 crossed back below EMA13 — local trend reversed
+            # 3. Timeout backstop
+            ema_reversal = f < s and f1 >= s1 and pnlR > 0.5
+
+            if price <= self._stop or ema_reversal or self._bars_held >= self.maxHoldBars:
                 self.position.close()
             return
 
@@ -376,13 +408,12 @@ class TrendRiderAdaptive(Strategy):
         if setup:
             self._entry         = price
             self._a_dn_1m_entry = a_dn_1m
-            # Stop: 1-min downside ATR (tight)
             self._stop          = price - a_dn_1m * self.atrStop
-            # Target: N-bar rolling range upside (captures real BTC moves)
-            self._target        = price + a_up_mtf * self.atrTp
             self._partial_at    = price + a_up_mtf * self.partialAt
             self._partial_taken = False
             self._bars_held     = 0
+            self._trail_hi      = price
+            self._peak_rsi      = self.rsi[-1]
             self.buy(size=0.99)
 
 # ── Entry point ───────────────────────────────────────────────────────────────
