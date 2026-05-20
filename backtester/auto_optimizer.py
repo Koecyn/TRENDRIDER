@@ -257,13 +257,13 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
-    # ── RESCUE: atrStop over-tightened hurt win rate → reset + pivot ─────
-    # Tighter stops cause more false exits in volatile BTC. When PF drops
-    # below 0.40 AND atrStop is very tight, we've gone the wrong way.
+    # ── RESCUE: over-tightened params hurt win rate → full reset + pivot ──
+    # Tighter stops cause more false exits in volatile BTC. Lower rsiOB
+    # admits weaker pullbacks. Both hurt in this regime.
     if pf < 0.42 and atr_stop < 0.6:
         return {"action": "multi",
-                "params": [("atrStop", 1.0), ("targetWindow", 10)],
-                "reason": f"atrStop={atr_stop} over-tightened PF={pf:.2f} — reset atrStop→1.0, targetWindow→10"}
+                "params": [("atrStop", 1.0), ("targetWindow", 10), ("rsiOB", 65)],
+                "reason": f"atrStop={atr_stop:.1f}/rsiOB={rsi_ob:.0f} over-tightened PF={pf:.2f} — full reset"}
 
     # ── Signal quality: emaSlopeN controls how reactive slope gate is ────
     # Halving lookback from 480 (8h) → 240 (4h) → 120 (2h) filters only
