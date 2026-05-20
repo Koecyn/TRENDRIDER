@@ -231,18 +231,18 @@ def remove_golden_cross_gate():
 # ── Decision engine ───────────────────────────────────────────────────────────
 
 def decide(stats: dict, diag: dict, history: list) -> dict:
-    trades     = int(stats.get("trades", 0))
-    sharpe     = stats.get("sharpe", -99)
-    win_rate   = stats.get("win_rate", 0) / 100.0
-    pf         = stats.get("profit_factor", 0)
+    trades      = int(stats.get("trades", 0))
+    sharpe      = stats.get("sharpe", -99)
+    win_rate    = stats.get("win_rate", 0) / 100.0
+    pf          = stats.get("profit_factor", 0)
 
-    adx_min    = float(read_param("adxMin")       or 22)
-    min_bias   = float(read_param("minBias")       or 0.05)
-    rsi_ob     = float(read_param("rsiOB")         or 65)
-    atr_tp     = float(read_param("atrTp")         or 2.8)
-    atr_stop   = float(read_param("atrStop")       or 1.0)
-    tgt_win    = float(read_param("targetWindow")  or 10)
-    partial_at = float(read_param("partialAt")     or 1.0)
+    adx_min     = float(read_param("adxMin")       or 22)
+    min_bias    = float(read_param("minBias")       or 0.05)
+    rsi_ob      = float(read_param("rsiOB")         or 65)
+    atr_tp      = float(read_param("atrTp")         or 2.8)
+    atr_stop    = float(read_param("atrStop")       or 1.0)
+    tgt_win     = float(read_param("targetWindow")  or 10)
+    ema_slope_n = float(read_param("emaSlopeN")     or 480)
 
     # ── 0 trades: loosen gates ───────────────────────────────────────────
     if trades == 0:
@@ -257,25 +257,32 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
                     "reason": "0 trades — remove minBias gate"}
         return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
 
-    # ── R:R rescue priority: bad profit factor → disable early partials ──
-    # partialAt=1.0 exits half the position at 1× upside range, which is
-    # smaller than the stop in bear markets. Winners get capped before trail.
-    if trades >= MIN_TRADES and pf < 0.70 and partial_at < 3.0:
-        return {"param": "partialAt", "value": 3.0,
-                "reason": f"PF={pf:.2f} — early partials cap winners; raising partialAt {partial_at:.1f}→3.0"}
+    # ── RESCUE: atrStop over-tightened hurt win rate → reset + pivot ─────
+    # Tighter stops cause more false exits in volatile BTC. When PF drops
+    # below 0.40 AND atrStop is very tight, we've gone the wrong way.
+    if pf < 0.42 and atr_stop < 0.6:
+        return {"action": "multi",
+                "params": [("atrStop", 1.0), ("targetWindow", 10)],
+                "reason": f"atrStop={atr_stop} over-tightened PF={pf:.2f} — reset atrStop→1.0, targetWindow→10"}
 
-    # ── R:R rescue: partialAt wide but still losing → tighten stop ──────
-    if trades >= MIN_TRADES and pf < 0.70 and partial_at >= 3.0 and atr_stop > 0.5:
-        new_stop = round(atr_stop - 0.2, 2)
-        return {"param": "atrStop", "value": new_stop,
-                "reason": f"PF={pf:.2f} — tighten atrStop {atr_stop}→{new_stop} to improve R:R"}
+    # ── Signal quality: emaSlopeN controls how reactive slope gate is ────
+    # Halving lookback from 480 (8h) → 240 (4h) → 120 (2h) filters only
+    # bars where EMA200 has been rising for the past N bars. In a bear month
+    # this keeps us out of weak bounces and only trades real bull windows.
+    if trades >= MIN_TRADES and pf < 0.60 and atr_stop >= 0.8 and ema_slope_n > 120:
+        new_slope = max(120, int(ema_slope_n * 0.5))
+        return {"param": "emaSlopeN", "value": new_slope,
+                "reason": f"PF={pf:.2f} — tighten slope lookback emaSlopeN {ema_slope_n:.0f}→{new_slope} (filters weak bear bounces)"}
 
-    # ── R:R rescue: stop tight but still losing → widen target window ───
-    if trades >= MIN_TRADES and pf < 0.70 and atr_stop <= 0.5 and tgt_win < 20:
-        return {"param": "targetWindow", "value": int(tgt_win + 5),
-                "reason": f"PF={pf:.2f} — widen targetWindow {tgt_win:.0f}→{int(tgt_win+5)} for bigger targets"}
+    # ── Signal quality: lower rsiOB for better pullback entry ───────────
+    # A lower RSI threshold means we only enter after a more significant
+    # pullback in the EMA uptrend — better entry price, better R:R.
+    if trades >= MIN_TRADES and pf < 0.60 and atr_stop >= 0.8 and rsi_ob > 50:
+        new_rsi = rsi_ob - 5
+        return {"param": "rsiOB", "value": new_rsi,
+                "reason": f"PF={pf:.2f} — lower rsiOB {rsi_ob}→{new_rsi} for deeper pullback before entry"}
 
-    # ── High trade count with low win rate: tighten signal quality ───────
+    # ── Too many losing trades: tighten signal filters ───────────────────
     if trades > 40 and win_rate < 0.38:
         if rsi_ob > 55:
             return {"param": "rsiOB", "value": rsi_ob-5,
@@ -287,19 +294,18 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
             return {"param": "minBias", "value": round(min_bias+0.03,2),
                     "reason": f"win={win_rate:.0%} too low — tighten minBias {min_bias}→{round(min_bias+0.03,2)}"}
 
-    # ── Good win rate but sharpe negative: widen target ─────────────────
+    # ── Good win rate but sharpe negative: widen target ──────────────────
     if win_rate >= 0.48 and sharpe < 0:
         if atr_tp < 8.0:
             new_tp = round(atr_tp*1.25, 2)
             return {"param": "atrTp", "value": new_tp,
                     "reason": f"win={win_rate:.0%} good, sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp}"}
 
-    # ── Moderate win rate not yet profitable: tighten stop ──────────────
-    if 0.40 <= win_rate < 0.48 and sharpe < 0.5:
-        if atr_stop > 0.6:
-            new_stop = round(atr_stop-0.15, 2)
-            return {"param": "atrStop", "value": new_stop,
-                    "reason": f"tighten stop atrStop {atr_stop}→{new_stop}"}
+    # ── Moderate win rate not yet profitable: tighten stop slightly ──────
+    if 0.40 <= win_rate < 0.48 and sharpe < 0.5 and atr_stop > 0.8:
+        new_stop = round(atr_stop-0.15, 2)
+        return {"param": "atrStop", "value": new_stop,
+                "reason": f"tighten stop atrStop {atr_stop}→{new_stop}"}
 
     # ── Positive sharpe: push toward TARGET_SHARPE ───────────────────────
     if 0 < sharpe < TARGET_SHARPE:
@@ -310,7 +316,7 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         if tgt_win < 30:
             return {"param": "targetWindow", "value": int(tgt_win+5),
                     "reason": f"widen targetWindow {tgt_win}→{int(tgt_win+5)}"}
-        if atr_stop > 0.5:
+        if atr_stop > 0.7 and win_rate < 0.55:
             new_stop = round(atr_stop-0.1, 2)
             return {"param": "atrStop", "value": new_stop,
                     "reason": f"sharpe={sharpe:.2f} — tighten atrStop {atr_stop}→{new_stop}"}
@@ -403,6 +409,9 @@ def main():
 
         if decision.get("gate") == "remove_golden":
             remove_golden_cross_gate()
+        elif decision.get("action") == "multi":
+            for p_name, p_val in decision.get("params", []):
+                set_param(p_name, p_val)
         elif decision.get("param"):
             set_param(decision["param"], decision["value"])
 
