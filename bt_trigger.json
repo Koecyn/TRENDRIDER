@@ -1,6 +1,6 @@
 {
-  "id": "iter97",
+  "id": "iter99",
   "command": "RUN",
   "bash": "",
-  "message": "120 trades/month target — emaSlopeN disabled, volMin=0, adxMin=12, minBias=0"
+  "message": "win=34% low \u2014 tighten adxMin 12.0\u219214.0"
 }
