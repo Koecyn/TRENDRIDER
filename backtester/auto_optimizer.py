@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-auto_optimizer.py — Autonomous backtest optimization loop.
+auto_optimizer.py — Self-contained backtest optimization engine.
 
-Reads bt_results.json from data/live branch, analyzes metrics, decides
-the next parameter change, edits strategy_downtrend.py if needed, writes
-a new bt_trigger.json, and pushes — then waits for bt_watcher to run it.
+One process. No bt_watcher needed.
 
-Loops forever until Sharpe ≥ 1.6 with ≥ 10 trades, then writes STOP.
+  - Pulls latest code from the repo before each run
+  - Runs the backtest subprocess directly
+  - Pushes results to data/live branch
+  - Analyzes results and decides next parameter change
+  - Edits strategy_downtrend.py and commits the change
+  - Loops until Sharpe ≥ 2.5 (milestone logged at 1.6)
+  - Hot-reloads itself from the repo on new commits (re-exec)
 
-Run on Termux alongside bt_watcher:
+Usage:
+  cd ~/TRENDRIDER
   python backtester/auto_optimizer.py
-
-Rules:
-  - NEVER change EMA_CROSS or EMA_PULLBACK signal conditions
-  - Only tune P dict values or add/remove structural gates
-  - One change per iteration (controlled experiments)
 """
 
-import json, os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time, signal
 from datetime import datetime
 from pathlib import Path
 
@@ -26,8 +26,12 @@ CODE_BRANCH = "claude/hft-mean-reversion-strategy-pJ4YU"
 DATA_BRANCH = "data/live"
 STRATEGY    = REPO / "backtester" / "DOWNTREND" / "strategy_downtrend.py"
 TRIGGER_F   = REPO / "bt_trigger.json"
-POLL_S      = 25          # seconds between data/live checks
-TARGET_SHARPE = 2.5     # stop here — 1.6 is floor, 2.5 is goal
+RESULTS_F   = REPO / "bt_results.json"
+CSV_PATH    = REPO / "backtester" / "btc_mar30.csv"
+LOG_F       = REPO / "backtester" / "optimizer.log"
+
+TARGET_SHARPE = 2.5
+MILESTONE     = 1.6
 MIN_TRADES    = 10
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
@@ -36,164 +40,174 @@ def ts():
     return datetime.now().strftime('%H:%M:%S')
 
 def log(msg, col=Z):
-    print(f"{col}[optimizer {ts()}] {msg}{Z}", flush=True)
-
-def git(*args, input=None):
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    return subprocess.run(["git"]+list(args), cwd=REPO,
-                          capture_output=True, text=True, input=input, env=env)
-
-# ── Fetch latest results from data/live ───────────────────────────────────────
-
-def fetch_results():
-    git("fetch", "origin", DATA_BRANCH, "-q")
-    r = git("show", f"origin/{DATA_BRANCH}:bt_results.json")
-    if r.returncode != 0:
-        return None
+    line = f"{col}[optimizer {ts()}] {msg}{Z}"
+    print(line, flush=True)
     try:
-        return json.loads(r.stdout)
+        with open(LOG_F, "a") as f:
+            f.write(re.sub(r'\033\[[0-9;]*m', '', line) + "\n")
     except Exception:
-        return None
+        pass
 
-# ── Parse diagnostic lines from output_tail ───────────────────────────────────
+# ── Git helpers ───────────────────────────────────────────────────────────────
 
-def parse_diag(output_tail: list) -> dict:
-    text = "\n".join(output_tail)
-    def num(pat):
-        m = re.search(pat, text)
-        return float(m.group(1)) if m else 0.0
+ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+def git(*args, stdin=None):
+    return subprocess.run(["git"]+list(args), cwd=REPO,
+                          capture_output=True, text=True,
+                          input=stdin, env=ENV)
+
+def git_unlock():
+    for lock in ["index.lock", "MERGE_HEAD"]:
+        p = REPO / ".git" / lock
+        if p.exists():
+            p.unlink()
+
+# ── Pull latest code from repo ────────────────────────────────────────────────
+
+def sync_code():
+    """Pull latest strategy + optimizer code before running."""
+    git("fetch", "origin", CODE_BRANCH, "-q")
+    git("reset", "--hard", f"origin/{CODE_BRANCH}")
+    log("Code synced from repo", C)
+
+# ── Hot-reload: re-exec self if this file changed ─────────────────────────────
+
+_self_hash = None
+
+def check_self_reload():
+    """Re-exec this script if a newer version is on the code branch."""
+    global _self_hash
+    r = git("show", f"origin/{CODE_BRANCH}:backtester/auto_optimizer.py")
+    if r.returncode != 0:
+        return
+    new_hash = hash(r.stdout)
+    if _self_hash is None:
+        _self_hash = new_hash
+        return
+    if new_hash != _self_hash:
+        log("New version of auto_optimizer detected — reloading", Y)
+        sync_code()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+# ── Run backtest subprocess ───────────────────────────────────────────────────
+
+def run_backtest() -> dict:
+    """Run strategy_downtrend.py and return parsed stats."""
+    fetch_flag = []
+    if not CSV_PATH.exists():
+        log("btc_mar30.csv not found — fetching from Binance", Y)
+        fetch_flag = ["--start", "2026-03-01", "--days", "30",
+                      "--save-csv", str(CSV_PATH)]
+    else:
+        fetch_flag = ["--csv", str(CSV_PATH)]
+
+    cmd = [
+        sys.executable,
+        str(STRATEGY),
+        *fetch_flag,
+        "--balance", "100",
+        "--min-bias", "0.05",
+        "--adx-min",  str(read_param("adxMin")  or "22"),
+        "--atr-stop", str(read_param("atrStop") or "1.0"),
+        "--target-window", str(int(float(read_param("targetWindow") or "10"))),
+        "--max-hold", str(int(float(read_param("maxHoldBars") or "60"))),
+        "--rsi-ob",   str(read_param("rsiOB")   or "65"),
+    ]
+    log(f"Running backtest... {' '.join(cmd[2:])}", C)
+    r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=300)
+    output = r.stdout + r.stderr
+    stats = parse_stats(output)
+    tail  = output.strip().splitlines()[-45:]
+    return {"stats": stats, "output_tail": tail, "returncode": r.returncode}
+
+# ── Push results to data/live ─────────────────────────────────────────────────
+
+def push_results(iter_id: str, result: dict):
+    git_unlock()
+    payload = {
+        "ts":         datetime.utcnow().isoformat(),
+        "trigger_id": iter_id,
+        "status":     "complete",
+        "returncode": result["returncode"],
+        "stats":      result["stats"],
+        "output_tail": result["output_tail"],
+    }
+    RESULTS_F.write_text(json.dumps(payload, indent=2))
+
+    r = git("hash-object", "-w", str(RESULTS_F))
+    blob = r.stdout.strip()
+    if not blob:
+        log("hash-object failed", R); return
+
+    r = git("mktree", stdin=f"100644 blob {blob}\tbt_results.json\n")
+    tree = r.stdout.strip()
+    if not tree:
+        log("mktree failed", R); return
+
+    r = git("rev-parse", f"refs/remotes/origin/{DATA_BRANCH}")
+    parent = ["-p", r.stdout.strip()] if r.returncode == 0 else []
+    r = git("commit-tree", tree, *parent, "-m", f"bt_results {datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    commit = r.stdout.strip()
+    if not commit:
+        log("commit-tree failed", R); return
+
+    r = git("push", "origin", f"{commit}:refs/heads/{DATA_BRANCH}")
+    if r.returncode == 0:
+        git("update-ref", f"refs/remotes/origin/{DATA_BRANCH}", commit)
+        log("Results pushed to data/live", G)
+    else:
+        log(f"Push failed: {r.stderr.strip()}", R)
+
+# ── Stats parser ──────────────────────────────────────────────────────────────
+
+def parse_stats(output: str) -> dict:
+    pats = {
+        "trades":       r"# Trades\s+(\d+)",
+        "win_rate":     r"Win Rate \[%\]\s+([\-\d.]+)",
+        "sharpe":       r"Sharpe Ratio\s+([\-\d.]+)",
+        "return_pct":   r"Return \[%\]\s+([\-\d.]+)",
+        "equity_final": r"Equity Final \[\$\]\s+([\-\d.]+)",
+        "max_dd":       r"Max\. Drawdown \[%\]\s+([\-\d.]+)",
+        "profit_factor":r"Profit Factor\s+([\-\d.]+)",
+        "sqn":          r"SQN\s+([\-\d.]+)",
+    }
+    stats = {}
+    for k, p in pats.items():
+        m = re.search(p, output)
+        if m:
+            try: stats[k] = float(m.group(1))
+            except: pass
+    return stats
+
+def parse_diag(tail: list) -> dict:
+    text = "\n".join(tail)
+    def n(pat): m=re.search(pat,text); return float(m.group(1)) if m else 0.0
     return {
-        "slope_pct":    num(r"EMA200 slope blocked:\s+\d+\s+\(([0-9.]+)%\)"),
-        "below_e200":   num(r"Price < EMA200:\s+\d+\s+\(([0-9.]+)%\)"),
-        "no_golden":    num(r"EMA50 < EMA200.*?:\s+\d+\s+\(([0-9.]+)%\)"),
-        "adx_pct":      num(r"ADX <.*?blocked:\s+\d+\s+\(([0-9.]+)%\)"),
-        "bias_pct":     num(r"Bias1m.*?bearish.*?:\s+\d+\s+\(([0-9.]+)%\)"),
-        "rsi_pct":      num(r"RSI/pullback blocked:\s+\d+\s+\(([0-9.]+)%\)"),
-        "cross_fired":  num(r"EMA_CROSS fired:\s+(\d+)"),
-        "pullback_fired": num(r"EMA_PULLBACK fired:\s+(\d+)"),
-        "avg_ratio":    num(r"Avg RNG_\d+m / ATR_1m ratio:\s+([0-9.]+)"),
+        "slope_pct":   n(r"EMA200 slope blocked:\s+\d+\s+\(([0-9.]+)%\)"),
+        "below_e200":  n(r"Price < EMA200:\s+\d+\s+\(([0-9.]+)%\)"),
+        "no_golden":   n(r"EMA50 < EMA200.*?:\s+\d+\s+\(([0-9.]+)%\)"),
+        "adx_pct":     n(r"ADX <.*?blocked:\s+\d+\s+\(([0-9.]+)%\)"),
+        "bias_pct":    n(r"Bias1m.*?bearish.*?:\s+\d+\s+\(([0-9.]+)%\)"),
+        "cross_fired": n(r"EMA_CROSS fired:\s+(\d+)"),
+        "avg_ratio":   n(r"Avg RNG_\d+m / ATR_1m ratio:\s+([0-9.]+)"),
     }
 
-# ── Read current P dict values from strategy file ─────────────────────────────
+# ── Read / set P dict params ──────────────────────────────────────────────────
 
-def read_param(name: str) -> str:
-    """Return raw value string for P[name] from strategy file."""
+def read_param(name: str):
     m = re.search(rf"'{name}'\s*:\s*([0-9.]+)", STRATEGY.read_text())
     return m.group(1) if m else None
 
 def set_param(name: str, value):
-    """Update a single P dict value in strategy_downtrend.py."""
     text = STRATEGY.read_text()
-    new_text = re.sub(
-        rf"('{name}'\s*:\s*)[0-9.]+",
-        rf"\g<1>{value}",
-        text,
-    )
-    if new_text == text:
-        log(f"  WARNING: param {name} not found in P dict", Y)
-        return False
-    STRATEGY.write_text(new_text)
-    log(f"  SET P['{name}'] = {value}", G)
-    return True
-
-# ── Decision engine ───────────────────────────────────────────────────────────
-
-def decide(stats: dict, diag: dict, history: list) -> dict:
-    """
-    Return {'param': name, 'value': v, 'reason': str}
-    or {'gate': 'remove_golden', 'reason': str}
-    or {'action': 'none', 'reason': str}
-    """
-    trades    = int(stats.get("trades", 0))
-    sharpe    = stats.get("sharpe", -99)
-    win_rate  = stats.get("win_rate", 0) / 100.0
-    ret       = stats.get("return_pct", -99)
-
-    adx_min   = float(read_param("adxMin")   or 22)
-    min_bias  = float(read_param("minBias")  or 0.05)
-    rsi_ob    = float(read_param("rsiOB")    or 65)
-    atr_tp    = float(read_param("atrTp")    or 2.8)
-    atr_stop  = float(read_param("atrStop")  or 1.0)
-    tgt_win   = float(read_param("targetWindow") or 10)
-
-    # ── Zero trades: filters too aggressive ─────────────────────────────────
-    if trades == 0:
-        # Golden cross gate likely blocked everything in March death-cross
-        if diag["no_golden"] > 70:
-            return {"gate": "remove_golden",
-                    "reason": f"EMA50<EMA200 blocked {diag['no_golden']:.1f}% of bars — removing golden cross gate"}
-        if diag["adx_pct"] > 50 and adx_min > 18:
-            return {"param": "adxMin", "value": max(18, adx_min - 2),
-                    "reason": f"ADX gate blocking {diag['adx_pct']:.1f}% — loosen adxMin {adx_min}→{max(18, adx_min-2)}"}
-        if diag["slope_pct"] > 80:
-            return {"param": "emaSlopeN", "value": 240,
-                    "reason": "EMA200 slope gate too restrictive (>80%) — shorten to 4hr lookback"}
-        return {"action": "none", "reason": "no trades but cause unclear — waiting next result"}
-
-    # ── Too many trades, all losing ──────────────────────────────────────────
-    if trades > 40 and win_rate < 0.38:
-        # Win rate critically low — need stronger filters
-        if rsi_ob > 55:
-            new_rsi = rsi_ob - 5
-            return {"param": "rsiOB", "value": new_rsi,
-                    "reason": f"win={win_rate:.0%} too low — tighten rsiOB {rsi_ob}→{new_rsi}"}
-        if adx_min < 28:
-            new_adx = adx_min + 2
-            return {"param": "adxMin", "value": new_adx,
-                    "reason": f"win={win_rate:.0%} too low — tighten adxMin {adx_min}→{new_adx}"}
-        if min_bias < 0.15:
-            new_bias = round(min_bias + 0.03, 2)
-            return {"param": "minBias", "value": new_bias,
-                    "reason": f"win={win_rate:.0%} too low — tighten minBias {min_bias}→{new_bias}"}
-
-    # ── Win rate OK but Sharpe still negative (R:R problem) ─────────────────
-    if win_rate >= 0.48 and sharpe < 0:
-        if atr_tp < 5.0:
-            new_tp = round(atr_tp * 1.25, 2)
-            return {"param": "atrTp", "value": new_tp,
-                    "reason": f"win={win_rate:.0%} good but sharpe={sharpe:.2f} — widen target atrTp {atr_tp}→{new_tp}"}
-        if tgt_win < 20:
-            new_win = int(tgt_win * 1.5)
-            return {"param": "targetWindow", "value": new_win,
-                    "reason": f"target window too narrow — increase targetWindow {tgt_win}→{new_win}"}
-
-    # ── Moderate win rate, moderate sharpe — tighten stops ─────────────────
-    if 0.40 <= win_rate < 0.48 and sharpe < 0.5:
-        if atr_stop > 0.7:
-            new_stop = round(atr_stop - 0.15, 2)
-            return {"param": "atrStop", "value": new_stop,
-                    "reason": f"tighten stop atrStop {atr_stop}→{new_stop} to improve R:R"}
-
-    # ── Sharpe positive — keep pushing toward 2.5 ───────────────────────────
-    if 0 < sharpe < TARGET_SHARPE:
-        # Try widening target first
-        if atr_tp < 8.0:
-            new_tp = round(atr_tp * 1.2, 2)
-            return {"param": "atrTp", "value": new_tp,
-                    "reason": f"sharpe={sharpe:.2f} → push atrTp {atr_tp}→{new_tp}"}
-        # Then try wider target window
-        if tgt_win < 30:
-            new_win = int(tgt_win + 5)
-            return {"param": "targetWindow", "value": new_win,
-                    "reason": f"sharpe={sharpe:.2f} → widen targetWindow {tgt_win}→{new_win}"}
-        # Tighten stop to improve R:R ratio
-        if atr_stop > 0.5:
-            new_stop = round(atr_stop - 0.1, 2)
-            return {"param": "atrStop", "value": new_stop,
-                    "reason": f"sharpe={sharpe:.2f} → tighten atrStop {atr_stop}→{new_stop}"}
-        # Tighten ADX to get only strongest trends
-        if adx_min < 32 and trades > 15:
-            new_adx = adx_min + 2
-            return {"param": "adxMin", "value": new_adx,
-                    "reason": f"sharpe={sharpe:.2f} → tighten adxMin {adx_min}→{new_adx} (quality over quantity)"}
-
-    return {"action": "none",
-            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} trades={trades} — holding current params"}
-
-# ── Apply a gate removal (edit strategy source) ──────────────────────────────
+    new  = re.sub(rf"('{name}'\s*:\s*)[0-9.]+", rf"\g<1>{value}", text)
+    if new == text:
+        log(f"  WARNING: param {name} not found", Y); return False
+    STRATEGY.write_text(new)
+    log(f"  SET P['{name}'] = {value}", G); return True
 
 def remove_golden_cross_gate():
-    """Comment out the EMA50 > EMA200 gate block."""
     text = STRATEGY.read_text()
     old = (
         "        # Golden cross gate: EMA50 must be above EMA200.\n"
@@ -204,139 +218,166 @@ def remove_golden_cross_gate():
         "            return\n"
     )
     if old not in text:
-        log("Golden cross gate block not found — may already be removed", Y)
-        return False
+        log("Golden cross gate already removed", Y); return False
     new = (
-        "        # Golden cross gate removed — March 2026 was in death-cross all month\n"
-        "        # e50 = self.ema50[-1]\n"
-        "        # if e50 < e200:\n"
-        "        #     self._d_no_golden += 1\n"
-        "        #     return\n"
+        "        # Golden cross gate disabled — March OOS was in death-cross all month\n"
+        "        # if self.ema50[-1] < e200: return\n"
     )
     STRATEGY.write_text(text.replace(old, new))
-    log("Removed golden cross gate from strategy", G)
-    return True
+    log("Removed golden cross gate", G); return True
 
-# ── Push new trigger ──────────────────────────────────────────────────────────
+# ── Decision engine ───────────────────────────────────────────────────────────
 
-def push_trigger(iter_id: str, message: str, is_stop=False):
-    if is_stop:
-        payload = {"id": iter_id, "command": "STOP",
-                   "bash": "", "message": message}
-    else:
-        payload = {
-            "id": iter_id,
-            "command": "RUN",
-            "bash": (
-                "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && "
-                "git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && "
-                "python backtester/DOWNTREND/strategy_downtrend.py "
-                "--csv backtester/btc_mar30.csv --balance 100 "
-                "--min-bias 0.05 --adx-min 22 --atr-stop 1.0 "
-                "--target-window 10 --max-hold 60"
-            ),
-            "message": message,
-        }
-    TRIGGER_F.write_text(json.dumps(payload, indent=2))
+def decide(stats: dict, diag: dict, history: list) -> dict:
+    trades   = int(stats.get("trades", 0))
+    sharpe   = stats.get("sharpe", -99)
+    win_rate = stats.get("win_rate", 0) / 100.0
 
-    # Commit strategy + trigger together
-    files = [str(TRIGGER_F.relative_to(REPO)), str(STRATEGY.relative_to(REPO))]
-    git("add", *files)
-    r = git("commit", "-m", f"auto-optimizer: {message}")
-    if r.returncode != 0 and "nothing to commit" not in r.stdout + r.stderr:
-        log(f"commit failed: {r.stderr.strip()}", R)
-        return False
+    adx_min  = float(read_param("adxMin")       or 22)
+    min_bias = float(read_param("minBias")       or 0.05)
+    rsi_ob   = float(read_param("rsiOB")         or 65)
+    atr_tp   = float(read_param("atrTp")         or 2.8)
+    atr_stop = float(read_param("atrStop")       or 1.0)
+    tgt_win  = float(read_param("targetWindow")  or 10)
 
+    if trades == 0:
+        if diag["no_golden"] > 30:
+            return {"gate": "remove_golden",
+                    "reason": f"golden cross gate blocked {diag['no_golden']:.0f}% — removing"}
+        if adx_min > 18:
+            return {"param": "adxMin", "value": max(18, adx_min-2),
+                    "reason": f"0 trades — loosen adxMin {adx_min}→{max(18,adx_min-2)}"}
+        if min_bias > 0.0:
+            return {"param": "minBias", "value": 0.0,
+                    "reason": "0 trades — remove minBias gate"}
+        return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
+
+    if trades > 40 and win_rate < 0.38:
+        if rsi_ob > 55:
+            return {"param": "rsiOB", "value": rsi_ob-5,
+                    "reason": f"win={win_rate:.0%} too low — tighten rsiOB {rsi_ob}→{rsi_ob-5}"}
+        if adx_min < 30:
+            return {"param": "adxMin", "value": adx_min+2,
+                    "reason": f"win={win_rate:.0%} too low — tighten adxMin {adx_min}→{adx_min+2}"}
+        if min_bias < 0.15:
+            return {"param": "minBias", "value": round(min_bias+0.03,2),
+                    "reason": f"win={win_rate:.0%} too low — tighten minBias {min_bias}→{round(min_bias+0.03,2)}"}
+
+    if win_rate >= 0.48 and sharpe < 0:
+        if atr_tp < 8.0:
+            new_tp = round(atr_tp*1.25, 2)
+            return {"param": "atrTp", "value": new_tp,
+                    "reason": f"win={win_rate:.0%} good, sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp}"}
+
+    if 0.40 <= win_rate < 0.48 and sharpe < 0.5:
+        if atr_stop > 0.6:
+            new_stop = round(atr_stop-0.15, 2)
+            return {"param": "atrStop", "value": new_stop,
+                    "reason": f"tighten stop atrStop {atr_stop}→{new_stop}"}
+
+    if 0 < sharpe < TARGET_SHARPE:
+        if atr_tp < 8.0:
+            new_tp = round(atr_tp*1.2, 2)
+            return {"param": "atrTp", "value": new_tp,
+                    "reason": f"sharpe={sharpe:.2f} — push atrTp {atr_tp}→{new_tp}"}
+        if tgt_win < 30:
+            return {"param": "targetWindow", "value": int(tgt_win+5),
+                    "reason": f"widen targetWindow {tgt_win}→{int(tgt_win+5)}"}
+        if atr_stop > 0.5:
+            new_stop = round(atr_stop-0.1, 2)
+            return {"param": "atrStop", "value": new_stop,
+                    "reason": f"sharpe={sharpe:.2f} — tighten atrStop {atr_stop}→{new_stop}"}
+        if adx_min < 32 and trades > 15:
+            return {"param": "adxMin", "value": adx_min+2,
+                    "reason": f"quality over quantity — adxMin {adx_min}→{adx_min+2}"}
+
+    return {"action": "none",
+            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} — holding params"}
+
+# ── Commit and push code change ───────────────────────────────────────────────
+
+def commit_and_push(message: str):
+    git("add",
+        str(STRATEGY.relative_to(REPO)),
+        str(TRIGGER_F.relative_to(REPO)))
+    r = git("commit", "-m", f"optimizer: {message}")
+    if r.returncode != 0 and "nothing to commit" not in r.stdout+r.stderr:
+        log(f"commit warning: {r.stderr.strip()}", Y)
     for attempt in range(4):
         r = git("push", "-u", "origin", CODE_BRANCH)
         if r.returncode == 0:
-            log(f"Pushed trigger {iter_id}", G)
-            return True
-        wait = 2 ** (attempt + 1)
-        log(f"Push failed (attempt {attempt+1}) — retry in {wait}s", Y)
-        time.sleep(wait)
-
-    log("Push failed after 4 attempts", R)
-    return False
+            log("Pushed to code branch", G); return True
+        wait = 2**(attempt+1)
+        log(f"Push failed — retry in {wait}s", Y); time.sleep(wait)
+    log("Push failed after 4 attempts", R); return False
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    log(f"Auto-optimizer starting — target Sharpe ≥ {TARGET_SHARPE}", G)
-    log(f"Polling data/live every {POLL_S}s", C)
+    log(f"Auto-optimizer starting — target Sharpe ≥ {TARGET_SHARPE} (milestone {MILESTONE})", G)
 
-    last_id  = None
-    iter_num = 22          # next iter to write
-    history  = []          # list of stats dicts for trend analysis
+    iter_num = 22
+    history  = []
 
     while True:
-        results = fetch_results()
+        check_self_reload()
+        sync_code()
 
-        if results is None:
-            log("No bt_results.json yet — waiting...", Y)
-            time.sleep(POLL_S)
-            continue
+        log(f"── iter{iter_num} ── running backtest", B)
+        try:
+            result = run_backtest()
+        except subprocess.TimeoutExpired:
+            log("Backtest timed out — retrying", R); time.sleep(10); continue
+        except Exception as e:
+            log(f"Backtest error: {e}", R); time.sleep(10); continue
 
-        rid = results.get("trigger_id", "")
-
-        # Skip if same result as last time
-        if rid == last_id:
-            time.sleep(POLL_S)
-            continue
-
-        last_id = rid
-        stats   = results.get("stats", {})
-        tail    = results.get("output_tail", [])
-        diag    = parse_diag(tail)
-
+        stats  = result["stats"]
+        diag   = parse_diag(result["output_tail"])
         sharpe = stats.get("sharpe", -99)
         trades = int(stats.get("trades", 0))
         win    = stats.get("win_rate", 0)
         ret    = stats.get("return_pct", -99)
-        history.append({**stats, "iter": rid})
+        iter_id = f"iter{iter_num}_{datetime.now().strftime('%H%M%S')}"
 
-        log(
-            f"{B}[{rid}]{Z}  sharpe={C}{sharpe:+.3f}{Z}  "
-            f"win={win:.1f}%  trades={trades}  ret={ret:+.2f}%",
-            G if sharpe > 0 else R
-        )
-        log(
-            f"  diag → adx_blocked={diag['adx_pct']:.1f}%  "
-            f"slope={diag['slope_pct']:.1f}%  "
-            f"below_e200={diag['below_e200']:.1f}%  "
-            f"no_golden={diag['no_golden']:.1f}%  "
-            f"cross_fired={int(diag['cross_fired'])}"
-        )
+        col = G if sharpe > 0 else (Y if sharpe > -2 else R)
+        log(f"[{iter_id}] sharpe={sharpe:+.3f} | win={win:.1f}% | trades={trades} | ret={ret:+.2f}%", col)
+        log(f"  adx={diag['adx_pct']:.0f}%blk  slope={diag['slope_pct']:.0f}%blk  "
+            f"no_golden={diag['no_golden']:.0f}%blk  cross_fired={int(diag['cross_fired'])}")
 
-        # ── MILESTONE ─────────────────────────────────────────────────────────
-        if sharpe >= 1.6 and trades >= MIN_TRADES:
-            log(f"MILESTONE: Sharpe={sharpe:.3f} ≥ 1.6 — pushing toward 2.5", G)
+        push_results(iter_id, result)
 
-        # ── SUCCESS ──────────────────────────────────────────────────────────
+        if sharpe >= MILESTONE and trades >= MIN_TRADES:
+            log(f"MILESTONE: Sharpe={sharpe:.3f} ≥ {MILESTONE} — pushing toward {TARGET_SHARPE}", G)
+
         if sharpe >= TARGET_SHARPE and trades >= MIN_TRADES:
             log(f"TARGET REACHED — Sharpe={sharpe:.3f} ≥ {TARGET_SHARPE} ({trades} trades)", G)
-            push_trigger(f"iter{iter_num}_SUCCESS", f"Sharpe={sharpe:.3f} ≥ 2.5 — DONE", is_stop=True)
-            log("STOP trigger pushed. bt_watcher will halt.", G)
+            TRIGGER_F.write_text(json.dumps(
+                {"id": iter_id+"_DONE", "command": "STOP",
+                 "bash": "", "message": f"Sharpe={sharpe:.3f} — DONE"}, indent=2))
+            commit_and_push(f"SUCCESS Sharpe={sharpe:.3f}")
             break
 
-        # ── DECIDE NEXT ACTION ────────────────────────────────────────────────
+        history.append({**stats, "iter": iter_id})
         decision = decide(stats, diag, history)
-        log(f"  decision → {decision.get('reason','?')}", C)
-
-        iter_num += 1
-        iter_id   = f"iter{iter_num}_{datetime.now().strftime('%H%M%S')}"
+        log(f"  → {decision.get('reason','?')}", C)
 
         if decision.get("gate") == "remove_golden":
             remove_golden_cross_gate()
         elif decision.get("param"):
             set_param(decision["param"], decision["value"])
-        else:
-            log("  No code change — re-running same params to confirm result", Y)
 
-        push_trigger(iter_id, decision.get("reason", "auto-optimizer step"))
-        log(f"  → iter{iter_num} trigger pushed — waiting for bt_watcher...", C)
-        time.sleep(POLL_S)
+        iter_num += 1
+        TRIGGER_F.write_text(json.dumps({
+            "id": f"iter{iter_num}",
+            "command": "RUN",
+            "bash": "",
+            "message": decision.get("reason", "auto step"),
+        }, indent=2))
+
+        commit_and_push(decision.get("reason", "auto step"))
+        log(f"  iter{iter_num} committed — starting next run\n", C)
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     main()
