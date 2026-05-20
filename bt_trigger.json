@@ -1,6 +1,6 @@
 {
-  "id": "iter140",
+  "id": "iter141",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=-0.62 atrTp=4.0 capped \u2014 extend maxHoldBars 150\u2192180"
+  "message": "trades=213 ok, win=40% low \u2014 nudge adxMin 14.0\u219216.0"
 }
