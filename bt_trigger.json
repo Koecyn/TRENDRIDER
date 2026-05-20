@@ -1,6 +1,6 @@
 {
-  "id": "iter43",
+  "id": "iter44",
   "command": "RUN",
   "bash": "",
-  "message": "PF=0.48 \u2014 early partials cap winners; raising partialAt 1.0\u21923.0"
+  "message": "PF=0.32 \u2014 tighten atrStop 1.0\u21920.8 to improve R:R"
 }
