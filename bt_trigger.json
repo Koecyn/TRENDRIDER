@@ -1,6 +1,6 @@
 {
-  "id": "iter48",
+  "id": "iter49",
   "command": "RUN",
   "bash": "",
-  "message": "PF=0.37 \u2014 widen targetWindow 15\u219220 for bigger targets"
+  "message": "sharpe=-5.41 win=24% PF=0.37 \u2014 holding params"
 }
