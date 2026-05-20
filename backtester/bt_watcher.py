@@ -74,6 +74,14 @@ def git_unlock():
 def inject_token():
     token = os.getenv("GITHUB_TOKEN", "").strip()
     if not token:
+        creds = Path.home() / ".git-credentials"
+        if creds.exists():
+            for line in creds.read_text().splitlines():
+                m = __import__('re').search(r"https://[^:]+:([^@]+)@", line)
+                if m:
+                    token = m.group(1).strip()
+                    break
+    if not token:
         return
     r = git(["remote", "get-url", "origin"])
     url = r.stdout.strip()
