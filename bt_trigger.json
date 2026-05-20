@@ -1,6 +1,6 @@
 {
-  "id": "iter57",
+  "id": "iter58",
   "command": "RUN",
   "bash": "",
-  "message": "atrStop=0.4/rsiOB=55 over-tightened PF=0.37 \u2014 full reset"
+  "message": "PF=0.52 \u2014 tighten slope lookback emaSlopeN 480\u2192240 (filters weak bear bounces)"
 }

@@ -40,7 +40,7 @@ P = {
     'emaSlow':       13,
     'emaTrend':      50,
     'emaMacro':      200,    # macro trend EMA
-    'emaSlopeN':     480,    # EMA200 slope lookback bars (480 = 8 hrs; robust to dead-cat bounces)
+    'emaSlopeN':     240,    # EMA200 slope lookback bars (480 = 8 hrs; robust to dead-cat bounces)
     'rsiOB':         65,    # tighter cap: filters overextended crosses common in dead-cat bounces
     'rsiOS':         28,
     'volMin':        0.0,
