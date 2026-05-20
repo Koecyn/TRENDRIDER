@@ -1,6 +1,6 @@
 {
-  "id": "iter68",
+  "id": "iter83",
   "command": "RUN",
   "bash": "",
-  "message": "ccxt fetch + volume gate + vault params reset"
+  "message": "trades=6 < 25 target \u2014 shorten slope lookback 240\u2192120 (more entries)"
 }
