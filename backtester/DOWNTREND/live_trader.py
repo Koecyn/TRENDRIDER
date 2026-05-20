@@ -3,7 +3,7 @@
 # SECTION 1 — Imports, Constants, Parameters
 # ═══════════════════════════════════════════════════════════════════════════════
 """
-TRENDRIDER v7 — DOWNTREND Regime Live Trader
+TRENDRIDER v8 — DOWNTREND Regime Live Trader
 Maker-only, long-only, no margin, no shorts. Starts with $100.
 Exchange : Binance.US  (maker 0%, taker 0.02%)
 Default  : paper mode (--live to enable real orders)
@@ -22,25 +22,24 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-# ── Parameters (must match winning backtest) ─────────────────────────────────
+# ── Parameters (must match strategy_downtrend_opt.py) ────────────────────────
 P = {
     'emaFast':       5,
     'emaSlow':       13,
     'emaTrend':      50,
     'emaMacro':      200,
-    'emaSlopeN':     240,    # EMA200 slope lookback bars
+    'emaSlopeN':     240,    # EMA200 slope lookback (diagnostic only)
     'rsiOB':         50.0,   # EMA_CROSS gate (requires RSI < 50)
     'rsiOS':         28,
     'atrStop':       1.0,    # × 1-min downside ATR
-    'atrTp':         2.8,    # × N-bar rolling range
-    'partialAt':     3.0,
-    'trailAtr':      0.65,
-    'trailActivate': 0.25,
-    'maxHoldBars':   60,
-    'adxMin':        22,
-    'minBias':       0.05,
-    'minBias60m':    0.0,
-    'targetWindow':  10,
+    'partialAt':     3.0,    # × mtf range → partial exit level
+    'trailAtr':      0.65,   # loose trail multiplier
+    'trailActivate': 0.25,   # pnl/risk to start trailing (0.25R)
+    'maxHoldBars':   180,
+    'adxMin':        18,
+    'minBias':       -0.5,   # allow pullback bars (slightly bearish 1m ok)
+    'minBias60m':    -0.5,   # allow bearish hourly conditions
+    'targetWindow':  10,     # N-bar range window for mtf ATR
 }
 
 # ── Exchange / safety constants ───────────────────────────────────────────────
@@ -51,6 +50,10 @@ MIN_NOTIONAL  = 10.0                # Binance.US minimum order value USD
 WARMUP_BARS   = 250                 # bars needed before indicators are stable
 LOG_LEVEL     = logging.INFO
 
+# ── Sell wall detection thresholds ───────────────────────────────────────────
+OB_WALL_DEPTH_PCT  = 0.005          # scan asks within 0.5% of mid
+OB_WALL_RATIO      = 3.0            # ask BTC / bid BTC > 3× = wall
+
 logging.basicConfig(
     level=LOG_LEVEL,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -59,7 +62,7 @@ logging.basicConfig(
 log = logging.getLogger('trendrider')
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — Indicator Functions (exact match to strategy_downtrend.py)
+# SECTION 2 — Indicator Functions (exact match to strategy_downtrend_opt.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def calc_ema(arr: np.ndarray, period: int) -> np.ndarray:
@@ -168,14 +171,15 @@ def calc_adx(high: np.ndarray, low: np.ndarray,
     return out
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — Signal Engine (exact logic from strategy_downtrend.py)
+# SECTION 3 — Signal Engine (exact logic from strategy_downtrend_opt.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def compute_indicators(highs, lows, closes):
+def compute_indicators(highs, lows, closes, volumes):
     """Compute all indicators from numpy arrays; return dict of latest values."""
-    h = np.array(highs, dtype=float)
-    l = np.array(lows,  dtype=float)
-    c = np.array(closes, dtype=float)
+    h = np.array(highs,   dtype=float)
+    l = np.array(lows,    dtype=float)
+    c = np.array(closes,  dtype=float)
+    v = np.array(volumes, dtype=float)
 
     ema5   = calc_ema(c, P['emaFast'])
     ema13  = calc_ema(c, P['emaSlow'])
@@ -188,34 +192,32 @@ def compute_indicators(highs, lows, closes):
     rng    = calc_range_mtf(h, l, P['targetWindow'], 14)
     adx    = calc_adx(h, l, c, 14)
 
-    # EMA200 slope gate: compare current vs emaSlopeN bars ago
-    slope_n = int(P['emaSlopeN'])
+    slope_n   = int(P['emaSlopeN'])
     e200_prev = ema200[-slope_n] if len(ema200) >= slope_n + 1 else ema200[0]
 
     return {
-        'f':        ema5[-1],   'f1':       ema5[-2],
-        's':        ema13[-1],  's1':       ema13[-2],
-        'tr':       ema50[-1],
-        'e200':     ema200[-1], 'e200_prev': e200_prev,
-        'e50':      ema50[-1],
-        'r':        rsi[-1],
-        'a_1m':     atr_1m[-1],
-        'b_1m':     bias1m[-1],
-        'b_60m':    bias60[-1],
-        'r_mtf':    rng[-1],
-        'dx':       adx[-1],
-        'price':    c[-1],
-        'lo':       l[-1],
+        'f':         ema5[-1],    'f1':        ema5[-2],
+        's':         ema13[-1],   's1':        ema13[-2],
+        'tr':        ema50[-1],
+        'e200':      ema200[-1],  'e200_prev': e200_prev,
+        'e50':       ema50[-1],
+        'r':         rsi[-1],     'r1':        rsi[-2],
+        'a_1m':      atr_1m[-1],
+        'b_1m':      bias1m[-1],
+        'b_60m':     bias60[-1],
+        'r_mtf':     rng[-1],
+        'dx':        adx[-1],
+        'price':     c[-1],
+        'lo':        l[-1],
+        'vol':       v[-1],       'vol1':      v[-2],
     }
 
 def check_gates(ind: dict) -> str | None:
-    """Return blocking reason string or None if clear."""
-    if ind['e200'] < ind['e200_prev']:
-        return 'slope_blocked'
-    if ind['price'] < ind['e200']:
-        return 'below_e200'
-    if ind['e50'] < ind['e200']:
-        return 'no_golden'
+    """Return blocking reason string or None if clear.
+    EMA200 trend filters are intentionally removed — they blocked too many
+    intraday bounces within downtrends which is exactly what we trade.
+    Kept in compute_indicators for diagnostic logging only.
+    """
     if ind['dx'] < P['adxMin']:
         return 'adx_low'
     if ind['b_1m'] < P['minBias']:
@@ -227,7 +229,7 @@ def check_gates(ind: dict) -> str | None:
     return None
 
 def check_signal(ind: dict) -> str | None:
-    """EMA_CROSS or EMA_PULLBACK — exact conditions from strategy_downtrend.py."""
+    """EMA_CROSS or EMA_PULLBACK — exact conditions from strategy_downtrend_opt.py."""
     f, f1, s, s1 = ind['f'], ind['f1'], ind['s'], ind['s1']
     tr, price, lo = ind['tr'], ind['price'], ind['lo']
     r = ind['r']
@@ -246,24 +248,24 @@ def check_signal(ind: dict) -> str | None:
     return None
 
 def calc_entry_levels(ind: dict) -> dict:
-    """Compute stop, target, trail parameters from current indicators."""
-    FLOOR   = 0.15
-    a_1m    = ind['a_1m']
-    b_1m    = ind['b_1m']
-    r_mtf   = ind['r_mtf']
-    price   = ind['price']
+    """Compute stop and partial-exit levels from current indicators."""
+    FLOOR    = 0.15
+    a_1m     = ind['a_1m']
+    b_1m     = ind['b_1m']
+    r_mtf    = ind['r_mtf']
+    price    = ind['price']
 
     a_dn_1m  = max(a_1m  * (1 - b_1m) / 2, a_1m  * FLOOR)
     a_up_mtf = max(r_mtf * (1 + b_1m) / 2, r_mtf * FLOOR)
 
-    stop   = price - a_dn_1m * P['atrStop']
-    target = price + a_up_mtf * P['atrTp']
+    stop       = price - a_dn_1m * P['atrStop']
+    partial_at = price + a_up_mtf * P['partialAt']
 
     return {
-        'entry':          price,
-        'stop':           stop,
-        'target':         target,
-        'a_dn_1m_entry':  a_dn_1m,
+        'entry':         price,
+        'stop':          stop,
+        'partial_at':    partial_at,
+        'a_dn_1m_entry': a_dn_1m,
     }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -272,26 +274,31 @@ def calc_entry_levels(ind: dict) -> dict:
 
 class PositionManager:
     def __init__(self, balance: float, paper: bool = True):
-        self.balance       = balance
-        self.paper         = paper
-        self.state         = 'FLAT'    # FLAT | IN_POSITION
-        self.entry         = 0.0
-        self.stop          = 0.0
-        self.target        = 0.0
-        self.a_dn_entry    = 0.0
-        self.bars_held     = 0
-        self.btc_qty       = 0.0
-        self.entry_order_id   = None
-        self.stop_order_id    = None
-        self.target_order_id  = None
-        self.total_trades   = 0
+        self.balance         = balance
+        self.paper           = paper
+        self.state           = 'FLAT'    # FLAT | IN_POSITION
+        self.entry           = 0.0
+        self.stop            = 0.0
+        self.a_dn_entry      = 0.0
+        self.bars_held       = 0
+        self.btc_qty         = 0.0
+        self.partial_at      = 0.0
+        self.partial_taken   = False
+        self.trail_hi        = 0.0      # highest price since entry
+        self.peak_rsi        = 0.0      # highest RSI since entry
+        self.entry_order_id  = None
+        self.stop_order_id   = None
+        self.wall_order_id   = None     # live limit sell placed in front of wall
+        self.total_trades    = 0
         self.winning_trades  = 0
         self.total_pnl_pct   = 0.0
         # Kelly tracking
-        self._sum_win_pct   = 0.0   # cumulative winning trade %
-        self._sum_loss_pct  = 0.0   # cumulative losing trade abs %
-        self._n_wins        = 0
-        self._n_losses      = 0
+        self._sum_win_pct    = 0.0
+        self._sum_loss_pct   = 0.0
+        self._n_wins         = 0
+        self._n_losses       = 0
+        # order book state (populated by concurrent _ob_loop)
+        self._ob_state       = {'sell_wall': False, 'wall_price': 0.0}
 
     def kelly_fraction(self) -> float:
         """
@@ -303,15 +310,15 @@ class PositionManager:
         """
         n = self._n_wins + self._n_losses
         if n < 5:
-            return 0.25   # conservative default until stats are meaningful
+            return 0.25
 
         p = self._n_wins / n
         q = 1.0 - p
-        avg_win  = self._sum_win_pct  / self._n_wins  if self._n_wins  > 0 else 0.0
-        avg_loss = self._sum_loss_pct / self._n_losses if self._n_losses > 0 else 1e-6
+        avg_win  = self._sum_win_pct  / self._n_wins   if self._n_wins  > 0 else 0.0
+        avg_loss = self._sum_loss_pct / self._n_losses  if self._n_losses > 0 else 1e-6
         b = avg_win / avg_loss if avg_loss > 0 else 1.0
 
-        kelly = (p * b - q) / b if b > 0 else 0.0
+        kelly     = (p * b - q) / b if b > 0 else 0.0
         half_kelly = kelly * 0.5
 
         fraction = max(0.10, min(0.50, half_kelly))
@@ -321,12 +328,11 @@ class PositionManager:
 
     # ── called on every bar ───────────────────────────────────────────────────
     def on_bar(self, ind: dict, exchange) -> str:
-        action = 'hold'
         if self.state == 'FLAT':
-            action = self._check_entry(ind, exchange)
+            return self._check_entry(ind, exchange)
         elif self.state == 'IN_POSITION':
-            action = self._manage_position(ind, exchange)
-        return action
+            return self._manage_position(ind, exchange)
+        return 'hold'
 
     def _check_entry(self, ind: dict, exchange) -> str:
         gate = check_gates(ind)
@@ -340,23 +346,21 @@ class PositionManager:
         levels = calc_entry_levels(ind)
         price  = ind['price']
 
-        # Kelly-sized position: half-Kelly fraction of balance
-        frac = self.kelly_fraction()
+        frac          = self.kelly_fraction()
         usdt_to_spend = self.balance * frac
-        # Floor: must meet min notional; if Kelly says too little, skip
         if usdt_to_spend < MIN_NOTIONAL:
-            # try full 99% before giving up — only applies on tiny accounts
             if self.balance * 0.99 < MIN_NOTIONAL:
-                log.warning(f'Balance ${self.balance:.2f} below min notional — skipping')
+                log.warning('Balance $%.2f below min notional — skipping', self.balance)
                 return 'below_min'
             usdt_to_spend = self.balance * 0.99
 
         qty = usdt_to_spend / price
 
         log.info(
-            f'SIGNAL {sig} | price={price:.2f} kelly={frac:.0%} '
-            f'size=${usdt_to_spend:.2f} stop={levels["stop"]:.2f} target={levels["target"]:.2f} '
-            f'qty={qty:.6f} BTC'
+            'SIGNAL %s | price=%.2f kelly=%.0f%% size=$%.2f '
+            'stop=%.2f partial=%.2f qty=%.6f BTC',
+            sig, price, frac*100, usdt_to_spend,
+            levels['stop'], levels['partial_at'], qty,
         )
 
         if self.paper:
@@ -368,45 +372,89 @@ class PositionManager:
 
     def _manage_position(self, ind: dict, exchange) -> str:
         price = ind['price']
-        self.bars_held += 1
+        rsi   = ind['r']
+        rsi1  = ind['r1']
+        vol   = ind['vol']
+        vol1  = ind['vol1']
+        f     = ind['f'];   f1 = ind['f1']
+        s     = ind['s'];   s1 = ind['s1']
 
-        # ── trail stop update ────────────────────────────────────────────────
+        self.bars_held += 1
+        self.trail_hi   = max(self.trail_hi, price)
+        self.peak_rsi   = max(self.peak_rsi, rsi)
+
         risk_unit = abs(self.entry - self.stop)
-        if risk_unit > 0:
-            pnl_r = (price - self.entry) / risk_unit
-            if pnl_r >= P['trailActivate']:
-                trail = price - self.a_dn_entry * P['trailAtr']
-                if trail > self.stop:
-                    old_stop = self.stop
-                    self.stop = trail
-                    log.debug(f'Trail stop raised {old_stop:.2f} → {self.stop:.2f}')
-                    if not self.paper:
-                        self._update_stop_order(exchange)
+        pnl_r     = (price - self.entry) / risk_unit if risk_unit > 0 else 0.0
+
+        # ── sell pressure detection ──────────────────────────────────────────
+        rsi_turning   = rsi < rsi1 and self.peak_rsi > 55
+        vol_fading    = vol < vol1 * 0.85
+        sell_pressure = rsi_turning and vol_fading
+
+        # ── order book confirmation (live WebSocket) ─────────────────────────
+        ob        = self._ob_state
+        sell_wall = ob.get('sell_wall', False)
+        wall_price = ob.get('wall_price', 0.0)
+
+        # ── adaptive trail distance ──────────────────────────────────────────
+        if sell_pressure and sell_wall:
+            trail_dist = self.a_dn_entry * 0.3    # confirmed wall: very tight
+        elif sell_pressure:
+            trail_dist = self.a_dn_entry * 0.5    # momentum dying: tight
+        elif rsi > 58 or rsi_turning:
+            trail_dist = self.a_dn_entry * 1.0    # near resistance: moderate
+        else:
+            trail_dist = self.a_dn_entry * P['trailAtr']  # running: loose
+
+        if pnl_r >= P['trailActivate']:
+            new_stop = self.trail_hi - trail_dist
+            if new_stop > self.stop:
+                self.stop = new_stop
+                log.debug('Trail stop → %.2f (pnl_r=%.2fR)', self.stop, pnl_r)
+                if not self.paper:
+                    self._update_stop_order(exchange)
+
+        # ── partial exit at first target ─────────────────────────────────────
+        if not self.partial_taken and price >= self.partial_at:
+            half_qty = self.btc_qty * 0.5
+            if self.paper:
+                proceeds = half_qty * price
+                self.balance  += proceeds
+                self.btc_qty  -= half_qty
+                self.partial_taken = True
+                log.info('[PAPER] PARTIAL SELL %.6f BTC @ %.2f (partial target)', half_qty, price)
+            else:
+                self._live_partial_sell(half_qty, price, exchange)
+
+        # ── live: place limit sell in front of confirmed wall ────────────────
+        if (not self.paper and sell_wall and sell_pressure
+                and wall_price > 0 and not self.wall_order_id):
+            min_exit = self.entry * (1 + TAKER_FEE + 0.0001)
+            candidate = round(wall_price - 0.01, 2)
+            if candidate > min_exit:
+                self._place_wall_sell(candidate, exchange)
 
         # ── exit conditions ───────────────────────────────────────────────────
-        reason = None
+        reason     = None
         exit_price = price
 
         if price <= self.stop:
-            reason = 'stop'
-            exit_price = self.stop   # limit stop (maker)
-        elif price >= self.target:
-            reason = 'target'
-            exit_price = self.target
+            reason     = 'stop'
+            exit_price = self.stop           # limit stop (maker)
+        elif f < s and f1 >= s1 and pnl_r > 0.5:
+            reason     = 'ema_reversal'      # EMA5 crossed back below EMA13
         elif self.bars_held >= P['maxHoldBars']:
-            reason = 'timeout'
+            reason     = 'timeout'
 
         if reason:
-            # Safety: never sell at market unless profit > taker fee
             if reason == 'timeout':
                 pnl_pct = (price - self.entry) / self.entry
                 if pnl_pct <= TAKER_FEE:
-                    # post a limit sell at a price that covers taker fee
                     min_exit = self.entry * (1 + TAKER_FEE + 0.0001)
                     if price < min_exit:
                         log.debug(
-                            f'Timeout exit deferred — price {price:.2f} < '
-                            f'min_exit {min_exit:.2f} (taker fee protection)'
+                            'Timeout deferred — %.2f < min_exit %.2f (taker fee)',
+                            price, min_exit,
                         )
                         return 'hold:fee_protect'
                     exit_price = price
@@ -418,93 +466,106 @@ class PositionManager:
 
     # ── paper fills ───────────────────────────────────────────────────────────
     def _paper_enter(self, price: float, qty: float, levels: dict, sig: str):
-        cost = price * qty
-        self.balance       -= cost
-        self.btc_qty        = qty
-        self.entry          = levels['entry']
-        self.stop           = levels['stop']
-        self.target         = levels['target']
-        self.a_dn_entry     = levels['a_dn_1m_entry']
-        self.bars_held      = 0
-        self.state          = 'IN_POSITION'
-        log.info(
-            f'[PAPER] BUY {qty:.6f} BTC @ {price:.2f} | '
-            f'stop={self.stop:.2f} target={self.target:.2f}'
-        )
+        cost           = price * qty
+        self.balance  -= cost
+        self.btc_qty   = qty
+        self.entry     = levels['entry']
+        self.stop      = levels['stop']
+        self.partial_at = levels['partial_at']
+        self.a_dn_entry = levels['a_dn_1m_entry']
+        self.bars_held  = 0
+        self.trail_hi   = price
+        self.peak_rsi   = 0.0
+        self.partial_taken = False
+        self.state      = 'IN_POSITION'
+        log.info('[PAPER] BUY %.6f BTC @ %.2f | stop=%.2f partial=%.2f',
+                 qty, price, self.stop, self.partial_at)
 
     def _close_position(self, exit_price: float, reason: str, exchange):
-        proceeds = self.btc_qty * exit_price
-        pnl_pct  = (exit_price - self.entry) / self.entry * 100
-        self.balance += proceeds
-        self.total_trades  += 1
+        proceeds  = self.btc_qty * exit_price
+        pnl_pct   = (exit_price - self.entry) / self.entry * 100
+        self.balance      += proceeds
+        self.total_trades += 1
         self.total_pnl_pct += pnl_pct
         if pnl_pct > 0:
-            self.winning_trades  += 1
-            self._n_wins         += 1
-            self._sum_win_pct    += pnl_pct
+            self.winning_trades += 1
+            self._n_wins        += 1
+            self._sum_win_pct   += pnl_pct
         else:
-            self._n_losses       += 1
-            self._sum_loss_pct   += abs(pnl_pct)
+            self._n_losses      += 1
+            self._sum_loss_pct  += abs(pnl_pct)
         win_rate   = self.winning_trades / self.total_trades * 100
         next_kelly = self.kelly_fraction()
+        label = 'PAPER' if self.paper else 'LIVE'
         log.info(
-            f'[{"PAPER" if self.paper else "LIVE"}] SELL {self.btc_qty:.6f} BTC '
-            f'@ {exit_price:.2f} reason={reason} pnl={pnl_pct:+.3f}% | '
-            f'balance=${self.balance:.4f} trades={self.total_trades} '
-            f'W%={win_rate:.0f}% next_kelly={next_kelly:.0%}'
+            '[%s] SELL %.6f BTC @ %.2f reason=%s pnl=%+.3f%% | '
+            'balance=$%.4f trades=%d W%%=%.0f%% next_kelly=%.0f%%',
+            label, self.btc_qty, exit_price, reason, pnl_pct,
+            self.balance, self.total_trades, win_rate, next_kelly*100,
         )
-        self.state   = 'FLAT'
-        self.btc_qty = 0.0
+        self.state         = 'FLAT'
+        self.btc_qty       = 0.0
+        self.wall_order_id = None
 
-    # ── live order helpers (Binance.US LIMIT + STOP_LOSS_LIMIT) ──────────────
+    # ── live order helpers ────────────────────────────────────────────────────
     def _live_enter(self, price, qty, levels, sig, exchange):
         try:
-            # LIMIT BUY (maker, 0% fee)
             order = exchange.create_order(
-                SYMBOL, 'limit', 'buy', qty,
-                price,   # post-at-price
+                SYMBOL, 'limit', 'buy', qty, price,
                 {'timeInForce': 'GTC', 'newOrderRespType': 'FULL'}
             )
             self.entry_order_id = order['id']
             self.btc_qty        = qty
             self.entry          = levels['entry']
             self.stop           = levels['stop']
-            self.target         = levels['target']
+            self.partial_at     = levels['partial_at']
             self.a_dn_entry     = levels['a_dn_1m_entry']
             self.bars_held      = 0
+            self.trail_hi       = price
+            self.peak_rsi       = 0.0
+            self.partial_taken  = False
             self.state          = 'IN_POSITION'
-            log.info(f'[LIVE] LIMIT BUY {qty:.6f} @ {price:.2f} id={order["id"]}')
+            log.info('[LIVE] LIMIT BUY %.6f @ %.2f id=%s', qty, price, order['id'])
 
-            # STOP_LOSS_LIMIT sell (stop price = stop - 1 tick; limit = stop - 2 ticks)
-            tick = 0.01
+            tick         = 0.01
             stop_trigger = round(self.stop - tick, 2)
             stop_limit   = round(self.stop - 2 * tick, 2)
             sl = exchange.create_order(
-                SYMBOL, 'STOP_LOSS_LIMIT', 'sell', qty,
-                stop_limit,
-                {
-                    'stopPrice':    stop_trigger,
-                    'timeInForce':  'GTC',
-                }
+                SYMBOL, 'STOP_LOSS_LIMIT', 'sell', qty, stop_limit,
+                {'stopPrice': stop_trigger, 'timeInForce': 'GTC'}
             )
             self.stop_order_id = sl['id']
-            log.info(
-                f'[LIVE] STOP_LOSS_LIMIT trigger={stop_trigger:.2f} '
-                f'limit={stop_limit:.2f} id={sl["id"]}'
-            )
+            log.info('[LIVE] STOP_LOSS_LIMIT trigger=%.2f limit=%.2f id=%s',
+                     stop_trigger, stop_limit, sl['id'])
+        except Exception as e:
+            log.error('Live entry failed: %s', e)
 
-            # LIMIT SELL target (maker)
-            tgt = exchange.create_order(
-                SYMBOL, 'limit', 'sell', qty,
-                round(self.target, 2),
+    def _live_partial_sell(self, qty: float, price: float, exchange):
+        try:
+            order = exchange.create_order(
+                SYMBOL, 'limit', 'sell', qty, round(price, 2),
                 {'timeInForce': 'GTC'}
             )
-            self.target_order_id = tgt['id']
-            log.info(
-                f'[LIVE] LIMIT SELL target={self.target:.2f} id={tgt["id"]}'
-            )
+            self.btc_qty       -= qty
+            self.partial_taken  = True
+            log.info('[LIVE] PARTIAL LIMIT SELL %.6f @ %.2f id=%s',
+                     qty, price, order['id'])
         except Exception as e:
-            log.error(f'Live entry failed: {e}')
+            log.error('Partial sell failed: %s', e)
+
+    def _place_wall_sell(self, sell_price: float, exchange):
+        """Limit sell placed just in front of a confirmed order book wall."""
+        try:
+            qty   = self.btc_qty
+            order = exchange.create_order(
+                SYMBOL, 'limit', 'sell', qty, sell_price,
+                {'timeInForce': 'GTC'}
+            )
+            self.wall_order_id = order['id']
+            log.info('[LIVE] WALL SELL %.6f @ %.2f id=%s (sell wall detected)',
+                     qty, sell_price, order['id'])
+        except Exception as e:
+            log.error('Wall sell failed: %s', e)
 
     def _update_stop_order(self, exchange):
         if not self.stop_order_id:
@@ -513,19 +574,18 @@ class PositionManager:
             exchange.cancel_order(self.stop_order_id, SYMBOL)
         except Exception:
             pass
-        tick = 0.01
+        tick         = 0.01
         stop_trigger = round(self.stop - tick, 2)
         stop_limit   = round(self.stop - 2 * tick, 2)
         try:
             sl = exchange.create_order(
-                SYMBOL, 'STOP_LOSS_LIMIT', 'sell', self.btc_qty,
-                stop_limit,
+                SYMBOL, 'STOP_LOSS_LIMIT', 'sell', self.btc_qty, stop_limit,
                 {'stopPrice': stop_trigger, 'timeInForce': 'GTC'}
             )
             self.stop_order_id = sl['id']
-            log.debug(f'[LIVE] Updated stop → trigger={stop_trigger:.2f}')
+            log.debug('[LIVE] Stop updated → trigger=%.2f', stop_trigger)
         except Exception as e:
-            log.error(f'Stop update failed: {e}')
+            log.error('Stop update failed: %s', e)
 
     def status(self) -> str:
         if self.state == 'FLAT':
@@ -536,12 +596,12 @@ class PositionManager:
             )
         return (
             f'IN_POSITION | entry={self.entry:.2f} '
-            f'stop={self.stop:.2f} target={self.target:.2f} '
+            f'stop={self.stop:.2f} trail_hi={self.trail_hi:.2f} '
             f'bars={self.bars_held}'
         )
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — Bar Buffer & Feed (WebSocket via ccxt.pro, REST fallback for Termux)
+# SECTION 5 — Bar Buffer & Feed (WebSocket via ccxt.pro, REST fallback)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class BarBuffer:
@@ -578,6 +638,7 @@ class BarBuffer:
             np.array(self.highs),
             np.array(self.lows),
             np.array(self.closes),
+            np.array(self.volumes),
         )
 
 
@@ -602,6 +663,24 @@ def _make_exchange(args, use_pro: bool):
         return ccxt.binanceus(opts)
 
 
+def _detect_sell_wall(ob: dict, ref_price: float) -> dict:
+    """Return sell_wall bool and wall_price from ccxt order book snapshot."""
+    if not ob.get('asks') or ref_price <= 0:
+        return {'sell_wall': False, 'wall_price': 0.0}
+
+    lo = ref_price * (1 - OB_WALL_DEPTH_PCT)
+    hi = ref_price * (1 + OB_WALL_DEPTH_PCT)
+
+    ask_vol = sum(sz for px, sz in ob['asks'] if px <= hi)
+    bid_vol = sum(sz for px, sz in ob['bids'] if px >= lo)
+
+    wall = bid_vol > 0 and ask_vol / bid_vol >= OB_WALL_RATIO
+    return {
+        'sell_wall':  wall,
+        'wall_price': ob['asks'][0][0] if wall else 0.0,
+    }
+
+
 def _on_closed_bar(ts_ms, buf, pm, exchange, bar_count_ref: list):
     """Called for each newly closed bar. Returns action string."""
     bar_count_ref[0] += 1
@@ -612,13 +691,14 @@ def _on_closed_bar(ts_ms, buf, pm, exchange, bar_count_ref: list):
             log.info('Warmup: %d / %d bars', bar_count, WARMUP_BARS)
         return 'warmup'
 
-    highs, lows, closes = buf.arrays()
-    ind    = compute_indicators(highs, lows, closes)
+    highs, lows, closes, volumes = buf.arrays()
+    ind    = compute_indicators(highs, lows, closes, volumes)
     action = pm.on_bar(ind, exchange)
 
     ts_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime('%H:%M')
-    log.debug('%s | price=%.2f RSI=%.1f ADX=%.1f bias=%.3f | %s | %s',
+    log.debug('%s | price=%.2f RSI=%.1f ADX=%.1f bias=%.3f wall=%s | %s | %s',
               ts_str, ind['price'], ind['r'], ind['dx'], ind['b_1m'],
+              pm._ob_state.get('sell_wall', False),
               action, pm.status())
 
     if bar_count % 60 == 0:
@@ -627,40 +707,58 @@ def _on_closed_bar(ts_ms, buf, pm, exchange, bar_count_ref: list):
     return action
 
 
+async def _kline_loop(exchange, buf, pm, bar_count):
+    """Kline WebSocket loop — fires on every new closed bar."""
+    while True:
+        candles = await exchange.watch_ohlcv(SYMBOL, '1m')
+        for ts_ms, o, h, l, c, v in candles:
+            if buf.push(ts_ms, o, h, l, c, v):
+                _on_closed_bar(ts_ms, buf, pm, exchange, bar_count)
+
+
+async def _ob_loop(exchange, ob_state: dict):
+    """Order book WebSocket loop — updates shared sell-wall state continuously."""
+    while True:
+        ob        = await exchange.watch_order_book(SYMBOL, limit=20)
+        ref_price = ob['asks'][0][0] if ob.get('asks') else 0.0
+        result    = _detect_sell_wall(ob, ref_price)
+        ob_state.update(result)
+        if result['sell_wall']:
+            log.debug('SELL WALL detected @ %.2f (ask/bid ratio triggered)', result['wall_price'])
+
+
 async def _run_ws(args, buf, pm):
-    """WebSocket feed — preferred when ccxt.pro is available."""
-    exchange = _make_exchange(args, use_pro=True)
+    """WebSocket feed — kline + order book concurrently via ccxt.pro."""
+    exchange  = _make_exchange(args, use_pro=True)
     bar_count = [0]
-    log.info('Feed: WebSocket (ccxt.pro)')
+    pm._ob_state = {'sell_wall': False, 'wall_price': 0.0}
+    log.info('Feed: WebSocket (ccxt.pro) — klines + order book')
     try:
-        while True:
-            candles = await exchange.watch_ohlcv(SYMBOL, '1m')
-            for ts_ms, o, h, l, c, v in candles:
-                if buf.push(ts_ms, o, h, l, c, v):
-                    _on_closed_bar(ts_ms, buf, pm, exchange, bar_count)
+        await asyncio.gather(
+            _kline_loop(exchange, buf, pm, bar_count),
+            _ob_loop(exchange, pm._ob_state),
+        )
     finally:
         await exchange.close()
 
 
 async def _run_rest(args, buf, pm):
     """REST polling fallback — works on Termux/ARM where ccxt.pro build fails."""
-    exchange = _make_exchange(args, use_pro=False)
+    exchange  = _make_exchange(args, use_pro=False)
     bar_count = [0]
-    log.info('Feed: REST polling every 62s (ccxt fallback — no WebSocket needed)')
+    log.info('Feed: REST polling every 62s (ccxt fallback — no order book)')
 
-    # Pre-fill buffer with history so indicators are warm immediately
     log.info('Fetching %d bars of history to warm indicators…', WARMUP_BARS + 10)
     try:
         history = exchange.fetch_ohlcv(SYMBOL, '1m', limit=WARMUP_BARS + 10)
-        for ts_ms, o, h, l, c, v in history[:-1]:   # skip current open bar
+        for ts_ms, o, h, l, c, v in history[:-1]:
             buf.push(ts_ms, o, h, l, c, v)
         log.info('History loaded: %d bars', len(buf.closes))
     except Exception as e:
-        log.warning('History pre-fill failed: %s — will warm up live', e)
+        log.warning('History pre-fill failed: %s — warming up live', e)
 
     try:
         while True:
-            # Sleep until 2 seconds after the next minute boundary
             now      = time.time()
             next_min = (int(now / 60) + 1) * 60 + 2
             wait     = next_min - now
@@ -674,7 +772,6 @@ async def _run_rest(args, buf, pm):
                 await asyncio.sleep(10)
                 continue
 
-            # candles[-1] is the current open bar; candles[-2] is the just-closed bar
             for ts_ms, o, h, l, c, v in candles[:-1]:
                 if buf.push(ts_ms, o, h, l, c, v):
                     _on_closed_bar(ts_ms, buf, pm, exchange, bar_count)
@@ -691,15 +788,14 @@ async def run_feed(args):
     buf   = BarBuffer(maxbars=max(300, P['emaMacro'] + 10))
     pm    = PositionManager(balance=args.balance, paper=paper)
 
-    log.info('TrendRider v7 DOWNTREND | mode=%s | symbol=%s | balance=$%.2f',
+    log.info('TrendRider v8 DOWNTREND | mode=%s | symbol=%s | balance=$%.2f',
              'PAPER' if paper else 'LIVE', SYMBOL, args.balance)
 
-    # Try WebSocket first; fall back to REST if ccxt.pro is unavailable
     try:
-        import ccxt.pro  # noqa: F401 — just testing importability
+        import ccxt.pro  # noqa: F401
         await _run_ws(args, buf, pm)
     except (ImportError, ModuleNotFoundError):
-        log.warning('ccxt.pro not available — switching to REST polling (Termux-safe)')
+        log.warning('ccxt.pro not available — switching to REST polling')
         await _run_rest(args, buf, pm)
     except Exception as e:
         log.error('WebSocket feed failed (%s) — switching to REST polling', e)
@@ -711,7 +807,7 @@ async def run_feed(args):
 
 def parse_args():
     ap = argparse.ArgumentParser(
-        description='TrendRider v7 DOWNTREND live trader',
+        description='TrendRider v8 DOWNTREND live trader',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
