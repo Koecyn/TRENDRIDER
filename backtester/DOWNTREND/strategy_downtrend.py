@@ -248,6 +248,7 @@ class TrendRiderAdaptive(Strategy):
         self._d_low_bias60m = 0
         self._d_slope_block = 0     # EMA200 declining over 8 hrs
         self._d_below_e200  = 0     # price below EMA200 (macro bear regime)
+        self._d_no_golden   = 0     # EMA50 < EMA200 (not in golden cross zone)
         self._d_ratio_sum   = 0.0   # rng_mtf / atr_1m ratio
         self._d_ratio_n     = 0
 
@@ -313,10 +314,15 @@ class TrendRiderAdaptive(Strategy):
             return
 
         # Block entries when price is below EMA200 — instant macro bear filter.
-        # The slope gate catches sustained downtrends; this catches the moment
-        # price dips below the macro line during any decline.
         if price < e200:
             self._d_below_e200 += 1
+            return
+
+        # Golden cross gate: EMA50 must be above EMA200.
+        # When EMA50 < EMA200 we are in a death-cross bear regime — no longs.
+        e50 = self.ema50[-1]
+        if e50 < e200:
+            self._d_no_golden += 1
             return
 
         # ── Regime gate — 1-min bias ──────────────────────────────────────
@@ -476,6 +482,7 @@ def main():
         print(f"  Bias60m < {P['minBias60m']} (hrly dn):  {st._d_low_bias60m:6d}  ({100*st._d_low_bias60m/total:.1f}%)")
         print(f"  EMA200 slope blocked:   {st._d_slope_block:6d}  ({100*st._d_slope_block/total:.1f}%)")
         print(f"  Price < EMA200:         {st._d_below_e200:6d}  ({100*st._d_below_e200/total:.1f}%)")
+        print(f"  EMA50 < EMA200 (bear):  {st._d_no_golden:6d}  ({100*st._d_no_golden/total:.1f}%)")
         print(f"  EMA bear (f≤s):         {st._d_ema_bear:6d}  ({100*st._d_ema_bear/total:.1f}%)")
         print(f"  Price < EMA50:          {st._d_below_tr:6d}  ({100*st._d_below_tr/total:.1f}%)")
         print(f"  RSI/pullback blocked:   {st._d_rsi_block:6d}  ({100*st._d_rsi_block/total:.1f}%)")

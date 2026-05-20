@@ -1,6 +1,6 @@
 {
-  "id": "iter21_price_below_ema200_march",
+  "id": "iter22_golden_cross_gate_march",
   "command": "RUN",
   "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 10 --max-hold 60",
-  "message": "iter21: add price<EMA200 macro bear gate — blocks entries when BTC below 200EMA"
+  "message": "iter22: EMA50>EMA200 golden cross gate — death-cross bear regime blocks all longs"
 }

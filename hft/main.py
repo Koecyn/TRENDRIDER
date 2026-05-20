@@ -205,7 +205,40 @@ async def run(cfg: dict, cfg_path: str, api_key: str = "", api_secret: str = "")
             config_event.clear()
             sim_ref[0].reload_config()
 
-    # ── Status loop ───────────────────────────────────────────────────────────
+    # ── Repo watcher — self-upgrade on new commits ────────────────────────────
+
+    async def repo_watcher():
+        """
+        Poll the code branch every 30s. On new commit: git pull → hot-reload.
+        Fused in so the engine is self-upgrading with no external process needed.
+        """
+        import subprocess
+        BRANCH = "claude/hft-mean-reversion-strategy-pJ4YU"
+        REPO   = Path(__file__).parent.parent
+        ENV    = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+        def _git(*args):
+            return subprocess.run(
+                ["git"] + list(args), cwd=REPO,
+                capture_output=True, text=True, env=ENV,
+            )
+
+        r = _git("rev-parse", f"origin/{BRANCH}")
+        last_commit = r.stdout.strip()
+
+        while True:
+            await asyncio.sleep(30)
+            try:
+                _git("fetch", "origin", BRANCH, "-q")
+                r = _git("rev-parse", f"origin/{BRANCH}")
+                current = r.stdout.strip()
+                if current and current != last_commit:
+                    log.info(f"REPO  new commit {current[:8]} on {BRANCH} — pulling")
+                    _git("reset", "--hard", f"origin/{BRANCH}")
+                    last_commit = current
+                    loop.call_soon_threadsafe(reload_event.set)
+            except Exception as exc:
+                log.warning(f"repo_watcher: {exc}")
 
     async def status_loop():
         while True:
@@ -231,6 +264,7 @@ async def run(cfg: dict, cfg_path: str, api_key: str = "", api_secret: str = "")
             status_loop(),
             reload_watcher(),
             config_watcher(),
+            repo_watcher(),
         )
     finally:
         _remove_pid()
