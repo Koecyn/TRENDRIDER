@@ -50,7 +50,7 @@ P = {
     'trailAtr':      0.65,
     'trailActivate': 0.25,
     'maxHoldBars':   60,
-    'adxMin':        18.0,     # reset to vault winner
+    'adxMin':        20.0,     # reset to vault winner
     'minBias':       0.05,   # reset to vault winner
     'minBias60m':    0.0,
     'targetWindow':  10,
