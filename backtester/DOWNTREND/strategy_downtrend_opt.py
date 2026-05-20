@@ -51,7 +51,7 @@ P = {
     'trailActivate': 0.25,
     'maxHoldBars':   60,
     'adxMin':        16.0,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
-    'minBias':       0.0,    # no directional requirement — range market
+    'minBias':       -0.5,   # allow pullback bars — EMA5 touch IS the entry signal
     'minBias60m':    0.0,
     'targetWindow':  10,
 }

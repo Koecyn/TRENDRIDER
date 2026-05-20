@@ -1,6 +1,6 @@
 {
-  "id": "iter119",
+  "id": "iter120",
   "command": "RUN",
   "bash": "",
-  "message": "fix decide() order: widen atrTp when sharpe<0, only loosen adxMin when sharpe>=0"
+  "message": "minBias=-0.5: allow pullback bars; bias1m gate was blocking 41% of entries"
 }

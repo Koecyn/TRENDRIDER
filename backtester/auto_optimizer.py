@@ -110,7 +110,7 @@ def run_backtest() -> dict:
         str(STRATEGY),
         *fetch_flag,
         "--balance",       "100",
-        "--min-bias",      str(read_param("minBias")      or "0.05"),
+        "--min-bias",      str(read_param("minBias")      if read_param("minBias") is not None else "0.0"),
         "--adx-min",       str(read_param("adxMin")       or "22"),
         "--atr-stop",      str(read_param("atrStop")      or "1.0"),
         "--atr-tp",        str(read_param("atrTp")        or "2.8"),
@@ -242,7 +242,7 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
     pf          = stats.get("profit_factor", 0)
 
     adx_min     = float(read_param("adxMin")       or 22)
-    min_bias    = float(read_param("minBias")       or 0.05)
+    min_bias    = float(read_param("minBias")       if read_param("minBias") is not None else 0.0)
     rsi_ob      = float(read_param("rsiOB")         or 65)
     atr_tp      = float(read_param("atrTp")         or 2.8)
     atr_stop    = float(read_param("atrStop")       or 1.0)
