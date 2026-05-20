@@ -1,6 +1,6 @@
 {
-  "id": "iter58",
+  "id": "iter59",
   "command": "RUN",
   "bash": "",
-  "message": "PF=0.52 \u2014 tighten slope lookback emaSlopeN 480\u2192240 (filters weak bear bounces)"
+  "message": "win=32% too low \u2014 tighten rsiOB 65.0\u219260.0"
 }
