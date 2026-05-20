@@ -1,6 +1,6 @@
 {
-  "id": "iter134",
+  "id": "iter135",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=2.43 \u2014 push atrTp 3.68\u21924.0"
+  "message": "sharpe=2.31 atrTp=4.0 capped \u2014 extend maxHoldBars 60\u219290"
 }
