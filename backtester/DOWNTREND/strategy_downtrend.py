@@ -53,7 +53,7 @@ P = {
     'adxMin':        22,
     'minBias':       0.05,   # skip entry if 1-min bias < minBias
     'minBias60m':    0.0,    # skip entry if 60-min bias < this
-    'targetWindow':  10,     # 10-bar rolling range ≈ 10-min ATR
+    'targetWindow':  15,     # 10-bar rolling range ≈ 10-min ATR
 }
 
 # ── Indicators ────────────────────────────────────────────────────────────────
