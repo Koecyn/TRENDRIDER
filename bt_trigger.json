@@ -1,6 +1,6 @@
 {
-  "id": "iter67",
-  "command": "RUN",
+  "id": "iter67_231435_DONE",
+  "command": "STOP",
   "bash": "",
-  "message": "win=36% low \u2014 tighten rsiOB 55.0\u219250.0"
+  "message": "Sharpe=3.863 \u2014 DONE"
 }
