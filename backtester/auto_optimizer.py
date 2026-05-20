@@ -27,7 +27,7 @@ DATA_BRANCH = "data/live"
 STRATEGY    = REPO / "backtester" / "DOWNTREND" / "strategy_downtrend.py"
 TRIGGER_F   = REPO / "bt_trigger.json"
 POLL_S      = 25          # seconds between data/live checks
-TARGET_SHARPE = 1.6
+TARGET_SHARPE = 2.5     # stop here — 1.6 is floor, 2.5 is goal
 MIN_TRADES    = 10
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
@@ -164,16 +164,31 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
             return {"param": "atrStop", "value": new_stop,
                     "reason": f"tighten stop atrStop {atr_stop}→{new_stop} to improve R:R"}
 
-    # ── Sharpe positive but below target — push harder on targets ───────────
+    # ── Sharpe positive — keep pushing toward 2.5 ───────────────────────────
     if 0 < sharpe < TARGET_SHARPE:
-        prev = [h for h in history if h.get("sharpe", -99) > 0]
-        if atr_tp < 6.0:
+        # Try widening target first
+        if atr_tp < 8.0:
             new_tp = round(atr_tp * 1.2, 2)
             return {"param": "atrTp", "value": new_tp,
-                    "reason": f"sharpe={sharpe:.2f} improving — push atrTp {atr_tp}→{new_tp}"}
+                    "reason": f"sharpe={sharpe:.2f} → push atrTp {atr_tp}→{new_tp}"}
+        # Then try wider target window
+        if tgt_win < 30:
+            new_win = int(tgt_win + 5)
+            return {"param": "targetWindow", "value": new_win,
+                    "reason": f"sharpe={sharpe:.2f} → widen targetWindow {tgt_win}→{new_win}"}
+        # Tighten stop to improve R:R ratio
+        if atr_stop > 0.5:
+            new_stop = round(atr_stop - 0.1, 2)
+            return {"param": "atrStop", "value": new_stop,
+                    "reason": f"sharpe={sharpe:.2f} → tighten atrStop {atr_stop}→{new_stop}"}
+        # Tighten ADX to get only strongest trends
+        if adx_min < 32 and trades > 15:
+            new_adx = adx_min + 2
+            return {"param": "adxMin", "value": new_adx,
+                    "reason": f"sharpe={sharpe:.2f} → tighten adxMin {adx_min}→{new_adx} (quality over quantity)"}
 
     return {"action": "none",
-            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} trades={trades} — no clear lever"}
+            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} trades={trades} — holding current params"}
 
 # ── Apply a gate removal (edit strategy source) ──────────────────────────────
 
@@ -293,10 +308,14 @@ def main():
             f"cross_fired={int(diag['cross_fired'])}"
         )
 
+        # ── MILESTONE ─────────────────────────────────────────────────────────
+        if sharpe >= 1.6 and trades >= MIN_TRADES:
+            log(f"MILESTONE: Sharpe={sharpe:.3f} ≥ 1.6 — pushing toward 2.5", G)
+
         # ── SUCCESS ──────────────────────────────────────────────────────────
         if sharpe >= TARGET_SHARPE and trades >= MIN_TRADES:
             log(f"TARGET REACHED — Sharpe={sharpe:.3f} ≥ {TARGET_SHARPE} ({trades} trades)", G)
-            push_trigger(f"iter{iter_num}_SUCCESS", f"Sharpe={sharpe:.3f} ≥ 1.6 — DONE", is_stop=True)
+            push_trigger(f"iter{iter_num}_SUCCESS", f"Sharpe={sharpe:.3f} ≥ 2.5 — DONE", is_stop=True)
             log("STOP trigger pushed. bt_watcher will halt.", G)
             break
 
