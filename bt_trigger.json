@@ -1,6 +1,6 @@
 {
-  "id": "iter171",
+  "id": "iter172",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=-2.10 \u2014 loosen trailAtr 3.0\u21923.5 (winners dying on trail)"
+  "message": "sharpe=-2.68 \u2014 loosen trailAtr 3.5\u21924.0 (winners dying on trail)"
 }

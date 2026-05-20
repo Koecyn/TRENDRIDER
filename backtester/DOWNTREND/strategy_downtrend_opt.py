@@ -47,7 +47,7 @@ P = {
     'atrStop':       1.0,
     'atrTp':         4.0,
     'partialAt':     3.0,
-    'trailAtr':      3.5,    # loose trail — let winners breathe
+    'trailAtr':      4.0,    # loose trail — let winners breathe
     'trailActivate': 1.5,   # only trail once 1.5R in profit (real move, not noise)
     'maxHoldBars':   180,
     'adxMin':        20.0,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
