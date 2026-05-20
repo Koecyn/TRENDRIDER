@@ -158,7 +158,8 @@ def push_results(iter_id: str, result: dict):
     if not commit:
         log("commit-tree failed", R); return
 
-    r = git("push", "origin", f"{commit}:refs/heads/{DATA_BRANCH}")
+    # data/live is append-only results — force push is safe
+    r = git("push", "--force", "origin", f"{commit}:refs/heads/{DATA_BRANCH}")
     if r.returncode == 0:
         git("update-ref", f"refs/remotes/origin/{DATA_BRANCH}", commit)
         log("Results pushed to data/live", G)
