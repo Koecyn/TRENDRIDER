@@ -1,6 +1,6 @@
 {
-  "id": "iter115",
+  "id": "iter116",
   "command": "RUN",
   "bash": "",
-  "message": "adxMin=14 minBias=0.0 atrTp=4.0 — lead with target width not entry filters"
+  "message": "win=39% critical \u2014 tighten adxMin 14.0\u219218.0 (filter non-trending bars)"
 }
