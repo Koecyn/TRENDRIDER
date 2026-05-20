@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 from backtesting import Backtest, Strategy
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     from strategy_bt import fetch_binance, load_csv, save_csv
 except ImportError:
