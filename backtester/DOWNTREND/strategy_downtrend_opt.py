@@ -45,7 +45,7 @@ P = {
     'rsiOS':         28,
     'volMin':        0.0,    # disabled — cutting losers is not a strategy
     'atrStop':       1.0,
-    'atrTp':         2.8,
+    'atrTp':         3.5,
     'partialAt':     3.0,
     'trailAtr':      0.65,
     'trailActivate': 0.25,
