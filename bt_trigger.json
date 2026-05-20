@@ -1,6 +1,6 @@
 {
-  "id": "iter132",
+  "id": "iter133",
   "command": "RUN",
   "bash": "",
-  "message": "trades=106 < 120 \u2014 loosen adxMin 16.0\u219214.0"
+  "message": "sharpe=2.33 \u2014 push atrTp 3.2\u21923.68"
 }
