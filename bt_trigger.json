@@ -1,6 +1,6 @@
 {
-  "id": "iter166_94029",
+  "id": "iter167",
   "command": "RUN",
   "bash": "",
-  "message": "fix trail params: trailAtr=2.0 trailActivate=1.5, RSI peak=68, vol drop=30%; optimizer now tunes trailAtr not dead atrTp knob"
+  "message": "sharpe=-0.12 win=41% trades=99 PF=1.39 \u2014 holding params"
 }
