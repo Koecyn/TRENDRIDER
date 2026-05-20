@@ -58,11 +58,15 @@ def ts():
 def log(msg, col=Z):
     print(f"{col}[bt_watcher {ts()}] {msg}{Z}", flush=True)
 
-# ── Git helpers (identical pattern to watcher.py) ─────────────────────────────
+# Never let git open an interactive terminal prompt inside a subprocess
+_NO_PROMPT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+# ── Git helpers ───────────────────────────────────────────────────────────────
 def git(args, stdin=None):
     return subprocess.run(
         ["git"] + args, cwd=REPO_DIR,
-        capture_output=True, text=True, input=stdin)
+        capture_output=True, text=True, input=stdin,
+        env=_NO_PROMPT_ENV)
 
 def git_unlock():
     for lock in ["index.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD"]:
@@ -72,21 +76,37 @@ def git_unlock():
             log(f"Removed stale {lock}", Y)
 
 def inject_token():
+    # 1. Env var
     token = os.getenv("GITHUB_TOKEN", "").strip()
+
+    # 2. git credential fill (non-interactive — GIT_TERMINAL_PROMPT=0)
     if not token:
-        # Ask git's own credential system (works with store, keychain, etc.)
         r = subprocess.run(
             ["git", "credential", "fill"],
             input="protocol=https\nhost=github.com\n\n",
             capture_output=True, text=True, cwd=REPO_DIR,
+            env=_NO_PROMPT_ENV,
         )
         for line in r.stdout.splitlines():
             if line.startswith("password="):
                 token = line.split("=", 1)[1].strip()
                 break
+
+    # 3. Parse ~/.git-credentials directly (github.com entries only)
     if not token:
-        log("No token found via env or git credential — push may fail", Y)
+        creds = Path.home() / ".git-credentials"
+        if creds.exists():
+            for line in creds.read_text().splitlines():
+                if "github.com" in line:
+                    m = re.search(r"https://[^:]+:([^@]+)@github\.com", line)
+                    if m:
+                        token = m.group(1).strip()
+                        break
+
+    if not token:
+        log("No GitHub token found — push will fail (set GITHUB_TOKEN in .env)", R)
         return
+
     r = git(["remote", "get-url", "origin"])
     url = r.stdout.strip()
     url = re.sub(r"https://[^@]*@", "https://", url)
