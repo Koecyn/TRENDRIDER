@@ -1,6 +1,6 @@
 {
-  "id": "iter89",
+  "id": "iter93",
   "command": "RUN",
   "bash": "",
-  "message": "Reset emaSlopeN=240; fix slope direction logic; volMin=1.0 test"
+  "message": "trades=9 < 25 target \u2014 shorten slope lookback 240\u2192120 (more entries)"
 }
