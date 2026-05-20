@@ -1,6 +1,6 @@
 {
-  "id": "iter22_golden_cross_gate_march",
+  "id": "iter23",
   "command": "RUN",
-  "bash": "git fetch origin claude/hft-mean-reversion-strategy-pJ4YU && git reset --hard origin/claude/hft-mean-reversion-strategy-pJ4YU && python backtester/DOWNTREND/strategy_downtrend.py --csv backtester/btc_mar30.csv --balance 100 --min-bias 0.05 --adx-min 22 --atr-stop 1.0 --target-window 10 --max-hold 60",
-  "message": "iter22: EMA50>EMA200 golden cross gate — death-cross bear regime blocks all longs"
+  "bash": "",
+  "message": "win=32% too low \u2014 tighten rsiOB 65.0\u219260.0"
 }
