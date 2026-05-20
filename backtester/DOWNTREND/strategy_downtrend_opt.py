@@ -51,7 +51,7 @@ P = {
     'trailActivate': 0.25,
     'maxHoldBars':   60,
     'adxMin':        26,     # quality floor — ADX<20 = non-trending, most false signals
-    'minBias':       0.0,    # no directional requirement — range market
+    'minBias':       0.04,    # no directional requirement — range market
     'minBias60m':    0.0,
     'targetWindow':  10,
 }

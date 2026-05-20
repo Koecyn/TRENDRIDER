@@ -1,6 +1,6 @@
 {
-  "id": "iter112",
+  "id": "iter113",
   "command": "RUN",
   "bash": "",
-  "message": "win=38% critical \u2014 tighten adxMin 24.0\u219226 (filter non-trending bars)"
+  "message": "win=33% critical \u2014 raise minBias 0.0\u21920.04 (require upward pressure)"
 }
