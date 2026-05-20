@@ -1,0 +1,59 @@
+{
+  "exchange": "binanceus",
+  "symbol": "BTC/USDT",
+  "paper_balance": 10.0,
+  "maker_fee": 0.0,
+  "taker_fee": 0.0002,
+  "min_notional": 1.0,
+  "allow_shorts": false,
+
+  "signals": {
+    "vpd_vol_mult": 2.5,
+    "vpd_body_choke_pct": 0.003,
+    "ofi_ratio_long": 3.5,
+    "ofi_ratio_short": 3.5,
+    "ofi_book_levels": 5,
+    "tape_flip_window": 20,
+    "tape_flip_threshold": 0.80,
+    "tape_flip_min_size": 0.001
+  },
+
+  "risk": {
+    "kelly_multiplier": 0.5,
+    "max_position_pct": 0.20,
+    "amd_depth_levels": 3,
+    "amd_impact_pct": 0.10,
+    "vol_coefficient": 1.2,
+    "ltr_bars": 3,
+    "min_rr": 1.5
+  },
+
+  "phase2": {
+    "ema_fast": 5,
+    "ema_slow": 13,
+    "atr_period": 14,
+    "trail_atr_mult": 1.5
+  },
+
+  "safety": {
+    "daily_drawdown_pct": 0.02,
+    "chop_loss_streak": 4,
+    "chop_pause_minutes": 30,
+    "freakout_spread_mult": 5.0,
+    "freakout_tps_mult": 10.0,
+    "freakout_freeze_minutes": 3
+  },
+
+  "pipeline": {
+    "book_depth": 20,
+    "vol_ma_period": 20,
+    "bar_seconds": 60,
+    "tps_window_seconds": 10,
+    "consumer_sleep_ms": 1
+  },
+
+  "logging": {
+    "log_dir": "hft/logs",
+    "log_level": "INFO"
+  }
+}
