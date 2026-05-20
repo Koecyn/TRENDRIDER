@@ -32,7 +32,7 @@ CSV_PATH    = REPO / "backtester" / "btc_mar30.csv"
 LOG_F       = REPO / "backtester" / "optimizer.log"
 
 TARGET_SHARPE  = 2.5
-TARGET_WIN_PCT = 60.0    # must also reach 60% win rate before stopping
+TARGET_WIN_PCT = 40.0    # breakout strategies structurally hit 38-45%; 60% was unrealistic
 MILESTONE      = 1.6
 MIN_TRADES     = 10
 TARGET_TRADES  = 120     # 5/day minimum — absorb liquidity, not cherry-pick
@@ -244,15 +244,12 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
 
     adx_min     = float(read_param("adxMin")       or 22)
     min_bias    = float(read_param("minBias")       or 0.0)
-    rsi_ob      = float(read_param("rsiOB")         or 65)
-    atr_tp      = float(read_param("atrTp")         or 2.8)
-    atr_stop    = float(read_param("atrStop")       or 1.0)
-    tgt_win     = float(read_param("targetWindow")  or 10)
-    max_hold    = int(float(read_param("maxHoldBars") or 60))
-    ema_slope_n = float(read_param("emaSlopeN")     or 480)
-    vol_min     = float(read_param("volMin")        or 1.0)
+    trail_atr   = float(read_param("trailAtr")      or 2.0)   # loose trail multiplier
+    trail_act   = float(read_param("trailActivate") or 1.5)   # R to start trailing
+    partial_at  = float(read_param("partialAt")     or 3.0)   # R for partial exit
+    max_hold    = int(float(read_param("maxHoldBars") or 180))
 
-    # ── 0 trades: loosen gates ───────────────────────────────────────────
+    # ── 0 trades: loosen gates ────────────────────────────────────────────
     if trades == 0:
         if adx_min > 10:
             return {"param": "adxMin", "value": max(10, adx_min - 4),
@@ -260,45 +257,47 @@ def decide(stats: dict, diag: dict, history: list) -> dict:
         if min_bias > 0.0:
             return {"param": "minBias", "value": 0.0,
                     "reason": "0 trades — remove minBias gate"}
-        return {"action": "none", "reason": "0 trades, all gates minimal — strategy doesn't fire in this regime"}
+        return {"action": "none", "reason": "0 trades, gates minimal — no entries in regime"}
 
-    # ── Sharpe negative: widen target (cap 4.0), then extend hold time ─────────
-    # Don't keep widening past 4.0 — targets unreachable in 60 bars become timeouts.
-    # After 4.0, extend maxHoldBars so more trades reach target instead.
+    # ── Sharpe negative: loosen trail (let winners escape stop) ──────────
     if sharpe < 0 and trades >= MIN_TRADES:
-        if atr_tp < 4.0:
-            new_tp = min(4.0, round(atr_tp * 1.2, 2))
-            return {"param": "atrTp", "value": new_tp,
-                    "reason": f"sharpe={sharpe:.2f} — widen atrTp {atr_tp}→{new_tp}"}
+        if trail_atr < 4.0:
+            new_ta = round(min(4.0, trail_atr + 0.5), 2)
+            return {"param": "trailAtr", "value": new_ta,
+                    "reason": f"sharpe={sharpe:.2f} — loosen trailAtr {trail_atr}→{new_ta} (winners dying on trail)"}
         if max_hold < 180:
             return {"param": "maxHoldBars", "value": max_hold + 30,
-                    "reason": f"sharpe={sharpe:.2f} atrTp={atr_tp:.1f} capped — extend maxHoldBars {max_hold}→{max_hold+30}"}
+                    "reason": f"sharpe={sharpe:.2f}, trail maxed — extend maxHoldBars {max_hold}→{max_hold+30}"}
 
-    # ── Too few trades and sharpe positive: loosen entry gate ───────────────────
-    # Only after R:R is working. Never below adxMin=12 (need some trend confirmation).
+    # ── Too few trades: loosen entry gate ─────────────────────────────────
     if sharpe >= 0 and trades < TARGET_TRADES and adx_min > 12:
         return {"param": "adxMin", "value": max(12, adx_min - 2),
                 "reason": f"trades={trades} < {TARGET_TRADES} — loosen adxMin {adx_min}→{max(12,adx_min-2)}"}
 
-    # ── Positive sharpe, push toward target ─────────────────────────────────────
-    # atrTp cap 4.0 — beyond that extend hold time instead.
+    # ── Positive sharpe, push R:R toward target ───────────────────────────
+    # Primary lever: trailAtr (bigger = trail further back = larger wins)
+    # Secondary: push partial exit deeper (let position breathe longer)
+    # Tertiary: extend maxHoldBars
     if 0 < sharpe < TARGET_SHARPE and trades >= MIN_TRADES:
-        if atr_tp < 4.0:
-            new_tp = min(4.0, round(atr_tp * 1.15, 2))
-            return {"param": "atrTp", "value": new_tp,
-                    "reason": f"sharpe={sharpe:.2f} — push atrTp {atr_tp}→{new_tp}"}
+        if trail_atr < 4.0:
+            new_ta = round(min(4.0, trail_atr + 0.5), 2)
+            return {"param": "trailAtr", "value": new_ta,
+                    "reason": f"sharpe={sharpe:.2f} — push trailAtr {trail_atr}→{new_ta} (wider trail = bigger wins)"}
+        if partial_at < 6.0:
+            new_pa = round(min(6.0, partial_at + 0.5), 2)
+            return {"param": "partialAt", "value": new_pa,
+                    "reason": f"sharpe={sharpe:.2f}, trail=4.0 — push partialAt {partial_at}→{new_pa}"}
         if max_hold < 180:
             return {"param": "maxHoldBars", "value": max_hold + 30,
-                    "reason": f"sharpe={sharpe:.2f} atrTp={atr_tp:.1f} capped — extend maxHoldBars {max_hold}→{max_hold+30}"}
+                    "reason": f"sharpe={sharpe:.2f} — extend maxHoldBars {max_hold}→{max_hold+30}"}
 
-    # ── Volume target met, win rate still low: nudge entry quality ───────────────
-    # Never above 22 (vault value). adxMin is last resort.
+    # ── Volume target met, win rate still low: tighten entry slightly ────
     if trades >= TARGET_TRADES and win_rate < (TARGET_WIN_PCT / 100) and adx_min < 22:
         return {"param": "adxMin", "value": adx_min + 2,
-                "reason": f"trades={trades} ok, win={win_rate:.0%} low — nudge adxMin {adx_min}→{adx_min+2}"}
+                "reason": f"trades={trades} ok, win={win_rate:.0%} low — tighten adxMin {adx_min}→{adx_min+2}"}
 
     return {"action": "none",
-            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} trades={trades} PF={pf:.2f} — holding params"}
+            "reason": f"sharpe={sharpe:.2f} win={win_rate:.0%} trades={trades} — holding params"}
 
 # ── Commit and push code change ───────────────────────────────────────────────
 

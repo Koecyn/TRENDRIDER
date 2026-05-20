@@ -1,6 +1,6 @@
 {
-  "id": "iter165",
+  "id": "iter166_94029",
   "command": "RUN",
   "bash": "",
-  "message": "trades=129 ok, win=43% low \u2014 nudge adxMin 18.0\u219220.0"
+  "message": "fix trail params: trailAtr=2.0 trailActivate=1.5, RSI peak=68, vol drop=30%; optimizer now tunes trailAtr not dead atrTp knob"
 }

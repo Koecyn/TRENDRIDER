@@ -47,8 +47,8 @@ P = {
     'atrStop':       1.0,
     'atrTp':         4.0,
     'partialAt':     3.0,
-    'trailAtr':      0.65,
-    'trailActivate': 0.25,
+    'trailAtr':      2.0,    # loose trail — let winners breathe
+    'trailActivate': 1.5,   # only trail once 1.5R in profit (real move, not noise)
     'maxHoldBars':   180,
     'adxMin':        20.0,       # permissive — EMA5>EMA13 is the quality gate; ADX just filters dead flat
     'minBias':       -0.5,   # allow pullback bars — EMA5 touch IS the entry signal
@@ -296,16 +296,16 @@ class TrendRiderAdaptive(Strategy):
             riskUnit = abs(self._entry - self._stop)
             pnlR = (price - self._entry) / riskUnit if riskUnit > 0 else 0
 
-            rsi_turning  = rsi < rsi1 and self._peak_rsi > 55  # RSI rolled off peak
-            vol_fading   = vr < vr1 * 0.85                      # volume dropped 15%
-            sell_pressure = rsi_turning and vol_fading           # both: likely sell wall
+            # Exhaustion only signals when RSI is genuinely overbought AND
+            # volume collapses hard — minor dips are noise on 1-min bars
+            rsi_turning   = rsi < rsi1 and self._peak_rsi > 68   # truly overbought
+            vol_fading    = vr < vr1 * 0.70                       # 30% vol collapse
+            sell_pressure = rsi_turning and vol_fading
 
             if sell_pressure:
-                trail_dist = self._a_dn_1m_entry * 0.5    # tight — wall is reloading
-            elif rsi > 58 or rsi_turning:
-                trail_dist = self._a_dn_1m_entry * 1.0    # moderate — near resistance
+                trail_dist = self._a_dn_1m_entry * 1.0    # tight at confirmed exhaustion
             else:
-                trail_dist = self._a_dn_1m_entry * self.trailAtr  # loose — still running
+                trail_dist = self._a_dn_1m_entry * self.trailAtr  # loose — let it run
 
             if pnlR >= self.trailActivate:
                 new_stop = self._trail_hi - trail_dist
