@@ -1,6 +1,6 @@
 {
-  "id": "p5",
+  "id": "p6",
   "command": "RUN",
   "bash": "",
-  "message": "Tier1 win=5.0% < 70% \u2014 tighten MACH_SHOCK 1.1\u21921.0"
+  "message": "win=4.5% < 60.0% \u2014 raise SOLITON_BAL 0.5\u21920.55"
 }
