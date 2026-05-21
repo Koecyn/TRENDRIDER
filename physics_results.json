@@ -1,0 +1,28 @@
+{
+  "ts": "2026-05-21T05:10:59.867715",
+  "trigger_id": "p1",
+  "status": "complete",
+  "stats": {
+    "n_trades": 474,
+    "win_rate": 4.64,
+    "sharpe": 45.0506,
+    "max_dd": -0.1894,
+    "profit_factor": 2.0917,
+    "avg_pnl": 0.0025,
+    "equity_final": 1011.89,
+    "t1_n": 20,
+    "t1_win_rate": 5.0,
+    "t1_sharpe": 104.8343,
+    "t1_avg_pnl": 0.0094,
+    "t1_avg_mae": 0.0,
+    "t2_n": 0,
+    "t2_win_rate": 0.0,
+    "t2_sharpe": 0.0,
+    "t2_avg_pnl": 0.0,
+    "t3_n": 454,
+    "t3_win_rate": 4.63,
+    "t3_sharpe": 41.0864,
+    "t3_avg_pnl": 0.0022,
+    "t3_avg_mae": 3.61
+  }
+}
