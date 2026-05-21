@@ -346,16 +346,15 @@ class LiveEngine:
         self._window = deque(maxlen=700)
         self._trader.set_window(self._window)
 
-        # Current order book (updated from depth stream every 100ms)
+        # Current order book — updated on every WebSocket depth push (variable rate)
         self._bids: list = []
         self._asks: list = []
 
-        # Intrabar peak tracking — captures dark pool events that clear mid-bar
-        # We pass the PEAK bids/asks seen during the bar to fusion at bar close,
-        # not just the final snapshot (which may no longer show the wall).
-        self._peak_bid_wall: float = 0.0   # largest single bid level seen
+        # Peak wall tracking across all pushes since last bar close.
+        # Captures dark pool walls that post and absorb mid-bar before close.
+        self._peak_bid_wall: float = 0.0
         self._peak_ask_wall: float = 0.0
-        self._peak_bids: list = []         # bids snapshot when peak wall seen
+        self._peak_bids: list = []
         self._peak_asks: list = []
 
         self._last_fetch  = 0.0
@@ -421,8 +420,10 @@ class LiveEngine:
         if not bids or not asks:
             return
 
-        # Track peak wall size seen during this bar — dark pool walls post and
-        # absorb within seconds; the bar-close snapshot often misses them.
+        # Track peak wall seen across every push since last bar close.
+        # Pushes are event-driven (variable rate, not fixed 100ms intervals) —
+        # we process each one as it arrives. Dark pool walls post and absorb
+        # in seconds; the bar-close snapshot often misses them entirely.
         top_bid = bids[0][1]
         top_ask = asks[0][1]
 
