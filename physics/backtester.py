@@ -167,10 +167,14 @@ def _calc_atr(highs, lows, closes, period=14) -> np.ndarray:
 
 def run(data: dict,
         initial_balance: float = None,
-        long_only: bool = False) -> Result:
+        long_only: bool = False,
+        ob_snapshots: list = None) -> Result:
     """
     Bar-by-bar simulation.  data = dict from physics.data.parse_klines().
     long_only=True skips SHORT signals (useful for Binance spot with no margin).
+    ob_snapshots: list of {'ts_ms', 'bids', 'asks'} from PHYX collector — feeds
+                  real order book into Darcy, OBI, water hammer, cavitation signals.
+                  Falls back to taker-ratio proxy when None (REST-only mode).
     """
     bal   = initial_balance or C.INITIAL_BAL
     prices     = data['prices']
@@ -189,6 +193,13 @@ def run(data: dict,
     equity     = np.full(n, bal)
     trades     = []
     open_trade: Optional[Trade] = None
+
+    # Build OB snapshot index for O(log n) per-bar lookup
+    _ob_snaps = None
+    _ob_times = None
+    if ob_snapshots:
+        _ob_snaps = sorted(ob_snapshots, key=lambda r: r['ts_ms'])
+        _ob_times = np.array([r['ts_ms'] for r in _ob_snaps], dtype=np.int64)
 
     for i in range(C.WARMUP_BARS, n):
         sl  = slice(max(0, i - 600), i + 1)
@@ -233,8 +244,17 @@ def run(data: dict,
         if open_trade is not None:
             continue   # one position at a time
 
+        # ── Nearest OB snapshot for this bar ──────────────────────────────
+        bids = asks = None
+        if _ob_snaps is not None:
+            idx = int(np.searchsorted(_ob_times, timestamps[i], side='right')) - 1
+            if 0 <= idx < len(_ob_snaps):
+                snap = _ob_snaps[idx]
+                bids = snap['bids']
+                asks = snap['asks']
+
         # ── Signal engine ─────────────────────────────────────────────────
-        sig = fusion.run(p, o, c, v, tb, accum)
+        sig = fusion.run(p, o, c, v, tb, accum, bids=bids, asks=asks)
 
         direction  = sig['direction']
         tier       = sig['tier']

@@ -155,13 +155,29 @@ def run_backtest() -> dict:
 
     from physics import data as D, backtester as BT, config as CF
 
-    log("Fetching data…", C)
-    d = D.get_data(cache_path=str(REPO / "physics_data_cache.csv"),
-                   refresh=True)
+    phyx_dir = str(REPO / "phyx_data")
+    ob_snaps = None
+
+    # Prefer PHYX live data — real order book fills the wave equations properly.
+    # Falls back to REST klines when no PHYX files exist yet.
+    if Path(phyx_dir).exists() and list(Path(phyx_dir).glob(f"{CF.SYMBOL}_*.phyx")):
+        log("PHYX files found — loading live order book data", G)
+        d = D.get_data_phyx(phyx_dir, CF.SYMBOL)
+        if d and len(d.get('closes', [])) >= CF.WARMUP_BARS:
+            ob_snaps = D.load_ob_snapshots(phyx_dir, CF.SYMBOL)
+            log(f"  {len(d['prices'])} kline bars + {len(ob_snaps)} OB snapshots", C)
+        else:
+            log("PHYX klines too short — falling back to REST", Y)
+            d = D.get_data(cache_path=str(REPO / "physics_data_cache.csv"), refresh=True)
+    else:
+        log("No PHYX files yet — fetching REST data (start collector to enable live OB)", Y)
+        d = D.get_data(cache_path=str(REPO / "physics_data_cache.csv"),
+                       refresh=True)
     log(f"  {len(d['prices'])} bars loaded", C)
 
     log("Running backtest…", C)
-    result = BT.run(d, initial_balance=CF.INITIAL_BAL, long_only=True)
+    result = BT.run(d, initial_balance=CF.INITIAL_BAL, long_only=True,
+                    ob_snapshots=ob_snaps)
 
     summary = result.summary()
     log(f"  n={summary['n_trades']}  sharpe={summary['sharpe']:.3f}"
@@ -220,17 +236,28 @@ def decide(stats: dict) -> dict:
         return {'param': 'SOLITON_BAL', 'value': new,
                 'reason': f'win={win:.1f}% — tighten ascending wave gate {sol_bal}→{new}'}
 
+    # CVD over ceiling — roll back first (blocks both frequency and win rate)
+    if cvd_div > 0.55:
+        new = 0.55
+        return {'param': 'CVD_DIV', 'value': new,
+                'reason': f'CVD_DIV={cvd_div} over ceiling — roll back to {new}'}
+
     # No trades at all — open the gate
     if n == 0:
         new = round(max(0.06, thresh - 0.02), 3)
         return {'param': 'LONG_THRESHOLD', 'value': new,
                 'reason': f'0 trades — lower threshold {thresh}→{new}'}
 
-    # Trade frequency too low — open the gate
-    if tph < MIN_TPH and thresh > 0.08:
-        new = round(max(0.08, thresh - 0.01), 3)
-        return {'param': 'LONG_THRESHOLD', 'value': new,
-                'reason': f'tph={tph:.1f} < {MIN_TPH} — lower threshold {thresh}→{new}'}
+    # Trade frequency too low — try threshold first, then SNR if threshold at floor
+    if tph < MIN_TPH:
+        if thresh > 0.08:
+            new = round(max(0.08, thresh - 0.01), 3)
+            return {'param': 'LONG_THRESHOLD', 'value': new,
+                    'reason': f'tph={tph:.1f} < {MIN_TPH} — lower threshold {thresh}→{new}'}
+        if snr_min > 3.0:
+            new = round(max(3.0, snr_min - 0.25), 2)
+            return {'param': 'SNR_MIN', 'value': new,
+                    'reason': f'tph={tph:.1f} threshold floored — lower SNR_MIN {snr_min}→{new}'}
 
     # Too many trades — noise flooding in, raise threshold
     if tph > MAX_TPH and thresh < 0.22:
@@ -244,17 +271,11 @@ def decide(stats: dict) -> dict:
         return {'param': 'SNR_MIN', 'value': new,
                 'reason': f'win={win:.1f}% terrible — raise SNR_MIN {snr_min}→{new}'}
 
-    # Win below target — CVD gate, capped at 0.55 to avoid signal starvation
+    # Win below target — tighten CVD gate (hard ceiling 0.55)
     if win < TARGET_WIN_PCT and cvd_div < 0.55:
         new = round(min(0.55, cvd_div + 0.05), 2)
         return {'param': 'CVD_DIV', 'value': new,
                 'reason': f'win={win:.1f}% < {TARGET_WIN_PCT}% — raise CVD_DIV {cvd_div}→{new}'}
-
-    # CVD over ceiling — roll it back, signals are starved
-    if cvd_div > 0.55:
-        new = 0.55
-        return {'param': 'CVD_DIV', 'value': new,
-                'reason': f'CVD_DIV={cvd_div} over ceiling — roll back to {new}'}
 
     # Negative sharpe — reduce friction
     if sharpe < 0 and visc > 0.005:

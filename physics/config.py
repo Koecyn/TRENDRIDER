@@ -39,7 +39,7 @@ DARK_PARTIAL_KEEP = 0.30    # fraction of pressure remaining after discharge
 LONG_THRESHOLD  = +0.12
 SHORT_THRESHOLD = -0.12
 OBI_SIGNAL      = 0.30      # min OBI magnitude to count
-CVD_DIV         = 0.6      # min CVD divergence magnitude to count
+CVD_DIV         = 0.55     # min CVD divergence magnitude to count (ceiling — don't exceed)
 CVD_WINDOW      = 10        # bars for CVD slope comparison
 SNR_MIN         = 3.5       # minimum SGF SNR to trade
 
@@ -57,7 +57,7 @@ TIER4_RR = 0.0              # skip
 # ── Fixed ATR targets (decoupled from stop distance) ───────────────────────────
 TIER1_TARGET_ATR = 3.5
 TIER2_TARGET_ATR = 3.0
-TIER3_TARGET_ATR = 2.0     # 2×ATR target, 3×ATR stop → 60%+ base win rate
+TIER3_TARGET_ATR = 2.5     # 2.5×ATR target, 3×ATR stop → positive EV at ~57% win
 
 # ── Fractional Kelly position sizing ─────────────────────────────────────────
 KELLY_FRACTION      = 0.50  # half-Kelly

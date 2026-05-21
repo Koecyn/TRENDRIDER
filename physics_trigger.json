@@ -1,6 +1,6 @@
 {
-  "id": "p158",
+  "id": "p159",
   "command": "RUN",
   "bash": "",
-  "message": "tph=1.6 < 2.0 \u2014 lower threshold 0.12\u21920.11"
+  "message": "live OB wired: backtester+PHYX, CVD→0.55, TIER3_TARGET_ATR→2.5, SNR fallback for freq"
 }
