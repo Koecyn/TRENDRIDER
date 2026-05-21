@@ -667,6 +667,19 @@ async def _main():
     if boot:
         log(f"Window seeded with {len(boot)} REST bars — now on live stream", G)
 
+    # Seed OB so cavitation has real depth data from bar 1, not just after the
+    # first depth WebSocket push (which could be seconds into the first bar).
+    try:
+        from physics import data as D
+        ob = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: D.fetch_orderbook(CF.SYMBOL, 20)
+        )
+        engine._bids = ob['bids']
+        engine._asks = ob['asks']
+        log(f"OB seeded: {len(ob['bids'])} bid levels  {len(ob['asks'])} ask levels", G)
+    except Exception as e:
+        log(f"OB seed error (depth stream will populate): {e}", Y)
+
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, engine.stop)
