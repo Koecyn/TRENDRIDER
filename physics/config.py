@@ -10,7 +10,7 @@ SGF_POLYORD  = 2        # polynomial order (2 = quadratic)
 # ── KdV Soliton ───────────────────────────────────────────────────────────────
 KDV_ALPHA    = 0.1      # nonlinearity — increase for stronger trends
 KDV_BETA     = 0.01     # dispersion — increase for noisier instruments
-SOLITON_BAL  = 0.92      # min nonlinearity/dispersion ratio for confirmation
+SOLITON_BAL  = 0.75      # min nonlinearity/dispersion ratio for confirmation
 SOLITON_WIN  = 20       # bars in soliton window
 
 # ── Reynolds Number ───────────────────────────────────────────────────────────
@@ -36,12 +36,12 @@ DARK_CHARGE_SCALE = 50_000  # normalization divisor for dark vol estimate
 DARK_PARTIAL_KEEP = 0.30    # fraction of pressure remaining after discharge
 
 # ── Signal fusion thresholds ─────────────────────────────────────────────────
-LONG_THRESHOLD  = +0.08
+LONG_THRESHOLD  = +0.05
 SHORT_THRESHOLD = -0.12
-OBI_SIGNAL      = 0.30      # min OBI magnitude to count
-CVD_DIV         = 0.55     # min CVD divergence magnitude to count (ceiling — don't exceed)
+OBI_SIGNAL      = 0.20      # min OBI magnitude to count
+CVD_DIV         = 0.40     # min CVD divergence magnitude to count (ceiling — don't exceed)
 CVD_WINDOW      = 10        # bars for CVD slope comparison
-SNR_MIN         = 3.0       # minimum SGF SNR to trade
+SNR_MIN         = 2.0       # minimum SGF SNR to trade
 
 # ── Conviction tiers ──────────────────────────────────────────────────────────
 TIER1_WH_STRENGTH = 2.0    # water hammer strength threshold for Tier 1
