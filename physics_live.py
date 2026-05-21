@@ -161,33 +161,13 @@ class PaperTrader:
 
     def scan_intrabar(self, partial_bar: dict, bids, asks, accum):
         """
-        Run wave equations on historical window + current partial bar.
-        No trade entries — bar isn't closed. Purpose: keep the hydraulic
-        accumulator, soliton, and Reynolds state current between bar closes
-        so we don't miss intrabar pressure buildup.
+        Intrabar update — do NOT call fusion.run() here.
+        The HydraulicAccumulator is stateful; calling fusion dozens of times
+        per minute saturates it and freezes the score at a fixed value.
+        Intrabar monitoring is handled by _handle_depth() (peak OB walls,
+        dark pool events) which is stateless and safe to call on every push.
         """
-        from physics import fusion
-        w = self._window_arrays()
-        if len(w['closes']) < self._CF.WARMUP_BARS:
-            return
-        # Append partial bar to get current wave state
-        import numpy as np
-        closes_ext = np.append(w['closes'], partial_bar['close'])
-        prices_ext = np.append(w['prices'], partial_bar['close'])
-        opens_ext  = np.append(w['opens'],  partial_bar['open'])
-        vols_ext   = np.append(w['volumes'], partial_bar['volume'])
-        tb_ext     = np.append(w['taker_buy'], partial_bar['taker_buy'])
-        sl = slice(max(0, len(closes_ext) - 600), len(closes_ext))
-        try:
-            sig = fusion.run(prices_ext[sl], opens_ext[sl], closes_ext[sl],
-                             vols_ext[sl], tb_ext[sl], accum,
-                             bids=bids, asks=asks)
-            self._last_score = float(sig.get('score', 0))
-            self._last_snr   = float(sig.get('snr', 0))
-            self._last_dir   = int(sig.get('direction', 0))
-            self._last_tier  = int(sig.get('tier', 4))
-        except Exception:
-            pass
+        pass
 
     def tick_price(self, price: float) -> bool:
         """
