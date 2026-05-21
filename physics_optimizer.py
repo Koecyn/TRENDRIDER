@@ -151,25 +151,32 @@ def check_reload():
 
 def read_live_stats() -> dict | None:
     """
-    Read stats written by physics_live.py (WebSocket engine).
-    Returns None if file missing or too stale.
-    physics_live.py writes physics_live_results.json every WRITE_EVERY_BARS bars
-    (~5 minutes at 5 tph). We wait up to LIVE_STALE_SECS before giving up.
+    Read stats written by physics_live.py from the data/live branch.
+    Reads via 'git show' to avoid depending on the local working-tree file,
+    which gets deleted whenever the live engine switches back to CODE_BRANCH
+    after pushing results.
     """
-    if not LIVE_RESULTS_F.exists():
-        return None
+    from datetime import datetime
     try:
-        raw  = json.loads(LIVE_RESULTS_F.read_text())
-        # Check freshness — ts is UTC ISO string
-        from datetime import datetime, timezone
-        written = datetime.fromisoformat(raw['ts'].replace('Z', '+00:00'))
-        age_s   = (datetime.now(timezone.utc) - written).total_seconds()
+        git("fetch", "origin", DATA_BRANCH)
+        r = git("show", f"origin/{DATA_BRANCH}:physics_live_results.json")
+        if r.returncode != 0:
+            log("physics_live_results.json not on data/live yet — waiting", Y)
+            return None
+        raw   = json.loads(r.stdout)
+        ts_str = raw.get('ts', '')
+        # Parse timestamp robustly — handle naive and aware forms
+        ts_str = ts_str.replace('Z', '').split('+')[0]   # strip tz → naive UTC
+        written = datetime.fromisoformat(ts_str) if ts_str else datetime.utcfromtimestamp(0)
+        age_s   = (datetime.utcnow() - written).total_seconds()
         if age_s > LIVE_STALE_SECS:
             log(f"Live results stale ({age_s:.0f}s old) — waiting for physics_live.py", Y)
             return None
         stats = raw.get('stats', {})
         n   = stats.get('n_trades', 0)
         log(f"Live stats: n={n}  bars={stats.get('bars_live',0)}"
+            f"  score={stats.get('last_score',0):+.4f}"
+            f"  snr={stats.get('last_snr',0):.2f}"
             f"  sharpe={stats.get('sharpe',0):.3f}"
             f"  win={stats.get('win_rate',0):.1f}%"
             f"  tph={stats.get('trades_per_hr',0):.2f}"

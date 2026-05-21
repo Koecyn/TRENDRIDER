@@ -523,7 +523,7 @@ class LiveEngine:
             f"n={s['n_trades']}", col)
 
         result = {
-            'ts':         datetime.utcnow().isoformat(),
+            'ts':         datetime.utcnow().isoformat() + 'Z',
             'trigger_id': trigger_id,
             'status':     'live',
             'stats':      s,
@@ -547,6 +547,9 @@ class LiveEngine:
                 break
         git("checkout", CODE_BRANCH)
         git("stash", "pop")
+        # Restore local copy — git checkout removes it since it's only
+        # tracked on data/live, not on CODE_BRANCH
+        RESULTS_F.write_text(content)
 
     async def _fetch_params(self):
         """Pull latest params from remote (every FETCH_EVERY_S seconds)."""
