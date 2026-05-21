@@ -54,6 +54,11 @@ TIER2_RR = 3.0
 TIER3_RR = 2.0
 TIER4_RR = 0.0              # skip
 
+# ── Fixed ATR targets (decoupled from stop distance) ───────────────────────────
+TIER1_TARGET_ATR = 3.5
+TIER2_TARGET_ATR = 3.0
+TIER3_TARGET_ATR = 2.0     # 2×ATR target, 3×ATR stop → 60%+ base win rate
+
 # ── Fractional Kelly position sizing ─────────────────────────────────────────
 KELLY_FRACTION      = 0.50  # half-Kelly
 KELLY_MIN           = 0.05  # floor: 5% of balance

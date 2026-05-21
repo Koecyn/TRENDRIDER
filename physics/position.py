@@ -175,7 +175,13 @@ class PositionManager:
         return self.mae.stop_distance(entry, atr, tier, direction)
 
     def entry_target(self, entry: float, stop: float,
-                     direction: int, tier: int) -> float:
+                     direction: int, tier: int, atr: float = None) -> float:
+        # Fixed ATR target: decoupled from stop so wide noise-stops don't
+        # push targets to unreachable distances on 1m bars.
+        if atr and atr > 0:
+            mult = {1: C.TIER1_TARGET_ATR, 2: C.TIER2_TARGET_ATR,
+                    3: C.TIER3_TARGET_ATR}.get(tier, C.TIER3_TARGET_ATR)
+            return entry + atr * mult * direction
         rr   = {1: C.TIER1_RR, 2: C.TIER2_RR, 3: C.TIER3_RR}.get(tier, 2.0)
         dist = abs(entry - stop)
         return entry + dist * rr * direction

@@ -250,7 +250,7 @@ def run(data: dict,
         # ── Build trade ───────────────────────────────────────────────────
         entry  = cur
         stop   = pm.entry_stop(entry, direction, atr, tier)
-        target = pm.entry_target(entry, stop, direction, tier)
+        target = pm.entry_target(entry, stop, direction, tier, atr)
         size   = pm.size(tier, confidence)
 
         open_trade = Trade(

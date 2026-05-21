@@ -2,5 +2,5 @@
   "id": "p41",
   "command": "RUN",
   "bash": "",
-  "message": "tph=1.5 < 2.0 \u2014 lower threshold 0.12\u21920.11"
+  "message": "decouple targets: TIER3_TARGET_ATR=2.0 fixed, stop=3.0*ATR; 60%+ base win rate"
 }
