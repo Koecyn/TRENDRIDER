@@ -2,3 +2,8 @@ backtesting>=0.6.5
 numpy>=1.24
 pandas>=2.0
 scipy>=1.10
+
+# Physics engine
+zstandard>=0.21     # zstd compression for PHYX format (preferred)
+msgpack>=1.0        # binary serialization inside PHYX chunks
+aiohttp>=3.9        # async WebSocket for live data collector

@@ -160,3 +160,43 @@ def get_data(cache_path: str = None, symbol: str = None,
     data = parse_klines(raw)
     save_csv(data, cp)
     return data
+
+
+def get_data_phyx(phyx_dir: str, symbol: str = None,
+                  ts_from: int = 0, ts_to: int = None,
+                  fallback_rest: bool = True) -> dict:
+    """
+    Load kline data from PHYX compressed files (collected by physics.collector).
+    Falls back to Binance REST if no PHYX files found and fallback_rest=True.
+
+    PHYX files are preferred when available — they contain real order book
+    snapshots captured live, which the REST endpoint cannot provide historically.
+    """
+    sym = symbol or C.SYMBOL
+    try:
+        from .store import load_klines
+        data = load_klines(phyx_dir, sym, ts_from, ts_to)
+        if data and len(data.get('closes', [])) >= C.WARMUP_BARS:
+            return data
+    except Exception as e:
+        pass  # store module may not be importable if deps missing
+
+    if fallback_rest:
+        return get_data(symbol=sym)
+    return {}
+
+
+def load_ob_snapshots(phyx_dir: str, symbol: str = None,
+                      ts_from: int = 0, ts_to: int = None) -> list:
+    """
+    Load order book snapshots from PHYX files.
+    Returns list of {'ts_ms', 'mid', 'bids', 'asks'} dicts in time order.
+    Bids/asks are [(price, qty), ...] — level 20 each side.
+    """
+    sym = symbol or C.SYMBOL
+    try:
+        from .store import iter_files
+        return [r for r in iter_files(phyx_dir, sym, ts_from, ts_to)
+                if r['type'] == 'orderbook']
+    except Exception:
+        return []
