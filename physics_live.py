@@ -149,12 +149,14 @@ class PaperTrader:
     """
 
     def __init__(self, CF, PositionManager):
-        self._CF     = CF
-        self._pm     = PositionManager(CF.INITIAL_BAL)
-        self._open   = None
-        self._trades = []
-        self._bars   = 0
-        self._start  = time.time()
+        self._CF          = CF
+        self._pm          = PositionManager(CF.INITIAL_BAL)
+        self._open        = None
+        self._trades      = []
+        self._bars        = 0
+        self._start       = time.time()
+        self._last_bids_n = 0    # depth diagnostic
+        self._last_cav    = {}   # cavitation breakdown
 
     def reload_params(self, CF):
         self._CF = CF
@@ -247,10 +249,12 @@ class PaperTrader:
 
         sig = fusion.run(p, o, c, v, tb, accum, bids=bids, asks=asks)
 
-        self._last_score = float(sig.get('score', 0))
-        self._last_snr   = float(sig.get('snr', 0))
-        self._last_dir   = int(sig.get('direction', 0))
-        self._last_tier  = int(sig.get('tier', 4))
+        self._last_bids_n = len(bids) if bids else 0
+        self._last_cav    = sig.get('cavitation', {})
+        self._last_score  = float(sig.get('score', 0))
+        self._last_snr    = float(sig.get('snr', 0))
+        self._last_dir    = int(sig.get('direction', 0))
+        self._last_tier   = int(sig.get('tier', 4))
 
         log(f"  score={self._last_score:+.4f}  dir={self._last_dir:+d}  "
             f"tier={self._last_tier}  snr={self._last_snr:.2f}  "
@@ -355,6 +359,10 @@ class PaperTrader:
             'last_tier':     self._last_tier,
             'threshold':     float(CF.LONG_THRESHOLD),
             'snr_min':       float(CF.SNR_MIN),
+            # OB diagnostic — tells us whether real depth data reached fusion
+            'last_bids_n':   self._last_bids_n,
+            'last_cav_active': bool(self._last_cav.get('active', False)),
+            'last_cav_risk':   round(float(self._last_cav.get('risk', 0)), 4),
         }
         for tier in [1, 2, 3]:
             tt = [t for t in self._trades if t['tier'] == tier]
