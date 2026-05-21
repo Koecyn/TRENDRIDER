@@ -21,14 +21,17 @@ import json, os, re, subprocess, sys, time, hashlib
 from datetime import datetime
 from pathlib import Path
 
-REPO        = Path(__file__).resolve().parent
-CODE_BRANCH = "claude/hft-mean-reversion-strategy-pJ4YU"
-DATA_BRANCH = "data/live"
-CONFIG_F    = REPO / "physics" / "config.py"
-TRIGGER_F   = REPO / "physics_trigger.json"
-RESULTS_F   = REPO / "physics_results.json"
-SELF_F      = Path(__file__).resolve()
-LOG_F       = REPO / "physics_optimizer.log"
+REPO           = Path(__file__).resolve().parent
+CODE_BRANCH    = "claude/hft-mean-reversion-strategy-pJ4YU"
+DATA_BRANCH    = "data/live"
+CONFIG_F       = REPO / "physics" / "config.py"
+TRIGGER_F      = REPO / "physics_trigger.json"
+RESULTS_F      = REPO / "physics_results.json"
+LIVE_RESULTS_F = REPO / "physics_live_results.json"   # written by physics_live.py
+SELF_F         = Path(__file__).resolve()
+LOG_F          = REPO / "physics_optimizer.log"
+
+LIVE_STALE_SECS = 300   # live results older than this → wait for fresh data
 
 # ── Optimization targets ──────────────────────────────────────────────────────
 TARGET_SHARPE   = 2.5
@@ -144,51 +147,37 @@ def check_reload():
             os.execv(sys.executable, [sys.executable, str(SELF_F)] + sys.argv[1:])
 
 
-# ── Run backtest ──────────────────────────────────────────────────────────────
+# ── Live stats reader ─────────────────────────────────────────────────────────
 
-def run_backtest() -> dict:
-    """Import physics package fresh and run backtest. Returns summary dict."""
-    # Flush module cache so config changes take effect
-    for key in list(sys.modules.keys()):
-        if key.startswith('physics'):
-            del sys.modules[key]
-
-    from physics import data as D, backtester as BT, config as CF
-
-    phyx_dir = str(REPO / "phyx_data")
-    ob_snaps = None
-
-    # Prefer PHYX live data — real order book fills the wave equations properly.
-    # Falls back to REST klines when no PHYX files exist yet.
-    if Path(phyx_dir).exists() and list(Path(phyx_dir).glob(f"{CF.SYMBOL}_*.phyx")):
-        log("PHYX files found — loading live order book data", G)
-        d = D.get_data_phyx(phyx_dir, CF.SYMBOL)
-        if d and len(d.get('closes', [])) >= CF.WARMUP_BARS:
-            ob_snaps = D.load_ob_snapshots(phyx_dir, CF.SYMBOL)
-            log(f"  {len(d['prices'])} kline bars + {len(ob_snaps)} OB snapshots", C)
-        else:
-            log("PHYX klines too short — falling back to REST", Y)
-            d = D.get_data(cache_path=str(REPO / "physics_data_cache.csv"), refresh=True)
-    else:
-        log("No PHYX files yet — fetching REST data (start collector to enable live OB)", Y)
-        d = D.get_data(cache_path=str(REPO / "physics_data_cache.csv"),
-                       refresh=True)
-    log(f"  {len(d['prices'])} bars loaded", C)
-
-    log("Running backtest…", C)
-    result = BT.run(d, initial_balance=CF.INITIAL_BAL, long_only=True,
-                    ob_snapshots=ob_snaps)
-
-    summary = result.summary()
-    log(f"  n={summary['n_trades']}  sharpe={summary['sharpe']:.3f}"
-        f"  win={summary['win_rate']:.1f}%  dd={summary['max_dd']:.2f}%", C)
-    for tier in [1, 2, 3]:
-        ts_ = result.tier_stats(tier)
-        if ts_['n'] > 0:
-            log(f"  Tier {tier}: n={ts_['n']}  win={ts_['win_rate']:.1f}%  "
-                f"sharpe={ts_['sharpe']:.3f}", C)
-
-    return summary
+def read_live_stats() -> dict | None:
+    """
+    Read stats written by physics_live.py (WebSocket engine).
+    Returns None if file missing or too stale.
+    physics_live.py writes physics_live_results.json every WRITE_EVERY_BARS bars
+    (~5 minutes at 5 tph). We wait up to LIVE_STALE_SECS before giving up.
+    """
+    if not LIVE_RESULTS_F.exists():
+        return None
+    try:
+        raw  = json.loads(LIVE_RESULTS_F.read_text())
+        # Check freshness — ts is UTC ISO string
+        from datetime import datetime, timezone
+        written = datetime.fromisoformat(raw['ts'].replace('Z', '+00:00'))
+        age_s   = (datetime.now(timezone.utc) - written).total_seconds()
+        if age_s > LIVE_STALE_SECS:
+            log(f"Live results stale ({age_s:.0f}s old) — waiting for physics_live.py", Y)
+            return None
+        stats = raw.get('stats', {})
+        n   = stats.get('n_trades', 0)
+        log(f"Live stats: n={n}  bars={stats.get('bars_live',0)}"
+            f"  sharpe={stats.get('sharpe',0):.3f}"
+            f"  win={stats.get('win_rate',0):.1f}%"
+            f"  tph={stats.get('trades_per_hr',0):.2f}"
+            f"  age={age_s:.0f}s", C)
+        return stats
+    except Exception as e:
+        log(f"Live stats read error: {e}", R)
+        return None
 
 
 # ── Optimization decision ─────────────────────────────────────────────────────
@@ -307,6 +296,7 @@ def next_iter_id() -> str:
 def main():
     log(f"Physics optimizer starting — target Sharpe≥{TARGET_SHARPE} "
         f"Win≥{TARGET_WIN_PCT}% TPH≥{TARGET_TPH}", G)
+    log("Mode: LIVE WebSocket stats — physics_live.py must be running in parallel", C)
 
     # Initial trigger if missing
     if not TRIGGER_F.exists():
@@ -314,10 +304,7 @@ def main():
             'id': 'p0', 'command': 'RUN', 'bash': '', 'message': 'initial run'
         }, indent=2))
 
-    iter_count = 0
-
     while True:
-        iter_count += 1
         check_reload()
         fetch_pull()
 
@@ -328,38 +315,31 @@ def main():
 
         log(f"=== iter {trigger['id']} ===", B)
 
-        # Run backtest
-        try:
-            stats = run_backtest()
-        except Exception as e:
-            log(f"Backtest error: {e}", R)
-            import traceback; traceback.print_exc()
+        # Read live stats from physics_live.py WebSocket engine
+        stats = read_live_stats()
+        if stats is None:
+            log("No fresh live stats — ensure physics_live.py is running:", Y)
+            log("  python physics_live.py", Y)
             time.sleep(30)
             continue
 
-        # Write results to file (push_results will commit to data/live)
-        n         = stats.get('n_trades', 0)
-        sharpe    = stats.get('sharpe', 0)
-        win       = stats.get('win_rate', 0)
-        ret       = stats.get('equity_final', 0)
+        n_live = stats.get('n_trades', 0)
+        if n_live < 5:
+            log(f"Only {n_live} live trades so far — need ≥5 for reliable decisions, waiting 60s…", Y)
+            time.sleep(60)
+            continue
 
-        result_data = {
-            'ts':         datetime.utcnow().isoformat(),
-            'trigger_id': trigger['id'],
-            'status':     'complete',
-            'stats':      stats,
-        }
-        RESULTS_F.write_text(json.dumps(result_data, indent=2))
-        push_results()
+        sharpe = stats.get('sharpe', 0)
+        win    = stats.get('win_rate', 0)
+        tph    = stats.get('trades_per_hr', 0)
 
-        tph = stats.get('trades_per_hr', 0)
         col = G if sharpe >= TARGET_SHARPE else (Y if sharpe > 0 else R)
         log(f"[{trigger['id']}] sharpe={sharpe:+.3f} | win={win:.1f}% | "
-            f"trades={n} ({tph:.1f}/hr) | equity={ret:.2f}", col)
+            f"trades={n_live} ({tph:.1f}/hr)", col)
 
         # Check target
         if sharpe >= TARGET_SHARPE and tph >= MIN_TPH and win >= TARGET_WIN_PCT:
-            log(f"TARGET REACHED — Sharpe={sharpe:.3f} Win={win:.1f}% ({n} trades)", G)
+            log(f"TARGET REACHED — Sharpe={sharpe:.3f} Win={win:.1f}% ({n_live} trades)", G)
             TRIGGER_F.write_text(json.dumps({
                 'id':      next_iter_id(),
                 'command': 'STOP',
@@ -380,7 +360,8 @@ def main():
             log(f"  → {param} = {value}   ({reason})", Y)
             set_param(param, value)
 
-        # Write new trigger
+        # Write new trigger and push config change to code branch
+        # physics_live.py will git-reset --hard to pick up new params in ≤30s
         new_id = next_iter_id()
         TRIGGER_F.write_text(json.dumps({
             'id':      new_id,
@@ -388,12 +369,11 @@ def main():
             'bash':    '',
             'message': reason,
         }, indent=2))
+        commit_and_push(f"{new_id}: {reason[:80]}")
 
-        commit_msg = f"{new_id}: {reason[:80]}"
-        commit_and_push(commit_msg)
-
-        log(f"Sleeping 5s before next iteration…", C)
-        time.sleep(5)
+        # Wait for live engine to hot-reload new params (30s) + accumulate trades (60s)
+        log(f"Params pushed — waiting 90s for live engine to reload and generate fresh stats…", C)
+        time.sleep(90)
 
 
 if __name__ == '__main__':

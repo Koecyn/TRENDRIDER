@@ -230,7 +230,8 @@ def run(data: dict,
 
             if reason:
                 open_trade.close(i, exit_px, reason)
-                pm.on_close(open_trade.pnl_pct, open_trade.mae, open_trade.tier)
+                pm.on_close(open_trade.pnl_pct, open_trade.mae,
+                            open_trade.tier, open_trade.size_usd)
                 trades.append(open_trade)
                 open_trade = None
 
@@ -283,7 +284,8 @@ def run(data: dict,
     # Force-close at end of data
     if open_trade is not None:
         open_trade.close(n - 1, float(prices[-1]), 'eod')
-        pm.on_close(open_trade.pnl_pct, open_trade.mae, open_trade.tier)
+        pm.on_close(open_trade.pnl_pct, open_trade.mae,
+                    open_trade.tier, open_trade.size_usd)
         trades.append(open_trade)
 
     equity[-1] = pm.balance

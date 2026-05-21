@@ -50,7 +50,7 @@ LOG_F       = REPO / "physics_live.log"
 WS_URL = ("wss://stream.binance.us:9443/stream"
           "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms")
 
-WRITE_EVERY_BARS = 5    # write stats after every N closed bars
+WRITE_EVERY_BARS = 2    # write stats after every N closed bars (~2 min)
 FETCH_EVERY_S    = 30   # pull param changes from git
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
@@ -183,7 +183,7 @@ class PaperTrader:
                 pnl = (exit_px - t['entry']) / t['entry'] * 100.0
                 t.update(pnl_pct=pnl, exit_price=exit_px,
                          exit_reason=reason, exit_bar=self._bars)
-                self._pm.on_close(pnl, t['mae'], t['tier'])
+                self._pm.on_close(pnl, t['mae'], t['tier'], t['size_usd'])
                 self._trades.append(t)
                 self._open = None
                 col = G if pnl > 0 else R

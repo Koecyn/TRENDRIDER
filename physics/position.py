@@ -165,10 +165,18 @@ class PositionManager:
         self.kelly   = KellySizer()
         self.mae     = MAEStops()
 
-    def on_close(self, pnl_pct: float, mae: float, tier: int):
+    def on_close(self, pnl_pct: float, mae: float, tier: int,
+                 size_usd: float = None):
         self.kelly.record(pnl_pct, tier)
         self.mae.record(mae, pnl_pct, tier)
-        self.balance *= 1.0 + pnl_pct / 100.0
+        # Portfolio return = price return × (position size / balance)
+        # Without size_usd the price return would be applied to the full balance,
+        # overstating equity changes by 1/kelly_fraction (~20× at kelly=0.05).
+        if size_usd is not None and self.balance > 0:
+            portfolio_pct = pnl_pct * (size_usd / self.balance)
+        else:
+            portfolio_pct = pnl_pct
+        self.balance *= 1.0 + portfolio_pct / 100.0
 
     def entry_stop(self, entry: float, direction: int,
                    atr: float, tier: int) -> float:
