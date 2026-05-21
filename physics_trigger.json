@@ -1,6 +1,6 @@
 {
-  "id": "p195",
+  "id": "p196",
   "command": "RUN",
   "bash": "",
-  "message": "win=33.3% < 60.0% \u2014 raise CVD_DIV 0.5\u21920.55"
+  "message": "sharpe=-1.948 \u2014 reduce VISC_BASE 0.02\u21920.016"
 }
