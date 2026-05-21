@@ -159,6 +159,36 @@ class PaperTrader:
     def reload_params(self, CF):
         self._CF = CF
 
+    def scan_intrabar(self, partial_bar: dict, bids, asks, accum):
+        """
+        Run wave equations on historical window + current partial bar.
+        No trade entries — bar isn't closed. Purpose: keep the hydraulic
+        accumulator, soliton, and Reynolds state current between bar closes
+        so we don't miss intrabar pressure buildup.
+        """
+        from physics import fusion
+        w = self._window_arrays()
+        if len(w['closes']) < self._CF.WARMUP_BARS:
+            return
+        # Append partial bar to get current wave state
+        import numpy as np
+        closes_ext = np.append(w['closes'], partial_bar['close'])
+        prices_ext = np.append(w['prices'], partial_bar['close'])
+        opens_ext  = np.append(w['opens'],  partial_bar['open'])
+        vols_ext   = np.append(w['volumes'], partial_bar['volume'])
+        tb_ext     = np.append(w['taker_buy'], partial_bar['taker_buy'])
+        sl = slice(max(0, len(closes_ext) - 600), len(closes_ext))
+        try:
+            sig = fusion.run(prices_ext[sl], opens_ext[sl], closes_ext[sl],
+                             vols_ext[sl], tb_ext[sl], accum,
+                             bids=bids, asks=asks)
+            self._last_score = float(sig.get('score', 0))
+            self._last_snr   = float(sig.get('snr', 0))
+            self._last_dir   = int(sig.get('direction', 0))
+            self._last_tier  = int(sig.get('tier', 4))
+        except Exception:
+            pass
+
     def tick_price(self, price: float) -> bool:
         """
         Called on EVERY intrabar kline update (x=False).
@@ -398,15 +428,12 @@ class LiveEngine:
         is_closed = k.get('x', False)
         cur_price = float(k['c'])
 
-        # Every intrabar update: check stops/targets on live price immediately
+        # Every update: check stops/targets against live price immediately
         trade_closed = self._trader.tick_price(cur_price)
         if trade_closed:
-            self._write_stats()   # event-driven write on every trade close
+            self._write_stats()
 
-        if not is_closed:
-            return   # new entries only on complete bars
-
-        # Bar closed — finalize and run full signal engine
+        # Build the current bar state (partial or complete)
         bar = {
             'ts':        int(k['t']),
             'open':      float(k['o']),
@@ -417,13 +444,19 @@ class LiveEngine:
             'taker_buy': float(k['V']),
             'live':      True,
         }
-        self._window.append(bar)
 
-        # Use PEAK bids/asks seen during the bar — captures dark pool walls that
-        # posted and absorbed mid-bar before the kline closed.
         bids = list(self._peak_bids or self._bids)
         asks = list(self._peak_asks or self._asks)
 
+        if not is_closed:
+            # Intrabar: run wave equations on historical window + current partial
+            # bar so the hydraulic accumulator and soliton charge in real time,
+            # not just once per minute at bar close.
+            self._trader.scan_intrabar(bar, bids or None, asks or None, self._accum)
+            return
+
+        # Bar closed — commit to permanent window and run full signal engine
+        self._window.append(bar)
         sig = self._trader.on_bar(bar, bids or None, asks or None, self._accum)
         if sig:
             self._log_waveforms(bar, sig, bids)
@@ -434,7 +467,7 @@ class LiveEngine:
         self._peak_bids     = []
         self._peak_asks     = []
 
-        self._write_stats()   # always write on bar close
+        self._write_stats()
 
     def _handle_depth(self, data: dict):
         bids = [(float(p), float(q)) for p, q in data.get('bids', [])]
@@ -528,28 +561,43 @@ class LiveEngine:
             'status':     'live',
             'stats':      s,
         }
-        RESULTS_F.write_text(json.dumps(result, indent=2))
-        self._push_results()
+        content = json.dumps(result, indent=2)
+        RESULTS_F.write_text(content)
+        # Push in background thread — don't block the async event loop
+        asyncio.get_event_loop().run_in_executor(None, self._push_results, content)
 
-    def _push_results(self):
-        rel     = str(RESULTS_F.relative_to(REPO))
-        content = RESULTS_F.read_text()
-        git("stash")
-        git("fetch", "origin", DATA_BRANCH)
-        git("checkout", "-B", DATA_BRANCH, f"origin/{DATA_BRANCH}")
-        RESULTS_F.write_text(content)
-        git("add", rel)
-        git("commit", "--allow-empty", "-m", f"live {ts_str()}")
-        for wait in [0, 2, 4, 8]:
-            time.sleep(wait)
-            r = git("push", "-u", "origin", DATA_BRANCH, "--force")
-            if r.returncode == 0:
-                break
-        git("checkout", CODE_BRANCH)
-        git("stash", "pop")
-        # Restore local copy — git checkout removes it since it's only
-        # tracked on data/live, not on CODE_BRANCH
-        RESULTS_F.write_text(content)
+    def _push_results(self, content: str):
+        """Runs in a thread executor — never blocks the WebSocket event loop."""
+        rel = str(RESULTS_F.relative_to(REPO))
+        try:
+            git("stash")
+            git("fetch", "origin", DATA_BRANCH)
+            r = git("checkout", "-B", DATA_BRANCH, f"origin/{DATA_BRANCH}")
+            if r.returncode != 0:
+                log(f"  push: checkout data/live failed: {r.stderr[:80]}", R)
+                git("checkout", CODE_BRANCH)
+                git("stash", "pop")
+                RESULTS_F.write_text(content)
+                return
+            RESULTS_F.write_text(content)
+            git("add", rel)
+            git("commit", "--allow-empty", "-m", f"live {ts_str()}")
+            pushed = False
+            for wait in [0, 2, 4, 8]:
+                time.sleep(wait)
+                r = git("push", "-u", "origin", DATA_BRANCH, "--force")
+                if r.returncode == 0:
+                    pushed = True
+                    break
+                log(f"  push attempt failed: {r.stderr[:60]}", Y)
+            if not pushed:
+                log("  push: all attempts failed — optimizer reads from local file", R)
+        except Exception as e:
+            log(f"  push error: {e}", R)
+        finally:
+            git("checkout", CODE_BRANCH)
+            git("stash", "pop")
+            RESULTS_F.write_text(content)   # restore local copy
 
     async def _fetch_params(self):
         """Pull latest params from remote (every FETCH_EVERY_S seconds)."""
