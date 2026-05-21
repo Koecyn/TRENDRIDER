@@ -31,7 +31,7 @@ LIVE_RESULTS_F = REPO / "physics_live_results.json"   # written by physics_live.
 SELF_F         = Path(__file__).resolve()
 LOG_F          = REPO / "physics_optimizer.log"
 
-LIVE_STALE_SECS = 300   # live results older than this → wait for fresh data
+LIVE_STALE_SECS = 600   # live results older than this → wait for fresh data
 
 # ── Optimization targets ──────────────────────────────────────────────────────
 TARGET_SHARPE   = 2.5
@@ -166,9 +166,10 @@ def read_live_stats() -> dict | None:
         raw   = json.loads(r.stdout)
         ts_str = raw.get('ts', '')
         # Parse timestamp robustly — handle naive and aware forms
-        ts_str = ts_str.replace('Z', '').split('+')[0]   # strip tz → naive UTC
-        written = datetime.fromisoformat(ts_str) if ts_str else datetime.utcfromtimestamp(0)
-        age_s   = (datetime.utcnow() - written).total_seconds()
+        from datetime import timezone
+        ts_str  = ts_str.replace('Z', '+00:00')           # make tz-aware UTC
+        written = datetime.fromisoformat(ts_str) if ts_str else datetime.fromtimestamp(0, tz=timezone.utc)
+        age_s   = (datetime.now(timezone.utc) - written).total_seconds()
         if age_s > LIVE_STALE_SECS:
             log(f"Live results stale ({age_s:.0f}s old) — waiting for physics_live.py", Y)
             return None
