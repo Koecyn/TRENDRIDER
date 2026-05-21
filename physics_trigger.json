@@ -1,6 +1,6 @@
 {
-  "id": "p35",
+  "id": "p36",
   "command": "RUN",
   "bash": "",
-  "message": "WH noise trough filter \u2014 strength 1.5\u21922.0"
+  "message": "tph=1.5 < 2.0 \u2014 lower threshold 0.12\u21920.11"
 }
