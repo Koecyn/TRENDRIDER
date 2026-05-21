@@ -1,6 +1,6 @@
 {
-  "id": "p16",
+  "id": "p17",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=44.350 win=4.5% n=489 \u2014 no change"
+  "message": "win=4.5% terrible \u2014 raise SNR_MIN 2.0\u21922.25"
 }
