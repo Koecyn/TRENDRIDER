@@ -1,6 +1,6 @@
 {
-  "id": "p198",
+  "id": "p199",
   "command": "RUN",
   "bash": "",
-  "message": "sharpe=-1.901 \u2014 reduce VISC_BASE 0.0128\u21920.0102"
+  "message": "sharpe=-1.893 \u2014 reduce VISC_BASE 0.0102\u21920.0082"
 }

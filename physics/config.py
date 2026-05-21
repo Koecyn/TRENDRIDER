@@ -17,7 +17,7 @@ SOLITON_WIN  = 20       # bars in soliton window
 RE_LAMINAR   = 50       # below → reversal bias (score × 0.5)
 RE_TURBULENT = 200      # above → trend amplifier (score × 1.2)
 RE_WINDOW    = 10
-VISC_BASE    = 0.0102     # base viscosity (tune to typical spread)
+VISC_BASE    = 0.0082     # base viscosity (tune to typical spread)
 
 # ── Shock Front ───────────────────────────────────────────────────────────────
 MACH_SHOCK   = 1.0      # Mach threshold — fade anything above this
