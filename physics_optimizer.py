@@ -167,9 +167,16 @@ def read_live_stats() -> dict | None:
         ts_str = raw.get('ts', '')
         # Parse timestamp robustly — handle naive and aware forms
         from datetime import timezone
-        ts_str  = ts_str.replace('Z', '+00:00')           # make tz-aware UTC
-        written = datetime.fromisoformat(ts_str) if ts_str else datetime.fromtimestamp(0, tz=timezone.utc)
-        age_s   = (datetime.now(timezone.utc) - written).total_seconds()
+        # Handle naive timestamps (no tz suffix) and aware ones ('Z' or '+HH:MM')
+        if ts_str.endswith('Z'):
+            ts_str = ts_str[:-1] + '+00:00'
+        try:
+            written = datetime.fromisoformat(ts_str)
+            if written.tzinfo is None:          # naive → treat as UTC
+                written = written.replace(tzinfo=timezone.utc)
+        except Exception:
+            written = datetime.fromtimestamp(0, tz=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - written).total_seconds()
         if age_s > LIVE_STALE_SECS:
             log(f"Live results stale ({age_s:.0f}s old) — waiting for physics_live.py", Y)
             return None
