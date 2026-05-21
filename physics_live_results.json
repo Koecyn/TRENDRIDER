@@ -1,0 +1,25 @@
+{
+  "ts": "2026-05-21T19:01:58.334291Z",
+  "trigger_id": "p0",
+  "status": "live",
+  "stats": {
+    "n_trades": 6,
+    "trades_per_hr": 4.06,
+    "win_rate": 33.33,
+    "sharpe": -2.0869,
+    "max_dd": -0.0117,
+    "avg_pnl": -0.0011,
+    "equity_final": 1000.01,
+    "bars_live": 88,
+    "last_score": 0.18,
+    "last_snr": 2767.06,
+    "last_dir": 1,
+    "last_tier": 1,
+    "threshold": 0.05,
+    "snr_min": 2.0,
+    "t1_n": 4,
+    "t1_win_rate": 50.0,
+    "t3_n": 2,
+    "t3_win_rate": 0.0
+  }
+}
