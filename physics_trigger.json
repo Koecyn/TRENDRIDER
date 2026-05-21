@@ -1,6 +1,6 @@
 {
-  "id": "p33",
+  "id": "p34",
   "command": "RUN",
   "bash": "",
-  "message": "WH noise trough filter \u2014 strength 0.5\u21921.0"
+  "message": "WH noise trough filter \u2014 strength 1.0\u21921.5"
 }

@@ -44,7 +44,7 @@ CVD_WINDOW      = 10        # bars for CVD slope comparison
 SNR_MIN         = 3.5       # minimum SGF SNR to trade
 
 # ── Conviction tiers ──────────────────────────────────────────────────────────
-TIER1_WH_STRENGTH = 1.0    # water hammer strength threshold for Tier 1
+TIER1_WH_STRENGTH = 1.5    # water hammer strength threshold for Tier 1
 TIER2_SOL_BAL     = 0.50    # soliton balance required for Tier 2
 TIER2_DARK_THRESH = 0.70    # dark pool pressure for Tier 2 override
 
