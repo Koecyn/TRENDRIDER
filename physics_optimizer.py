@@ -104,14 +104,15 @@ def commit_and_push(message: str):
 def push_results():
     """Write physics_results.json to data/live branch."""
     rel = str(RESULTS_F.relative_to(REPO))
-    # Stash, switch to data branch, write, commit, push, switch back
+    # Save results content before switching branches
+    results_content = RESULTS_F.read_text()
     git("stash")
     git("fetch", "origin", DATA_BRANCH)
     r = git("checkout", "-B", DATA_BRANCH, f"origin/{DATA_BRANCH}")
     if r.returncode != 0:
         git("checkout", "-b", DATA_BRANCH)
-    import shutil
-    shutil.copy(str(RESULTS_F), str(RESULTS_F))   # already written by caller
+    # Re-write the file on the data branch (stash hid it)
+    RESULTS_F.write_text(results_content)
     git("add", rel)
     git("commit", "--allow-empty", "-m", f"physics results {ts()}")
     for attempt, wait in enumerate([0, 2, 4, 8, 16]):
@@ -154,7 +155,7 @@ def run_backtest() -> dict:
 
     log("Fetching data…", C)
     d = D.get_data(cache_path=str(REPO / "physics_data_cache.csv"),
-                   refresh=False)
+                   refresh=True)
     log(f"  {len(d['prices'])} bars loaded", C)
 
     log("Running backtest…", C)
