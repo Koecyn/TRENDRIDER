@@ -39,7 +39,7 @@ DARK_PARTIAL_KEEP = 0.30    # fraction of pressure remaining after discharge
 LONG_THRESHOLD  = +0.12
 SHORT_THRESHOLD = -0.12
 OBI_SIGNAL      = 0.30      # min OBI magnitude to count
-CVD_DIV         = 0.35      # min CVD divergence magnitude to count
+CVD_DIV         = 0.4      # min CVD divergence magnitude to count
 CVD_WINDOW      = 10        # bars for CVD slope comparison
 SNR_MIN         = 3.5       # minimum SGF SNR to trade
 
