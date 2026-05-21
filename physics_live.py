@@ -346,9 +346,17 @@ class LiveEngine:
         self._window = deque(maxlen=700)
         self._trader.set_window(self._window)
 
-        # Current order book (updated from depth stream)
+        # Current order book (updated from depth stream every 100ms)
         self._bids: list = []
         self._asks: list = []
+
+        # Intrabar peak tracking — captures dark pool events that clear mid-bar
+        # We pass the PEAK bids/asks seen during the bar to fusion at bar close,
+        # not just the final snapshot (which may no longer show the wall).
+        self._peak_bid_wall: float = 0.0   # largest single bid level seen
+        self._peak_ask_wall: float = 0.0
+        self._peak_bids: list = []         # bids snapshot when peak wall seen
+        self._peak_asks: list = []
 
         self._last_fetch  = 0.0
         self._running     = True
@@ -387,18 +395,55 @@ class LiveEngine:
         }
         self._window.append(bar)
 
-        bids = list(self._bids)
-        asks = list(self._asks)
+        # Use PEAK bids/asks seen during the bar — captures dark pool walls that
+        # posted and absorbed mid-bar before the kline closed.
+        bids = list(self._peak_bids or self._bids)
+        asks = list(self._peak_asks or self._asks)
 
         sig = self._trader.on_bar(bar, bids or None, asks or None, self._accum)
         if sig:
             self._log_waveforms(bar, sig, bids)
 
+        # Reset peak tracking for the next bar
+        self._peak_bid_wall = 0.0
+        self._peak_ask_wall = 0.0
+        self._peak_bids     = []
+        self._peak_asks     = []
+
         self._write_stats()   # always write on bar close
 
     def _handle_depth(self, data: dict):
-        self._bids = [(float(p), float(q)) for p, q in data.get('bids', [])]
-        self._asks = [(float(p), float(q)) for p, q in data.get('asks', [])]
+        bids = [(float(p), float(q)) for p, q in data.get('bids', [])]
+        asks = [(float(p), float(q)) for p, q in data.get('asks', [])]
+        self._bids = bids
+        self._asks = asks
+
+        if not bids or not asks:
+            return
+
+        # Track peak wall size seen during this bar — dark pool walls post and
+        # absorb within seconds; the bar-close snapshot often misses them.
+        top_bid = bids[0][1]
+        top_ask = asks[0][1]
+
+        if top_bid > self._peak_bid_wall:
+            self._peak_bid_wall = top_bid
+            self._peak_bids     = bids   # snapshot when wall was largest
+
+        if top_ask > self._peak_ask_wall:
+            self._peak_ask_wall = top_ask
+            self._peak_asks     = asks
+
+        # Log unusually large walls (>3× normal) as dark pool events
+        bid_vol5 = sum(q for _, q in bids[:5])
+        ask_vol5 = sum(q for _, q in asks[:5])
+        total5   = bid_vol5 + ask_vol5
+        if total5 > 0:
+            obi = (bid_vol5 - ask_vol5) / total5
+            if abs(obi) > 0.40:   # extreme imbalance — dark pool absorbing
+                side = 'BID' if obi > 0 else 'ASK'
+                log(f"  [DARK] {side} wall OBI={obi:+.3f}  "
+                    f"bid5={bid_vol5:.2f}  ask5={ask_vol5:.2f}", Y)
 
     def _log_waveforms(self, bar: dict, sig: dict, bids: list):
         """Print the wave equation breakdown for every signal bar."""
