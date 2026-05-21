@@ -81,12 +81,14 @@ def set_param(name: str, value):
 # ── Git helpers ───────────────────────────────────────────────────────────────
 
 def fetch_pull():
+    git("stash")
     git("fetch", "origin", CODE_BRANCH)
     r = git("rebase", f"origin/{CODE_BRANCH}")
     if r.returncode != 0:
         log(f"Rebase conflict — resetting to origin: {r.stderr[:200]}", R)
         git("rebase", "--abort")
         git("reset", "--hard", f"origin/{CODE_BRANCH}")
+    git("stash", "pop")
 
 def commit_and_push(message: str):
     git("add", str(CONFIG_F.relative_to(REPO)), str(TRIGGER_F.relative_to(REPO)))

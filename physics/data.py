@@ -24,7 +24,7 @@ import numpy as np
 
 from . import config as C
 
-_BASE = "https://api.binance.com/api/v3"
+_BASE = "https://api.binance.us/api/v3"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
