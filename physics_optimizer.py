@@ -31,9 +31,11 @@ SELF_F      = Path(__file__).resolve()
 LOG_F       = REPO / "physics_optimizer.log"
 
 # ── Optimization targets ──────────────────────────────────────────────────────
-TARGET_SHARPE   = 1.6
+TARGET_SHARPE   = 2.5
 TARGET_WIN_PCT  = 60.0    # 60% — not negotiable
-TARGET_TRADES   = 30      # minimum trades over test window
+TARGET_TPH      = 5.0     # trades per hour
+MIN_TPH         = 2.0     # below this → open the gate
+MAX_TPH         = 10.0    # above this → too much noise
 TIER1_WIN_TGT   = 78.0    # Tier 1 mechanical target
 TIER2_WIN_TGT   = 65.0    # Tier 2 target
 
@@ -177,74 +179,80 @@ def run_backtest() -> dict:
 
 def decide(stats: dict) -> dict:
     """
-    Single most impactful parameter change based on current results.
+    Single most impactful parameter change.
     Priority:
-      0 trades         → lower LONG_THRESHOLD (let more signals through)
-      Tier1 win < 70%  → lower MACH_SHOCK (more water hammer confirmations)
-      Tier2 win < 55%  → adjust SOLITON_BAL
-      Sharpe < 0       → loosen VISC_BASE (lower friction = more flow signals)
-      Too few trades   → lower LONG_THRESHOLD
-      Low overall win  → raise SOLITON_BAL (stricter soliton quality)
-      Low sharpe       → tune KDV_ALPHA
+      0 trades          → lower LONG_THRESHOLD
+      tph < MIN_TPH     → lower LONG_THRESHOLD (frequency gate)
+      tph > MAX_TPH     → raise LONG_THRESHOLD (too noisy)
+      win < 30%         → raise SNR_MIN (terrible quality, filter harder)
+      win < 45%         → raise SOLITON_BAL (stricter wave quality)
+      win < 60%         → raise CVD_DIV (stricter divergence gate)
+      sharpe < 0        → reduce VISC_BASE
+      win >= 60%, sharpe < target → push KDV_ALPHA (amplify edge)
+    Never lower LONG_THRESHOLD below 0.08.
     """
-    n         = stats.get('n_trades', 0)
-    sharpe    = stats.get('sharpe', -99)
-    win       = stats.get('win_rate', 0)
-    t1_n      = stats.get('t1_n', 0)
-    t1_win    = stats.get('t1_win_rate', 0)
-    t2_n      = stats.get('t2_n', 0)
-    t2_win    = stats.get('t2_win_rate', 0)
+    n      = stats.get('n_trades', 0)
+    sharpe = stats.get('sharpe', -99)
+    win    = stats.get('win_rate', 0)
+    tph    = stats.get('trades_per_hr', 0)
 
     thresh    = float(read_param('LONG_THRESHOLD') or 0.12)
-    mach      = float(read_param('MACH_SHOCK') or 1.5)
     sol_bal   = float(read_param('SOLITON_BAL') or 0.5)
     kdv_alpha = float(read_param('KDV_ALPHA') or 0.1)
     visc      = float(read_param('VISC_BASE') or 0.02)
+    snr_min   = float(read_param('SNR_MIN') or 2.0)
+    cvd_div   = float(read_param('CVD_DIV') or 0.30)
 
-    # No trades at all — lower entry threshold
+    # No trades at all — open the gate
     if n == 0:
         new = round(max(0.06, thresh - 0.02), 3)
         return {'param': 'LONG_THRESHOLD', 'value': new,
                 'reason': f'0 trades — lower threshold {thresh}→{new}'}
 
-    # Too few trades overall
-    if n < TARGET_TRADES and thresh > 0.07:
-        new = round(max(0.07, thresh - 0.01), 3)
+    # Trade frequency too low — open the gate
+    if tph < MIN_TPH and thresh > 0.08:
+        new = round(max(0.08, thresh - 0.01), 3)
         return {'param': 'LONG_THRESHOLD', 'value': new,
-                'reason': f'n={n} < {TARGET_TRADES} — lower threshold {thresh}→{new}'}
+                'reason': f'tph={tph:.1f} < {MIN_TPH} — lower threshold {thresh}→{new}'}
 
-    # Tier 1 win rate too low — lower Mach threshold to get cleaner confirmations
-    if t1_n >= 3 and t1_win < 70.0 and mach > 1.0:
-        new = round(max(1.0, mach - 0.1), 2)
-        return {'param': 'MACH_SHOCK', 'value': new,
-                'reason': f'Tier1 win={t1_win:.1f}% < 70% — tighten MACH_SHOCK {mach}→{new}'}
+    # Too many trades — noise flooding in, raise threshold
+    if tph > MAX_TPH and thresh < 0.22:
+        new = round(min(0.22, thresh + 0.01), 3)
+        return {'param': 'LONG_THRESHOLD', 'value': new,
+                'reason': f'tph={tph:.1f} > {MAX_TPH} — raise threshold {thresh}→{new}'}
 
-    # Tier 2 win too low — stricter soliton
-    if t2_n >= 5 and t2_win < 55.0 and sol_bal < 0.9:
-        new = round(min(0.9, sol_bal + 0.1), 2)
+    # Win rate terrible — filter harder on SNR
+    if win < 30.0 and snr_min < 3.5:
+        new = round(min(3.5, snr_min + 0.25), 2)
+        return {'param': 'SNR_MIN', 'value': new,
+                'reason': f'win={win:.1f}% terrible — raise SNR_MIN {snr_min}→{new}'}
+
+    # Win rate still bad — raise soliton quality
+    if win < 45.0 and sol_bal < 0.85:
+        new = round(min(0.85, sol_bal + 0.05), 2)
         return {'param': 'SOLITON_BAL', 'value': new,
-                'reason': f'Tier2 win={t2_win:.1f}% — tighten SOLITON_BAL {sol_bal}→{new}'}
+                'reason': f'win={win:.1f}% — raise SOLITON_BAL {sol_bal}→{new}'}
+
+    # Win rate below target — stricter CVD divergence confirmation
+    if win < TARGET_WIN_PCT and cvd_div < 0.65:
+        new = round(min(0.65, cvd_div + 0.05), 2)
+        return {'param': 'CVD_DIV', 'value': new,
+                'reason': f'win={win:.1f}% < {TARGET_WIN_PCT}% — raise CVD_DIV {cvd_div}→{new}'}
 
     # Negative sharpe — reduce friction so Darcy signals are more active
     if sharpe < 0 and visc > 0.005:
         new = round(max(0.005, visc * 0.8), 4)
         return {'param': 'VISC_BASE', 'value': new,
-                'reason': f'sharpe={sharpe:.2f} — reduce VISC_BASE {visc}→{new}'}
+                'reason': f'sharpe={sharpe:.3f} — reduce VISC_BASE {visc}→{new}'}
 
-    # Overall win rate too low — increase soliton quality gate
-    if win < TARGET_WIN_PCT and n >= TARGET_TRADES and sol_bal < 0.8:
-        new = round(min(0.8, sol_bal + 0.05), 2)
-        return {'param': 'SOLITON_BAL', 'value': new,
-                'reason': f'win={win:.1f}% < {TARGET_WIN_PCT}% — raise SOLITON_BAL {sol_bal}→{new}'}
-
-    # Sharpe positive but below target — tune nonlinearity sensitivity
-    if 0 < sharpe < TARGET_SHARPE and kdv_alpha < 0.25:
+    # Good win rate but below sharpe target — amplify nonlinearity
+    if win >= TARGET_WIN_PCT and 0 < sharpe < TARGET_SHARPE and kdv_alpha < 0.25:
         new = round(min(0.25, kdv_alpha + 0.02), 3)
         return {'param': 'KDV_ALPHA', 'value': new,
-                'reason': f'sharpe={sharpe:.3f} — push KDV_ALPHA {kdv_alpha}→{new}'}
+                'reason': f'sharpe={sharpe:.3f} win={win:.1f}% — push KDV_ALPHA {kdv_alpha}→{new}'}
 
     return {'action': 'hold',
-            'reason': f'sharpe={sharpe:.3f} win={win:.1f}% n={n} — no change'}
+            'reason': f'sharpe={sharpe:.3f} win={win:.1f}% tph={tph:.1f} — holding'}
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -306,12 +314,13 @@ def main():
         RESULTS_F.write_text(json.dumps(result_data, indent=2))
         push_results()
 
+        tph = stats.get('trades_per_hr', 0)
         col = G if sharpe >= TARGET_SHARPE else (Y if sharpe > 0 else R)
         log(f"[{trigger['id']}] sharpe={sharpe:+.3f} | win={win:.1f}% | "
-            f"trades={n} | equity={ret:.2f}", col)
+            f"trades={n} ({tph:.1f}/hr) | equity={ret:.2f}", col)
 
         # Check target
-        if sharpe >= TARGET_SHARPE and n >= TARGET_TRADES and win >= TARGET_WIN_PCT:
+        if sharpe >= TARGET_SHARPE and tph >= MIN_TPH and win >= TARGET_WIN_PCT:
             log(f"TARGET REACHED — Sharpe={sharpe:.3f} Win={win:.1f}% ({n} trades)", G)
             TRIGGER_F.write_text(json.dumps({
                 'id':      next_iter_id(),

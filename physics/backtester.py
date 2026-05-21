@@ -75,10 +75,17 @@ class Result:
 
     @property
     def sharpe(self) -> float:
-        if len(self.trades) < 2:
+        """Annualized Sharpe from hourly equity samples — robust for 1m HFT data."""
+        if len(self.trades) < 2 or len(self.equity) < 120:
             return 0.0
-        r = np.array([t.pnl_pct for t in self.trades])
-        return float(np.mean(r) / (np.std(r) + 1e-10) * np.sqrt(252 * 24 * 60))
+        sampled = self.equity[::60]   # one sample per hour
+        if len(sampled) < 3:
+            return 0.0
+        ret = np.diff(sampled) / (sampled[:-1] + 1e-10)
+        std = float(np.std(ret))
+        if std < 1e-10:
+            return 0.0
+        return float(np.mean(ret) / std * np.sqrt(252 * 24))
 
     @property
     def max_drawdown(self) -> float:
@@ -100,7 +107,10 @@ class Result:
             return {'n': 0, 'win_rate': 0.0, 'sharpe': 0.0, 'avg_pnl': 0.0}
         wins = [t for t in tt if t.pnl_pct > 0]
         r    = np.array([t.pnl_pct for t in tt])
-        sh   = float(np.mean(r) / (np.std(r) + 1e-10) * np.sqrt(252 * 24 * 60))
+        # Per-trade sharpe scaled by tier trade frequency
+        n_bars = max(len(self.equity), 1)
+        tpy    = len(tt) / n_bars * (252 * 1440)
+        sh     = float(np.mean(r) / (np.std(r) + 1e-10) * np.sqrt(max(tpy, 1)))
         return {
             'n':        len(tt),
             'win_rate': round(len(wins) / len(tt) * 100, 2),
@@ -110,8 +120,12 @@ class Result:
         }
 
     def summary(self) -> dict:
+        n_bars    = max(len(self.equity), 1)
+        hours     = n_bars / 60.0
+        tph       = len(self.trades) / max(hours, 1)
         d = {
             'n_trades':      len(self.trades),
+            'trades_per_hr': round(tph, 2),
             'win_rate':      round(self.win_rate * 100, 2),
             'sharpe':        round(self.sharpe, 4),
             'max_dd':        round(self.max_drawdown, 4),
@@ -230,7 +244,7 @@ def run(data: dict,
             continue
         if long_only and direction == -1:
             continue
-        if sig['snr'] < 2.0:
+        if sig['snr'] < C.SNR_MIN:
             continue
 
         # ── Build trade ───────────────────────────────────────────────────
