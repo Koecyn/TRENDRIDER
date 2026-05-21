@@ -237,9 +237,13 @@ class PaperTrader:
 
         sig = fusion.run(p, o, c, v, tb, accum, bids=bids, asks=asks)
 
-        # Always log score so we can see why signals aren't firing
-        log(f"  score={sig['score']:+.4f}  dir={sig['direction']:+d}  "
-            f"tier={sig['tier']}  snr={sig['snr']:.2f}  "
+        self._last_score = float(sig.get('score', 0))
+        self._last_snr   = float(sig.get('snr', 0))
+        self._last_dir   = int(sig.get('direction', 0))
+        self._last_tier  = int(sig.get('tier', 4))
+
+        log(f"  score={self._last_score:+.4f}  dir={self._last_dir:+d}  "
+            f"tier={self._last_tier}  snr={self._last_snr:.2f}  "
             f"threshold={self._CF.LONG_THRESHOLD}", C)
 
         if sig['direction'] != 1 or sig['tier'] >= 4:
@@ -286,6 +290,12 @@ class PaperTrader:
             'taker_buy':  np.array([b['taker_buy']  for b in bars]),
         }
 
+    # Last fusion scores — updated every bar for remote diagnostics
+    _last_score: float = 0.0
+    _last_snr:   float = 0.0
+    _last_dir:   int   = 0
+    _last_tier:  int   = 4
+
     def stats(self):
         CF = self._CF
         n      = len(self._trades)
@@ -327,6 +337,14 @@ class PaperTrader:
             'avg_pnl':       round(float(np.mean(pnls)), 4) if pnls else 0.0,
             'equity_final':  round(float(eq[-1]), 2),
             'bars_live':     self._bars,
+            # Diagnostics — last fusion score so remote monitor can see why
+            # signals aren't firing without needing Termux access
+            'last_score':    round(self._last_score, 4),
+            'last_snr':      round(self._last_snr, 2),
+            'last_dir':      self._last_dir,
+            'last_tier':     self._last_tier,
+            'threshold':     float(CF.LONG_THRESHOLD),
+            'snr_min':       float(CF.SNR_MIN),
         }
         for tier in [1, 2, 3]:
             tt = [t for t in self._trades if t['tier'] == tier]
