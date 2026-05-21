@@ -10,7 +10,7 @@ SGF_POLYORD  = 2        # polynomial order (2 = quadratic)
 # ── KdV Soliton ───────────────────────────────────────────────────────────────
 KDV_ALPHA    = 0.1      # nonlinearity — increase for stronger trends
 KDV_BETA     = 0.01     # dispersion — increase for noisier instruments
-SOLITON_BAL  = 0.84      # min nonlinearity/dispersion ratio for confirmation
+SOLITON_BAL  = 0.87      # min nonlinearity/dispersion ratio for confirmation
 SOLITON_WIN  = 20       # bars in soliton window
 
 # ── Reynolds Number ───────────────────────────────────────────────────────────
