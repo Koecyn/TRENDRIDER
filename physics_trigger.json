@@ -1,6 +1,6 @@
 {
-  "id": "p29",
+  "id": "p30",
   "command": "RUN",
   "bash": "",
-  "message": "win=4.4% < 60.0% \u2014 raise CVD_DIV 0.55\u21920.6"
+  "message": "stops too tight for 1m \u2014 MAE_ATR 1.5\u21922.0"
 }
