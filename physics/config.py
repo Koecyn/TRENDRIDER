@@ -36,12 +36,12 @@ DARK_CHARGE_SCALE = 50_000  # normalization divisor for dark vol estimate
 DARK_PARTIAL_KEEP = 0.30    # fraction of pressure remaining after discharge
 
 # ── Signal fusion thresholds ─────────────────────────────────────────────────
-LONG_THRESHOLD  = +0.10
+LONG_THRESHOLD  = +0.08
 SHORT_THRESHOLD = -0.12
 OBI_SIGNAL      = 0.30      # min OBI magnitude to count
 CVD_DIV         = 0.55     # min CVD divergence magnitude to count (ceiling — don't exceed)
 CVD_WINDOW      = 10        # bars for CVD slope comparison
-SNR_MIN         = 4.0       # minimum SGF SNR to trade
+SNR_MIN         = 3.0       # minimum SGF SNR to trade
 
 # ── Conviction tiers ──────────────────────────────────────────────────────────
 TIER1_WH_STRENGTH = 2.0    # water hammer strength threshold for Tier 1
