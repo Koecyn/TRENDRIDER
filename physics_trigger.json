@@ -1,6 +1,6 @@
 {
-  "id": "p22",
+  "id": "p23",
   "command": "RUN",
   "bash": "",
-  "message": "win=4.5% terrible \u2014 raise SNR_MIN 3.25\u21923.5"
+  "message": "win=4.5% \u2014 raise SOLITON_BAL 0.8\u21920.85"
 }
