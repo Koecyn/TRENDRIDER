@@ -1,6 +1,6 @@
 {
-  "id": "p11",
+  "id": "p12",
   "command": "RUN",
   "bash": "",
-  "message": "win=4.5% < 60.0% \u2014 raise SOLITON_BAL 0.75\u21920.8"
+  "message": "sharpe=44.488 win=4.5% n=486 \u2014 no change"
 }
