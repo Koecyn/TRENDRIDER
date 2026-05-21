@@ -268,7 +268,7 @@ def next_iter_id() -> str:
 
 def main():
     log(f"Physics optimizer starting — target Sharpe≥{TARGET_SHARPE} "
-        f"Win≥{TARGET_WIN_PCT}% Trades≥{TARGET_TRADES}", G)
+        f"Win≥{TARGET_WIN_PCT}% TPH≥{TARGET_TPH}", G)
 
     # Initial trigger if missing
     if not TRIGGER_F.exists():
