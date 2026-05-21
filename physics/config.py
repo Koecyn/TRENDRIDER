@@ -63,7 +63,7 @@ KELLY_WARMUP_TRADES = 10    # trades before Kelly activates (use defaults before
 # ── MAE-based stop placement ──────────────────────────────────────────────────
 MAE_PERCENTILE      = 90    # % of winner MAE → stop distance
 MAE_WARMUP_TRADES   = 20    # trades before MAE activates (use ATR fallback)
-MAE_ATR_FALLBACK    = 2.5   # ATR multiplier for fallback stops
+MAE_ATR_FALLBACK    = 3.0   # ATR multiplier for fallback stops
 MAE_ATR_PERIOD      = 14
 
 # ── Data / backtest ───────────────────────────────────────────────────────────
