@@ -1,6 +1,1 @@
-{
-  "id": "p188",
-  "command": "RUN",
-  "bash": "",
-  "message": "win=33.3% \u2014 tighten ascending wave gate 0.78\u21920.81"
-}
+{"id": "p189", "command": "RUN", "bash": "", "message": "manual: raise LONG_THRESHOLD 0.05->0.12, score=0.18 far above gate"}
