@@ -1,6 +1,6 @@
 {
-  "id": "p193",
+  "id": "p194",
   "command": "RUN",
   "bash": "",
-  "message": "win=33.3% \u2014 tighten ascending wave gate 0.9\u21920.92"
+  "message": "win=33.3% < 60.0% \u2014 raise CVD_DIV 0.45\u21920.5"
 }
