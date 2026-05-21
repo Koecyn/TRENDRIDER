@@ -50,8 +50,7 @@ LOG_F       = REPO / "physics_live.log"
 WS_URL = ("wss://stream.binance.us:9443/stream"
           "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms")
 
-WRITE_EVERY_BARS = 1    # write stats on every closed bar (every 1m)
-FETCH_EVERY_S    = 30   # pull param changes from git
+FETCH_EVERY_S = 30   # pull param changes from git
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
 
@@ -160,35 +159,63 @@ class PaperTrader:
     def reload_params(self, CF):
         self._CF = CF
 
+    def tick_price(self, price: float) -> bool:
+        """
+        Called on EVERY intrabar kline update (x=False).
+        Checks stop/target on the live price — don't wait 60s for bar close.
+        Returns True if a trade was closed so the caller can write stats.
+        """
+        if self._open is None:
+            return False
+        t   = self._open
+        cur = price
+        t['mae'] = max(t['mae'], float(t['entry'] - cur))
+        t['mfe'] = max(t['mfe'], float(cur - t['entry']))
+
+        reason = exit_px = None
+        if cur <= t['stop']:     reason, exit_px = 'stop',   t['stop']
+        elif cur >= t['target']: reason, exit_px = 'target', t['target']
+
+        if reason:
+            pnl = (exit_px - t['entry']) / t['entry'] * 100.0
+            t.update(pnl_pct=pnl, exit_price=exit_px,
+                     exit_reason=reason, exit_bar=self._bars)
+            self._pm.on_close(pnl, t['mae'], t['tier'], t['size_usd'])
+            self._trades.append(t)
+            self._open = None
+            col = G if pnl > 0 else R
+            log(f"  [TICK {reason}] pnl={pnl:+.3f}%  tier={t['tier']}", col)
+            return True
+        return False
+
     def on_bar(self, bar: dict, bids, asks, accum):
-        """Process one closed 1m bar. Returns signal dict if a trade was entered."""
+        """
+        Process one closed 1m bar.
+        Stop/target already handled by tick_price() intrabar.
+        This handles: timeout, new signal entry, MAE/MFE tracking, bar counter.
+        Returns signal dict if a trade was entered.
+        """
         from physics import fusion, config as CF
 
         self._bars += 1
         cur = bar['close']
 
-        # ── Manage open trade ─────────────────────────────────────────────
+        # ── Manage open trade (timeout only — stop/target caught by tick_price) ──
         if self._open is not None:
             t = self._open
-            t['mae'] = max(t['mae'], float((t['entry'] - cur)))
-            t['mfe'] = max(t['mfe'], float((cur - t['entry'])))
+            t['mae'] = max(t['mae'], float(t['entry'] - cur))
+            t['mfe'] = max(t['mfe'], float(cur - t['entry']))
 
-            reason = exit_px = None
-            if cur <= t['stop']:     reason, exit_px = 'stop',    t['stop']
-            elif cur >= t['target']: reason, exit_px = 'target',  t['target']
-            elif self._bars - t['bar_idx'] >= self._CF.MAX_HOLD_BARS:
-                reason, exit_px = 'timeout', cur
-
-            if reason:
-                pnl = (exit_px - t['entry']) / t['entry'] * 100.0
-                t.update(pnl_pct=pnl, exit_price=exit_px,
-                         exit_reason=reason, exit_bar=self._bars)
+            if self._bars - t['bar_idx'] >= self._CF.MAX_HOLD_BARS:
+                pnl = (cur - t['entry']) / t['entry'] * 100.0
+                t.update(pnl_pct=pnl, exit_price=cur,
+                         exit_reason='timeout', exit_bar=self._bars)
                 self._pm.on_close(pnl, t['mae'], t['tier'], t['size_usd'])
                 self._trades.append(t)
                 self._open = None
                 col = G if pnl > 0 else R
-                log(f"  [{reason}] pnl={pnl:+.3f}%  "
-                    f"held={self._bars - t['bar_idx']}bars  tier={t['tier']}", col)
+                log(f"  [timeout] pnl={pnl:+.3f}%  "
+                    f"held={self._CF.MAX_HOLD_BARS}bars  tier={t['tier']}", col)
 
         if self._open is not None:
             return None   # one position at a time
@@ -323,9 +350,8 @@ class LiveEngine:
         self._bids: list = []
         self._asks: list = []
 
-        self._bars_since_write = 0
-        self._last_fetch       = 0.0
-        self._running          = True
+        self._last_fetch  = 0.0
+        self._running     = True
 
     def _reload(self):
         """Hot-reload params from updated config.py."""
@@ -337,33 +363,38 @@ class LiveEngine:
             f"SNR={CF.SNR_MIN}  tier3_target={CF.TIER3_TARGET_ATR}×ATR", C)
 
     def _handle_kline(self, k: dict):
-        if not k.get('x', False):
-            return  # bar not closed yet — ignore interim updates
+        is_closed = k.get('x', False)
+        cur_price = float(k['c'])
 
+        # Every intrabar update: check stops/targets on live price immediately
+        trade_closed = self._trader.tick_price(cur_price)
+        if trade_closed:
+            self._write_stats()   # event-driven write on every trade close
+
+        if not is_closed:
+            return   # new entries only on complete bars
+
+        # Bar closed — finalize and run full signal engine
         bar = {
             'ts':        int(k['t']),
             'open':      float(k['o']),
             'high':      float(k['h']),
             'low':       float(k['l']),
-            'close':     float(k['c']),
+            'close':     cur_price,
             'volume':    float(k['v']),
             'taker_buy': float(k['V']),
             'live':      True,
         }
         self._window.append(bar)
 
-        bids = list(self._bids)   # snapshot of current OB
+        bids = list(self._bids)
         asks = list(self._asks)
 
         sig = self._trader.on_bar(bar, bids or None, asks or None, self._accum)
-
         if sig:
             self._log_waveforms(bar, sig, bids)
 
-        self._bars_since_write += 1
-        if self._bars_since_write >= WRITE_EVERY_BARS:
-            self._write_stats()
-            self._bars_since_write = 0
+        self._write_stats()   # always write on bar close
 
     def _handle_depth(self, data: dict):
         self._bids = [(float(p), float(q)) for p, q in data.get('bids', [])]
