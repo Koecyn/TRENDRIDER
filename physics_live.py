@@ -222,10 +222,12 @@ class PaperTrader:
 
         # ── Signal engine (ALL physics + microstructure) ──────────────────
         w = self._window_arrays()
-        if len(w['closes']) < self._CF.WARMUP_BARS:
+        n_bars = len(w['closes'])
+        if n_bars < self._CF.WARMUP_BARS:
+            log(f"  warmup {n_bars}/{self._CF.WARMUP_BARS} bars", C)
             return None
 
-        sl = slice(max(0, len(w['closes']) - 600), len(w['closes']))
+        sl = slice(max(0, n_bars - 600), n_bars)
         p  = w['prices'][sl];   o = w['opens'][sl]
         c  = w['closes'][sl];   v = w['volumes'][sl]
         tb = w['taker_buy'][sl]
@@ -234,6 +236,11 @@ class PaperTrader:
         atr = float(atr_arr[-1]) if atr_arr[-1] > 0 else cur * 0.002
 
         sig = fusion.run(p, o, c, v, tb, accum, bids=bids, asks=asks)
+
+        # Always log score so we can see why signals aren't firing
+        log(f"  score={sig['score']:+.4f}  dir={sig['direction']:+d}  "
+            f"tier={sig['tier']}  snr={sig['snr']:.2f}  "
+            f"threshold={self._CF.LONG_THRESHOLD}", C)
 
         if sig['direction'] != 1 or sig['tier'] >= 4:
             return sig
