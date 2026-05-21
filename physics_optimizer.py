@@ -179,17 +179,14 @@ def run_backtest() -> dict:
 
 def decide(stats: dict) -> dict:
     """
-    Single most impactful parameter change.
-    Priority:
-      0 trades          → lower LONG_THRESHOLD
-      tph < MIN_TPH     → lower LONG_THRESHOLD (frequency gate)
-      tph > MAX_TPH     → raise LONG_THRESHOLD (too noisy)
-      win < 30%         → raise SNR_MIN (terrible quality, filter harder)
-      win < 45%         → raise SOLITON_BAL (stricter wave quality)
-      win < 60%         → raise CVD_DIV (stricter divergence gate)
-      sharpe < 0        → reduce VISC_BASE
-      win >= 60%, sharpe < target → push KDV_ALPHA (amplify edge)
-    Never lower LONG_THRESHOLD below 0.08.
+    Physics-informed tuning priority:
+      1. MAE_ATR_FALLBACK  — stop must be outside 1m noise (target 3.0)
+      2. TIER1_WH_STRENGTH — only genuine trough reflections qualify (target 2.0)
+      3. SOLITON_BAL       — ascending wave must be self-reinforcing (target 0.92)
+      4. SNR_MIN           — filter noise bars (ceiling 4.0)
+      5. CVD_DIV           — divergence gate (ceiling 0.55 — avoid starving signals)
+      6. Trade frequency   — LONG_THRESHOLD ± 0.01 to stay in 2-10 tph band
+      7. KDV_ALPHA         — amplify edge once win≥60%
     """
     n      = stats.get('n_trades', 0)
     sharpe = stats.get('sharpe', -99)
@@ -202,6 +199,26 @@ def decide(stats: dict) -> dict:
     visc      = float(read_param('VISC_BASE') or 0.02)
     snr_min   = float(read_param('SNR_MIN') or 2.0)
     cvd_div   = float(read_param('CVD_DIV') or 0.30)
+    mae_atr   = float(read_param('MAE_ATR_FALLBACK') or 1.5)
+    wh_str    = float(read_param('TIER1_WH_STRENGTH') or 0.5)
+
+    # ── Priority 1: stop distance — 1m BTC noise stops trades before wave develops
+    if mae_atr < 3.0:
+        new = round(min(3.0, mae_atr + 0.5), 1)
+        return {'param': 'MAE_ATR_FALLBACK', 'value': new,
+                'reason': f'stops too tight for 1m — MAE_ATR {mae_atr}→{new}'}
+
+    # ── Priority 2: water hammer trough gate — only genuine reflections
+    if wh_str < 2.0:
+        new = round(min(2.0, wh_str + 0.5), 2)
+        return {'param': 'TIER1_WH_STRENGTH', 'value': new,
+                'reason': f'WH noise trough filter — strength {wh_str}→{new}'}
+
+    # ── Priority 3: soliton wave quality — ascending phase only
+    if sol_bal < 0.92 and win < 40.0:
+        new = round(min(0.92, sol_bal + 0.03), 2)
+        return {'param': 'SOLITON_BAL', 'value': new,
+                'reason': f'win={win:.1f}% — tighten ascending wave gate {sol_bal}→{new}'}
 
     # No trades at all — open the gate
     if n == 0:
@@ -221,31 +238,31 @@ def decide(stats: dict) -> dict:
         return {'param': 'LONG_THRESHOLD', 'value': new,
                 'reason': f'tph={tph:.1f} > {MAX_TPH} — raise threshold {thresh}→{new}'}
 
-    # Win rate terrible — filter harder on SNR
-    if win < 30.0 and snr_min < 3.5:
-        new = round(min(3.5, snr_min + 0.25), 2)
+    # Win still bad — raise SNR (cap at 4.0 to avoid killing all signals)
+    if win < 30.0 and snr_min < 4.0:
+        new = round(min(4.0, snr_min + 0.25), 2)
         return {'param': 'SNR_MIN', 'value': new,
                 'reason': f'win={win:.1f}% terrible — raise SNR_MIN {snr_min}→{new}'}
 
-    # Win rate still bad — raise soliton quality
-    if win < 45.0 and sol_bal < 0.85:
-        new = round(min(0.85, sol_bal + 0.05), 2)
-        return {'param': 'SOLITON_BAL', 'value': new,
-                'reason': f'win={win:.1f}% — raise SOLITON_BAL {sol_bal}→{new}'}
-
-    # Win rate below target — stricter CVD divergence confirmation
-    if win < TARGET_WIN_PCT and cvd_div < 0.65:
-        new = round(min(0.65, cvd_div + 0.05), 2)
+    # Win below target — CVD gate, capped at 0.55 to avoid signal starvation
+    if win < TARGET_WIN_PCT and cvd_div < 0.55:
+        new = round(min(0.55, cvd_div + 0.05), 2)
         return {'param': 'CVD_DIV', 'value': new,
                 'reason': f'win={win:.1f}% < {TARGET_WIN_PCT}% — raise CVD_DIV {cvd_div}→{new}'}
 
-    # Negative sharpe — reduce friction so Darcy signals are more active
+    # CVD over ceiling — roll it back, signals are starved
+    if cvd_div > 0.55:
+        new = 0.55
+        return {'param': 'CVD_DIV', 'value': new,
+                'reason': f'CVD_DIV={cvd_div} over ceiling — roll back to {new}'}
+
+    # Negative sharpe — reduce friction
     if sharpe < 0 and visc > 0.005:
         new = round(max(0.005, visc * 0.8), 4)
         return {'param': 'VISC_BASE', 'value': new,
                 'reason': f'sharpe={sharpe:.3f} — reduce VISC_BASE {visc}→{new}'}
 
-    # Good win rate but below sharpe target — amplify nonlinearity
+    # Good win rate, below sharpe target — amplify nonlinearity
     if win >= TARGET_WIN_PCT and 0 < sharpe < TARGET_SHARPE and kdv_alpha < 0.25:
         new = round(min(0.25, kdv_alpha + 0.02), 3)
         return {'param': 'KDV_ALPHA', 'value': new,
