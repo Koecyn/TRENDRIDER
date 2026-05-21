@@ -50,7 +50,7 @@ LOG_F       = REPO / "physics_live.log"
 WS_URL = ("wss://stream.binance.us:9443/stream"
           "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms")
 
-WRITE_EVERY_BARS = 2    # write stats after every N closed bars (~2 min)
+WRITE_EVERY_BARS = 1    # write stats on every closed bar (every 1m)
 FETCH_EVERY_S    = 30   # pull param changes from git
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
