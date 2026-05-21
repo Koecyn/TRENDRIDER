@@ -32,7 +32,7 @@ CSV_PATH    = REPO / "backtester" / "btc_mar30.csv"
 LOG_F       = REPO / "backtester" / "optimizer.log"
 
 TARGET_SHARPE  = 2.5
-TARGET_WIN_PCT = 40.0    # breakout strategies structurally hit 38-45%; 60% was unrealistic
+TARGET_WIN_PCT = 60.0    # must win 60% of trades — not negotiable
 MILESTONE      = 1.6
 MIN_TRADES     = 10
 TARGET_TRADES  = 120     # 5/day minimum — absorb liquidity, not cherry-pick
