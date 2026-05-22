@@ -47,6 +47,7 @@ DATA_BRANCH = "data/live"
 RESULTS_F   = REPO / "physics_live_results.json"   # separate from optimizer
 TRIGGER_F   = REPO / "physics_live_trigger.json"
 LOG_F       = REPO / "physics_live.log"
+TRADE_F     = REPO / "physics_live_trade.json"     # open trade persisted across restarts
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
           "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms")
@@ -192,6 +193,29 @@ class PaperTrader:
         self._last_bids_n = 0    # depth diagnostic
         self._last_cav    = {}   # cavitation breakdown
         self._last_htf    = {}   # HTF regime context
+        self._restore_open_trade()
+
+    def _restore_open_trade(self):
+        """Reload open trade from disk if engine restarted mid-trade."""
+        try:
+            if TRADE_F.exists():
+                t = json.loads(TRADE_F.read_text())
+                self._open = t
+                self._bars = t.get('bar_idx', 0)
+                log(f"  [RESTORE] open trade reloaded: entry={t['entry']:.2f}  "
+                    f"stop={t['stop']:.2f}  target={t['target']:.2f}  tier={t['tier']}", Y)
+        except Exception as e:
+            log(f"  [RESTORE] failed to reload trade state: {e}", Y)
+
+    def _save_open_trade(self):
+        """Persist open trade to disk so restarts don't lose it."""
+        try:
+            if self._open:
+                TRADE_F.write_text(json.dumps(self._open))
+            elif TRADE_F.exists():
+                TRADE_F.unlink()
+        except Exception:
+            pass
 
     def reload_params(self, CF):
         self._CF = CF
@@ -230,6 +254,7 @@ class PaperTrader:
             self._pm.on_close(pnl, t['mae'], t['tier'], t['size_usd'])
             self._trades.append(t)
             self._open = None
+            self._save_open_trade()
             col = G if pnl > 0 else R
             log(f"  [TICK {reason}] pnl={pnl:+.3f}%  tier={t['tier']}", col)
             return True
@@ -262,6 +287,7 @@ class PaperTrader:
                 self._pm.on_close(pnl, t['mae'], t['tier'], t['size_usd'])
                 self._trades.append(t)
                 self._open = None
+                self._save_open_trade()
                 col = G if pnl > 0 else R
                 log(f"  [timeout] pnl={pnl:+.3f}%  "
                     f"held={self._CF.MAX_HOLD_BARS}bars  tier={t['tier']}", col)
@@ -385,6 +411,7 @@ class PaperTrader:
             'mae':        0.0,
             'mfe':        0.0,
         }
+        self._save_open_trade()
         return sig
 
     # window stored by LiveEngine and passed in — keep a ref
