@@ -201,7 +201,10 @@ class PaperTrader:
             if TRADE_F.exists():
                 t = json.loads(TRADE_F.read_text())
                 self._open = t
-                self._bars = t.get('bar_idx', 0)
+                # Reset bar_idx to current bar count so timeout is counted
+                # from restore time, not original open — prevents indefinite hold
+                # across multiple restarts.
+                t['bar_idx'] = self._bars
                 log(f"  [RESTORE] open trade reloaded: entry={t['entry']:.2f}  "
                     f"stop={t['stop']:.2f}  target={t['target']:.2f}  tier={t['tier']}", Y)
         except Exception as e:
