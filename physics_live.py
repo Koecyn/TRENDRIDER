@@ -484,12 +484,15 @@ class LiveEngine:
 
         self._last_fetch  = 0.0
         self._running     = True
+        self._htf_mod     = None   # cached after each reload
 
     def _reload(self):
         """Hot-reload params from updated config.py."""
         flush_physics()
         from physics import config as CF
-        self._CF = CF
+        from physics import htf as HTF   # pre-warm so next packet doesn't fail
+        self._CF      = CF
+        self._htf_mod = HTF
         self._trader.reload_params(CF)
         log(f"Params reloaded: threshold={CF.LONG_THRESHOLD}  "
             f"SNR={CF.SNR_MIN}  tier3_target={CF.TIER3_TARGET_ATR}×ATR", C)
@@ -551,8 +554,10 @@ class LiveEngine:
         bars_1m  = list(self._window)
 
         if any(len(b) >= 4 for b in [bars_1h, bars_4h, bars_5m, bars_10m, bars_1m]):
-            from physics import htf as HTF
-            self._htf_ctx = HTF.regime(
+            if self._htf_mod is None:
+                from physics import htf as HTF
+                self._htf_mod = HTF
+            self._htf_ctx = self._htf_mod.regime(
                 cur, bars_1h, bars_4h,
                 bars_1m=bars_1m, bars_5m=bars_5m, bars_10m=bars_10m,
             )
@@ -637,7 +642,8 @@ class LiveEngine:
         total5   = bid_vol5 + ask_vol5
         if total5 > 0:
             obi = (bid_vol5 - ask_vol5) / total5
-            if abs(obi) > 0.40:   # extreme imbalance — dark pool absorbing
+            # Require OBI > 0.60 AND >= 1.0 BTC total — filters noise on thin books
+            if abs(obi) > 0.60 and total5 >= 1.0:
                 side = 'BID' if obi > 0 else 'ASK'
                 log(f"  [DARK] {side} wall OBI={obi:+.3f}  "
                     f"bid5={bid_vol5:.2f}  ask5={ask_vol5:.2f}", Y)
@@ -694,7 +700,7 @@ class LiveEngine:
             f"n={s['n_trades']}", col)
 
         result = {
-            'ts':         datetime.utcnow().isoformat() + 'Z',
+            'ts':         datetime.now(timezone.utc).isoformat(),
             'trigger_id': trigger_id,
             'status':     'live',
             'stats':      s,
