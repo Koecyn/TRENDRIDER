@@ -292,6 +292,11 @@ class PaperTrader:
                 log(f"  [timeout] pnl={pnl:+.3f}%  "
                     f"held={self._CF.MAX_HOLD_BARS}bars  tier={t['tier']}", col)
 
+        # Always update HTF context — needed for stop/target logic and logging
+        # even when a trade is open (early-exit path below skips signal engine).
+        if htf_ctx:
+            self._last_htf = htf_ctx
+
         if self._open is not None:
             return None   # one position at a time
 
@@ -319,9 +324,8 @@ class PaperTrader:
         self._last_dir    = int(sig.get('direction', 0))
         self._last_tier   = int(sig.get('tier', 4))
 
-        # ── HTF regime context (pre-computed every kline packet — always live) ─
+        # ── HTF regime context log (already stored above before early-exit) ─
         if htf_ctx:
-            self._last_htf = htf_ctx
             log(f"  HTF 1m={htf_ctx.get('trend_1m','?')} "
                 f"5m={htf_ctx.get('trend_5m','?')} "
                 f"15m={htf_ctx.get('trend_15m','?')} "
