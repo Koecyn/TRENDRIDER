@@ -27,6 +27,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -55,6 +56,11 @@ FETCH_EVERY_S = 30   # pull param changes from git
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; B='\033[1m'; Z='\033[0m'
 
 ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+# Serialize all git operations — _push_results and _fetch_params run in
+# separate thread executors; concurrent git calls corrupt repo state and
+# cause spurious physics_live.py-changed detections → restart loops.
+_GIT_LOCK = threading.Lock()
 
 
 def ts_str():
@@ -798,35 +804,36 @@ class LiveEngine:
     def _push_results(self, content: str):
         """Runs in a thread executor — never blocks the WebSocket event loop."""
         rel = str(RESULTS_F.relative_to(REPO))
-        try:
-            git("stash")
-            git("fetch", "origin", DATA_BRANCH)
-            r = git("checkout", "-B", DATA_BRANCH, f"origin/{DATA_BRANCH}")
-            if r.returncode != 0:
-                log(f"  push: checkout data/live failed: {r.stderr[:80]}", R)
+        with _GIT_LOCK:
+            try:
+                git("stash")
+                git("fetch", "origin", DATA_BRANCH)
+                r = git("checkout", "-B", DATA_BRANCH, f"origin/{DATA_BRANCH}")
+                if r.returncode != 0:
+                    log(f"  push: checkout data/live failed: {r.stderr[:80]}", R)
+                    git("checkout", CODE_BRANCH)
+                    git("stash", "pop")
+                    RESULTS_F.write_text(content)
+                    return
+                RESULTS_F.write_text(content)
+                git("add", rel)
+                git("commit", "--allow-empty", "-m", f"live {ts_str()}")
+                pushed = False
+                for wait in [0, 2, 4, 8]:
+                    time.sleep(wait)
+                    r = git("push", "-u", "origin", DATA_BRANCH, "--force")
+                    if r.returncode == 0:
+                        pushed = True
+                        break
+                    log(f"  push attempt failed: {r.stderr[:60]}", Y)
+                if not pushed:
+                    log("  push: all attempts failed — optimizer reads from local file", R)
+            except Exception as e:
+                log(f"  push error: {e}", R)
+            finally:
                 git("checkout", CODE_BRANCH)
                 git("stash", "pop")
-                RESULTS_F.write_text(content)
-                return
-            RESULTS_F.write_text(content)
-            git("add", rel)
-            git("commit", "--allow-empty", "-m", f"live {ts_str()}")
-            pushed = False
-            for wait in [0, 2, 4, 8]:
-                time.sleep(wait)
-                r = git("push", "-u", "origin", DATA_BRANCH, "--force")
-                if r.returncode == 0:
-                    pushed = True
-                    break
-                log(f"  push attempt failed: {r.stderr[:60]}", Y)
-            if not pushed:
-                log("  push: all attempts failed — optimizer reads from local file", R)
-        except Exception as e:
-            log(f"  push error: {e}", R)
-        finally:
-            git("checkout", CODE_BRANCH)
-            git("stash", "pop")
-            RESULTS_F.write_text(content)   # restore local copy
+                RESULTS_F.write_text(content)   # restore local copy
 
     async def _fetch_params(self):
         """Pull latest params from remote (every FETCH_EVERY_S seconds).
@@ -839,10 +846,11 @@ class LiveEngine:
         self._last_fetch = now
 
         def _pull():
-            git("fetch", "origin", CODE_BRANCH, "--quiet")
-            r = git("diff", f"HEAD..origin/{CODE_BRANCH}", "--name-only")
-            changed = set(r.stdout.strip().split('\n')) if r.stdout.strip() else set()
-            git("reset", "--hard", f"origin/{CODE_BRANCH}")
+            with _GIT_LOCK:
+                git("fetch", "origin", CODE_BRANCH, "--quiet")
+                r = git("diff", f"HEAD..origin/{CODE_BRANCH}", "--name-only")
+                changed = set(r.stdout.strip().split('\n')) if r.stdout.strip() else set()
+                git("reset", "--hard", f"origin/{CODE_BRANCH}")
             return changed
 
         changed = await asyncio.get_event_loop().run_in_executor(None, _pull)
