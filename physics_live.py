@@ -334,15 +334,26 @@ class PaperTrader:
             return sig
 
         # ── HTF entry gate ────────────────────────────────────────────────────
+        # Standard signal (score >= threshold, dir=1): physics already confirmed —
+        # bypass reversal gate. The reversal gate is only for sub-threshold entries
+        # where we need extra microstructure confirmation.
+        standard_signal = (self._last_score >= CF.LONG_THRESHOLD and
+                           sig['direction'] == 1)
+
         # Depth signals (intra-bar) lead the physics wave and fusion-level OBI.
         # If either the pre-flip or reversal window is active AND depth confirms
         # accumulation, bypass the fusion WH/CVD/OBI gate entirely.
         depth_confirmed = bar_ask_cleared or bar_obi_bull >= 0.25
-        if depth_confirmed and (preflip_ok or reversal_ok):
+
+        if standard_signal or (depth_confirmed and (preflip_ok or reversal_ok)):
             allowed = True
-            reason  = (f"depth confirm: "
-                       f"ask_cleared={bar_ask_cleared}  obi_bull={bar_obi_bull:.2f}")
-            log(f"  [PRE-FLIP] {reason}", G)
+            if standard_signal:
+                reason = f"standard signal score={self._last_score:+.4f}"
+            else:
+                reason = (f"depth confirm: "
+                          f"ask_cleared={bar_ask_cleared}  obi_bull={bar_obi_bull:.2f}")
+            if not standard_signal:
+                log(f"  [PRE-FLIP] {reason}", G)
         else:
             from physics import htf as HTF
             allowed, reason = HTF.allows_entry(sig, htf_ctx)
