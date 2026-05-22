@@ -641,47 +641,46 @@ class LiveEngine:
         new_asks = [(float(p), float(q)) for p, q in data.get('asks', [])]
 
         # Absorption measurement before overwriting current snapshot.
-        # Each L20 update is a full replacement — compare qty changes per level.
+        # Structural distinction — filled vs pulled is about spread movement:
+        #
+        #   FILLED: the spread moved THROUGH the level — the level is now
+        #           behind the new best bid/ask. Price had to cross it to get
+        #           where it is now. Takers consumed it.
+        #
+        #   PULLED: the level decreased/vanished but the spread did NOT move
+        #           through it — price never reached it. Maker cancelled.
+        #
+        # Ask side rule: price < new_best_ask → spread stepped past it → FILLED
+        #                price >= new_best_ask → spread didn't reach it → PULLED
+        # Bid side rule: price > new_best_bid → spread stepped past it → FILLED
+        #                price <= new_best_bid → spread didn't reach it → PULLED
         if self._bids and self._asks and new_bids and new_asks:
-            best_bid = new_bids[0][0]
-            best_ask = new_asks[0][0]
-            tol = 0.0005   # within 0.05% of spread = "at level" (microstructure)
+            new_best_ask = new_asks[0][0]
+            new_best_bid = new_bids[0][0]
 
-            # Ask side: qty that left since last snapshot
+            # Ask side
             prev_ask = {p: q for p, q in self._asks}
-            seen_ask = {p for p, q in new_asks}
-            for price, new_qty in new_asks:
-                prev_qty = prev_ask.get(price, 0.0)
+            new_ask_map = {p: q for p, q in new_asks}
+            for price, prev_qty in prev_ask.items():
+                new_qty = new_ask_map.get(price, 0.0)
                 if prev_qty > new_qty:
                     delta = prev_qty - new_qty
-                    if abs(price - best_ask) / best_ask < tol:
-                        self._ask_filled += delta   # taker bought here
-                    else:
-                        self._ask_pulled += delta   # maker cancelled
-            for price, qty in self._asks:            # levels that vanished
-                if price not in seen_ask:
-                    if abs(price - best_ask) / best_ask < tol:
-                        self._ask_filled += qty
-                    else:
-                        self._ask_pulled += qty
+                    if price < new_best_ask:    # spread moved above this level
+                        self._ask_filled += delta
+                    else:                        # spread still at/above — maker pulled
+                        self._ask_pulled += delta
 
             # Bid side
             prev_bid = {p: q for p, q in self._bids}
-            seen_bid = {p for p, q in new_bids}
-            for price, new_qty in new_bids:
-                prev_qty = prev_bid.get(price, 0.0)
+            new_bid_map = {p: q for p, q in new_bids}
+            for price, prev_qty in prev_bid.items():
+                new_qty = new_bid_map.get(price, 0.0)
                 if prev_qty > new_qty:
                     delta = prev_qty - new_qty
-                    if abs(price - best_bid) / best_bid < tol:
-                        self._bid_filled += delta   # taker sold here
-                    else:
+                    if price > new_best_bid:    # spread moved below this level
+                        self._bid_filled += delta
+                    else:                        # spread still at/below — maker pulled
                         self._bid_pulled += delta
-            for price, qty in self._bids:
-                if price not in seen_bid:
-                    if abs(price - best_bid) / best_bid < tol:
-                        self._bid_filled += qty
-                    else:
-                        self._bid_pulled += qty
 
         self._bids = new_bids
         self._asks = new_asks
