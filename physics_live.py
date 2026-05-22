@@ -235,7 +235,8 @@ class PaperTrader:
             return True
         return False
 
-    def on_bar(self, bar: dict, bids, asks, accum, htf_ctx: dict = None):
+    def on_bar(self, bar: dict, bids, asks, accum, htf_ctx: dict = None,
+               bar_ask_cleared: bool = False, bar_obi_bull: float = 0.0):
         """
         Process one closed 1m bar.
         Stop/target already handled by tick_price() intrabar.
@@ -315,23 +316,45 @@ class PaperTrader:
             score_abs >= CF.HTF_REVERSAL_MIN_SCORE
         )
 
-        if not reversal_ok:
+        # Pre-flip entry: physics saturated bearish at support + depth confirms
+        # accumulation (asks being pulled / bid OBI loading) before dir flips.
+        # The depth signals lead the physics wave — entering here catches the
+        # bottom of the upswing instead of the middle.
+        preflip_ok = (
+            htf_ctx is not None and
+            htf_ctx['reversal_setup'] and
+            self._last_score <= -CF.LONG_THRESHOLD and
+            (bar_ask_cleared or bar_obi_bull >= 0.40)
+        )
+
+        if not reversal_ok and not preflip_ok:
             if sig['direction'] != 1 or sig['tier'] >= 4:
                 return sig
         if sig['snr'] < self._CF.SNR_MIN:
             return sig
 
         # ── HTF entry gate ────────────────────────────────────────────────────
-        from physics import htf as HTF
-        allowed, reason = HTF.allows_entry(sig, htf_ctx)
+        if preflip_ok and not reversal_ok:
+            # Depth-confirmed pre-flip — microstructure leads, skip fusion OBI check
+            allowed = True
+            reason  = (f"pre-flip depth confirm: "
+                       f"ask_cleared={bar_ask_cleared}  obi_bull={bar_obi_bull:.2f}")
+            log(f"  [PRE-FLIP] {reason}", G)
+        else:
+            from physics import htf as HTF
+            allowed, reason = HTF.allows_entry(sig, htf_ctx)
         if not allowed:
             log(f"  [HTF block] {reason}", Y)
             return sig
 
+        # Pre-flip entries use tier=2: depth-confirmed but physics wave hasn't
+        # turned yet — size conservatively until the wave confirms.
+        entry_tier = 2 if (preflip_ok and not reversal_ok) else sig['tier']
+
         entry  = cur
-        stop   = self._pm.entry_stop(entry, +1, atr, sig['tier'])
-        target = self._pm.entry_target(entry, stop, +1, sig['tier'], atr)
-        size   = self._pm.size(sig['tier'], sig['confidence'])
+        stop   = self._pm.entry_stop(entry, +1, atr, entry_tier)
+        target = self._pm.entry_target(entry, stop, +1, entry_tier, atr)
+        size   = self._pm.size(entry_tier, sig['confidence'])
 
         self._open = {
             'bar_idx':    self._bars,
@@ -340,7 +363,7 @@ class PaperTrader:
             'entry':      entry,
             'stop':       stop,
             'target':     target,
-            'tier':       sig['tier'],
+            'tier':       entry_tier,
             'size_usd':   size,
             'confidence': sig['confidence'],
             'mae':        0.0,
@@ -494,6 +517,11 @@ class LiveEngine:
         self._last_dark_side: str   = ''
         self._last_dark_obi:  float = 0.0
 
+        # Intra-bar depth signal flags — leading indicators for pre-flip entries.
+        # Set during the bar by _handle_depth(); passed to on_bar(); reset at bar close.
+        self._bar_ask_cleared: bool  = False  # [CLEAR ASK] fired this bar
+        self._bar_obi_bull:    float = 0.0    # peak bullish depth OBI this bar
+
         # Absorption tracking — filled vs cancelled volume per bar.
         # Filled: qty decreases at level currently AT the spread (taker hit it).
         # Pulled: qty decreases at level AWAY from spread (maker cancelled).
@@ -615,7 +643,9 @@ class LiveEngine:
 
         sig = self._trader.on_bar(
             bar, bids or None, asks or None, self._accum,
-            htf_ctx=self._htf_ctx,      # live regime — already current
+            htf_ctx=self._htf_ctx,
+            bar_ask_cleared=self._bar_ask_cleared,
+            bar_obi_bull=self._bar_obi_bull,
         )
         if sig:
             self._log_waveforms(bar, sig, bids)
@@ -631,6 +661,8 @@ class LiveEngine:
                 f"net={net:+.4f}BTC", Y)
         self._bid_filled = self._ask_filled = 0.0
         self._bid_pulled = self._ask_pulled = 0.0
+        self._bar_ask_cleared = False
+        self._bar_obi_bull    = 0.0
 
         # Reset peak OB tracking for the next bar
         self._peak_bid_wall = 0.0
@@ -683,6 +715,7 @@ class LiveEngine:
                             log(f"  [CLEAR ASK] {delta:.4f}BTC pulled "
                                 f"({pull_pct:.0%} of level @{price:.2f}) "
                                 f"→ path opened UPSIDE", G)
+                            self._bar_ask_cleared = True
 
             # Bid side
             prev_bid = {p: q for p, q in self._bids}
@@ -725,6 +758,8 @@ class LiveEngine:
         total5   = bid_vol5 + ask_vol5
         if total5 > 0:
             obi = (bid_vol5 - ask_vol5) / total5
+            if obi > 0:
+                self._bar_obi_bull = max(self._bar_obi_bull, obi)
             if abs(obi) > 0.40:
                 side = 'BID' if obi > 0 else 'ASK'
                 if side != self._last_dark_side or abs(obi - self._last_dark_obi) > 0.05:
