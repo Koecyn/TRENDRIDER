@@ -225,15 +225,15 @@ class PaperTrader:
             return True
         return False
 
-    def on_bar(self, bar: dict, bids, asks, accum,
-               htf_1h: list = None, htf_4h: list = None):
+    def on_bar(self, bar: dict, bids, asks, accum, htf_ctx: dict = None):
         """
         Process one closed 1m bar.
         Stop/target already handled by tick_price() intrabar.
-        This handles: timeout, new signal entry, MAE/MFE tracking, bar counter.
-        Returns signal dict if a trade was entered.
+        htf_ctx: pre-computed regime from _update_live_htf() — reflects the
+                 bar's live high/low, updated on every kline packet not just
+                 bar close.
         """
-        from physics import fusion, config as CF, htf as HTF
+        from physics import fusion, config as CF
 
         self._bars += 1
         cur = bar['close']
@@ -282,10 +282,8 @@ class PaperTrader:
         self._last_dir    = int(sig.get('direction', 0))
         self._last_tier   = int(sig.get('tier', 4))
 
-        # ── HTF regime context ────────────────────────────────────────────────
-        htf_ctx = None
-        if (htf_1h and len(htf_1h) >= 4) or (htf_4h and len(htf_4h) >= 4):
-            htf_ctx = HTF.regime(cur, htf_1h or [], htf_4h or [])
+        # ── HTF regime context (pre-computed every kline packet — always live) ─
+        if htf_ctx:
             self._last_htf = htf_ctx
             log(f"  HTF 1h={htf_ctx['trend_1h']} 4h={htf_ctx['trend_4h']}  "
                 f"bias={htf_ctx['bias']:+.2f}  "
@@ -311,6 +309,7 @@ class PaperTrader:
             return sig
 
         # ── HTF entry gate ────────────────────────────────────────────────────
+        from physics import htf as HTF
         allowed, reason = HTF.allows_entry(sig, htf_ctx)
         if not allowed:
             log(f"  [HTF block] {reason}", Y)
@@ -458,11 +457,16 @@ class LiveEngine:
         self._peak_bids: list = []
         self._peak_asks: list = []
 
-        # HTF bars — seeded via REST at startup, updated as live candles close
-        self._htf_1h: list = []
-        self._htf_4h: list = []
-        self._last_1h_ts: int = 0
-        self._last_4h_ts: int = 0
+        # HTF bars — seeded via REST, updated from live stream on every packet.
+        # _htf_1h/_htf_4h: completed candles.
+        # _live_1h/_live_4h: running partial candle — updated every kline push
+        # so htf.regime() always reflects the current bar's high/low, not a
+        # 60-second-old snapshot.
+        self._htf_1h: list  = []
+        self._htf_4h: list  = []
+        self._live_1h: dict = {}   # partial 1h bar (ts_slot, open, high, low, close)
+        self._live_4h: dict = {}   # partial 4h bar
+        self._htf_ctx: dict = {}   # latest regime — recomputed every kline packet
 
         self._last_fetch  = 0.0
         self._running     = True
@@ -476,16 +480,76 @@ class LiveEngine:
         log(f"Params reloaded: threshold={CF.LONG_THRESHOLD}  "
             f"SNR={CF.SNR_MIN}  tier3_target={CF.TIER3_TARGET_ATR}×ATR", C)
 
+    def _update_live_htf(self, k: dict):
+        """
+        Update running 1h and 4h partial bars from every kline packet.
+        Called on EVERY push (x=False and x=True) so htf.regime() always
+        sees the current bar's live high/low/close, not a 60-second snapshot.
+
+        When a new 1h/4h slot starts, the completed candle is committed
+        to the historical list and the partial bar is reset.
+        """
+        from physics import htf as HTF
+        ts_ms   = int(k['t'])
+        h1_slot = ts_ms // 3_600_000
+        h4_slot = ts_ms // 14_400_000
+        cur     = float(k['c'])
+
+        for slot, key, live_attr, hist_attr, maxbars in [
+            (h1_slot, '1h', '_live_1h', '_htf_1h', 100),
+            (h4_slot, '4h', '_live_4h', '_htf_4h', 40),
+        ]:
+            live = getattr(self, live_attr)
+            hist = getattr(self, hist_attr)
+
+            if not live or live.get('slot') != slot:
+                # New candle started — commit the completed one if we had one
+                if live:
+                    hist.append({
+                        'ts':    live['ts'],
+                        'open':  live['open'],
+                        'high':  live['high'],
+                        'low':   live['low'],
+                        'close': live['close'],
+                    })
+                    if len(hist) > maxbars * 2:
+                        setattr(self, hist_attr, hist[-maxbars:])
+                setattr(self, live_attr, {
+                    'slot':  slot,
+                    'ts':    ts_ms,
+                    'open':  float(k['o']),
+                    'high':  float(k['h']),
+                    'low':   float(k['l']),
+                    'close': cur,
+                })
+            else:
+                # Same candle — update running high/low/close
+                live['high']  = max(live['high'],  float(k['h']))
+                live['low']   = min(live['low'],   float(k['l']))
+                live['close'] = cur
+
+        # Build full 1h/4h arrays = historical + current partial
+        bars_1h = list(self._htf_1h) + ([self._live_1h] if self._live_1h else [])
+        bars_4h = list(self._htf_4h) + ([self._live_4h] if self._live_4h else [])
+
+        if len(bars_1h) >= 4 or len(bars_4h) >= 4:
+            from physics import htf as HTF
+            self._htf_ctx = HTF.regime(cur, bars_1h, bars_4h)
+
     def _handle_kline(self, k: dict):
         is_closed = k.get('x', False)
         cur_price = float(k['c'])
 
-        # Every update: check stops/targets against live price immediately
+        # Every packet: stop/target check on live price
         trade_closed = self._trader.tick_price(cur_price)
         if trade_closed:
             self._write_stats()
 
-        # Build the current bar state (partial or complete)
+        # Every packet: update live HTF partial bars + recompute regime.
+        # This means htf.regime() always reflects the bar's current high/low,
+        # not a 60-second-old snapshot.
+        self._update_live_htf(k)
+
         bar = {
             'ts':        int(k['t']),
             'open':      float(k['o']),
@@ -501,48 +565,20 @@ class LiveEngine:
         asks = list(self._peak_asks or self._asks)
 
         if not is_closed:
-            # Intrabar: run wave equations on historical window + current partial
-            # bar so the hydraulic accumulator and soliton charge in real time,
-            # not just once per minute at bar close.
             self._trader.scan_intrabar(bar, bids or None, asks or None, self._accum)
             return
 
-        # Bar closed — commit to permanent window and run full signal engine
+        # Bar closed — commit and run full signal engine (fusion + accumulator)
         self._window.append(bar)
-
-        # Update HTF bars as live candles close (no extra REST calls)
-        ts_ms   = int(k['t'])
-        h1_slot = ts_ms // 3_600_000     # hour bucket
-        h4_slot = ts_ms // 14_400_000    # 4h bucket
-        if h1_slot != self._last_1h_ts and self._last_1h_ts != 0:
-            # A new 1h candle just closed — append it
-            self._htf_1h.append({
-                'ts': ts_ms, 'open': float(k['o']), 'high': float(k['h']),
-                'low': float(k['l']), 'close': cur_price,
-                'volume': float(k['v']),
-            })
-            if len(self._htf_1h) > 200:
-                self._htf_1h = self._htf_1h[-100:]
-        self._last_1h_ts = h1_slot
-
-        if h4_slot != self._last_4h_ts and self._last_4h_ts != 0:
-            self._htf_4h.append({
-                'ts': ts_ms, 'open': float(k['o']), 'high': float(k['h']),
-                'low': float(k['l']), 'close': cur_price,
-                'volume': float(k['v']),
-            })
-            if len(self._htf_4h) > 60:
-                self._htf_4h = self._htf_4h[-30:]
-        self._last_4h_ts = h4_slot
 
         sig = self._trader.on_bar(
             bar, bids or None, asks or None, self._accum,
-            htf_1h=self._htf_1h, htf_4h=self._htf_4h,
+            htf_ctx=self._htf_ctx,      # live regime — already current
         )
         if sig:
             self._log_waveforms(bar, sig, bids)
 
-        # Reset peak tracking for the next bar
+        # Reset peak OB tracking for the next bar
         self._peak_bid_wall = 0.0
         self._peak_ask_wall = 0.0
         self._peak_bids     = []
