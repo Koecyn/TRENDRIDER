@@ -149,12 +149,12 @@ def bootstrap_rest(symbol: str, n: int = 300) -> list:
 
 
 def bootstrap_htf(symbol: str) -> dict:
-    """Fetch 5m, 10m, 1h, and 4h bars for immediate HTF regime context."""
+    """Fetch 5m, 15m, 1h, and 4h bars for immediate HTF regime context."""
     from physics import data as D, config as CF
-    htf = {'5m': [], '10m': [], '1h': [], '4h': []}
+    htf = {'5m': [], '15m': [], '1h': [], '4h': []}
     for interval, n_bars, key in [
         ('5m',  CF.HTF_5M_BARS,  '5m'),
-        ('10m', CF.HTF_10M_BARS, '10m'),
+        ('15m', CF.HTF_15M_BARS, '15m'),
         ('1h',  CF.HTF_1H_BARS,  '1h'),
         ('4h',  CF.HTF_4H_BARS,  '4h'),
     ]:
@@ -291,7 +291,7 @@ class PaperTrader:
             self._last_htf = htf_ctx
             log(f"  HTF 1m={htf_ctx.get('trend_1m','?')} "
                 f"5m={htf_ctx.get('trend_5m','?')} "
-                f"10m={htf_ctx.get('trend_10m','?')} "
+                f"15m={htf_ctx.get('trend_15m','?')} "
                 f"1h={htf_ctx['trend_1h']} 4h={htf_ctx['trend_4h']}  "
                 f"bias={htf_ctx['bias']:+.2f}  "
                 f"sup={htf_ctx['at_support']}  rev={htf_ctx['reversal_setup']}  "
@@ -423,7 +423,7 @@ class PaperTrader:
             # HTF regime
             'htf_trend_1m':   self._last_htf.get('trend_1m',  'none'),
             'htf_trend_5m':   self._last_htf.get('trend_5m',  'none'),
-            'htf_trend_10m':  self._last_htf.get('trend_10m', 'none'),
+            'htf_trend_15m':  self._last_htf.get('trend_15m', 'none'),
             'htf_trend_1h':   self._last_htf.get('trend_1h',  'none'),
             'htf_trend_4h':   self._last_htf.get('trend_4h',  'none'),
             'htf_bias':       round(float(self._last_htf.get('bias', 0)), 3),
@@ -473,11 +473,11 @@ class LiveEngine:
         # htf.regime() always reflects the current bar's live high/low.
         # 1m bars come from self._window (closed bars only — no separate live).
         self._htf_5m:   list  = []
-        self._htf_10m:  list  = []
+        self._htf_15m:  list  = []
         self._htf_1h:   list  = []
         self._htf_4h:   list  = []
         self._live_5m:  dict  = {}
-        self._live_10m: dict  = {}
+        self._live_15m: dict  = {}
         self._live_1h:  dict  = {}
         self._live_4h:  dict  = {}
         self._htf_ctx:  dict  = {}   # latest regime — recomputed every kline packet
@@ -501,7 +501,7 @@ class LiveEngine:
 
     def _update_live_htf(self, k: dict):
         """
-        Update 5m / 10m / 1h / 4h partial bars from every kline packet.
+        Update 5m / 15m / 1h / 4h partial bars from every kline packet.
         Called on EVERY push so htf.regime() always reflects the current
         bar's live high/low/close, not a 60-second snapshot.
 
@@ -509,14 +509,14 @@ class LiveEngine:
         """
         ts_ms    = int(k['t'])
         m5_slot  = ts_ms // 300_000
-        m10_slot = ts_ms // 600_000
+        m10_slot = ts_ms // 900_000
         h1_slot  = ts_ms // 3_600_000
         h4_slot  = ts_ms // 14_400_000
         cur      = float(k['c'])
 
         for slot, live_attr, hist_attr, maxbars in [
             (m5_slot,  '_live_5m',  '_htf_5m',  600),
-            (m10_slot, '_live_10m', '_htf_10m', 300),
+            (m10_slot, '_live_15m', '_htf_15m', 300),
             (h1_slot,  '_live_1h',  '_htf_1h',  100),
             (h4_slot,  '_live_4h',  '_htf_4h',  40),
         ]:
@@ -549,19 +549,19 @@ class LiveEngine:
 
         # All TFs = historical + current partial bar
         bars_5m  = list(self._htf_5m)  + ([self._live_5m]  if self._live_5m  else [])
-        bars_10m = list(self._htf_10m) + ([self._live_10m] if self._live_10m else [])
+        bars_15m = list(self._htf_15m) + ([self._live_15m] if self._live_15m else [])
         bars_1h  = list(self._htf_1h)  + ([self._live_1h]  if self._live_1h  else [])
         bars_4h  = list(self._htf_4h)  + ([self._live_4h]  if self._live_4h  else [])
         # 1m: use closed bars from window (REST-seeded + live closed bars)
         bars_1m  = list(self._window)
 
-        if any(len(b) >= 4 for b in [bars_1h, bars_4h, bars_5m, bars_10m, bars_1m]):
+        if any(len(b) >= 4 for b in [bars_1h, bars_4h, bars_5m, bars_15m, bars_1m]):
             if self._htf_mod is None:
                 from physics import htf as HTF
                 self._htf_mod = HTF
             self._htf_ctx = self._htf_mod.regime(
                 cur, bars_1h, bars_4h,
-                bars_1m=bars_1m, bars_5m=bars_5m, bars_10m=bars_10m,
+                bars_1m=bars_1m, bars_5m=bars_5m, bars_15m=bars_15m,
             )
 
     def _handle_kline(self, k: dict):
@@ -844,17 +844,17 @@ async def _main():
     if boot:
         log(f"Window seeded with {len(boot)} REST bars — now on live stream", G)
 
-    # Seed HTF bars (5m / 10m / 1h / 4h) from REST for immediate regime context.
-    log("Fetching HTF bars (5m / 10m / 1h / 4h) for regime context...", C)
+    # Seed HTF bars (5m / 15m / 1h / 4h) from REST for immediate regime context.
+    log("Fetching HTF bars (5m / 15m / 1h / 4h) for regime context...", C)
     htf_data = await asyncio.get_event_loop().run_in_executor(
         None, lambda: bootstrap_htf(CF.SYMBOL)
     )
     engine._htf_5m  = htf_data.get('5m',  [])
-    engine._htf_10m = htf_data.get('10m', [])
+    engine._htf_15m = htf_data.get('15m', [])
     engine._htf_1h  = htf_data.get('1h',  [])
     engine._htf_4h  = htf_data.get('4h',  [])
     log(f"HTF seeded: "
-        f"{len(engine._htf_5m)}×5m  {len(engine._htf_10m)}×10m  "
+        f"{len(engine._htf_5m)}×5m  {len(engine._htf_15m)}×15m  "
         f"{len(engine._htf_1h)}×1h  {len(engine._htf_4h)}×4h bars", G)
 
     # Seed OB so cavitation has real depth data from bar 1, not just after the

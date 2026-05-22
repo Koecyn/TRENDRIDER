@@ -48,15 +48,15 @@ def regime(price: float,
            bars_1h: list, bars_4h: list,
            bars_1m: list = None,
            bars_5m: list = None,
-           bars_10m: list = None) -> dict:
+           bars_15m: list = None) -> dict:
     """
     Compute HTF context across all available timeframes.
 
     Timeframe weights for bias (normalized to weights actually available):
-      1m → 0.05   5m → 0.10   10m → 0.15   1h → 0.30   4h → 0.40
+      1m → 0.05   5m → 0.10   15m → 0.15   1h → 0.30   4h → 0.40
 
     Returns:
-      trend_1m / trend_5m / trend_10m / trend_1h / trend_4h
+      trend_1m / trend_5m / trend_15m / trend_1h / trend_4h
       support / resistance  nearest key levels (all TFs combined)
       at_support / at_resistance  bool (within HTF_LEVEL_TOL)
       reversal_setup        HTF downtrend + at support
@@ -70,7 +70,7 @@ def regime(price: float,
     ctx = {
         'trend_1m':           'neutral',
         'trend_5m':           'neutral',
-        'trend_10m':          'neutral',
+        'trend_15m':          'neutral',
         'trend_1h':           'neutral',
         'trend_4h':           'neutral',
         'support':            0.0,
@@ -91,7 +91,7 @@ def regime(price: float,
     tf_specs = [
         (bars_1m,   0.05, '1m'),
         (bars_5m,   0.10, '5m'),
-        (bars_10m,  0.15, '10m'),
+        (bars_15m,  0.15, '15m'),
         (bars_1h,   0.30, '1h'),
         (bars_4h,   0.40, '4h'),
     ]
@@ -118,13 +118,13 @@ def regime(price: float,
         ctx['at_resistance'] = abs(price - res) / res < tol
 
     t1h, t4h = ctx['trend_1h'], ctx['trend_4h']
-    t5m, t10m = ctx['trend_5m'], ctx['trend_10m']
+    t5m, t15m = ctx['trend_5m'], ctx['trend_15m']
 
     htf_down = (t1h == 'down' or t4h == 'down')
     htf_up   = (t1h == 'up'   or t4h == 'up')
 
     # Short-term counter-trend momentum — prevents falling_knife block
-    stf_up   = (t5m == 'up' or t10m == 'up')
+    stf_up   = (t5m == 'up' or t15m == 'up')
 
     ctx['reversal_setup']     = htf_down and ctx['at_support']
     ctx['continuation_setup'] = htf_up and not ctx['at_resistance']
