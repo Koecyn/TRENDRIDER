@@ -68,8 +68,8 @@ KELLY_WARMUP_TRADES = 10    # trades before Kelly activates (use defaults before
 # ── MAE-based stop placement ──────────────────────────────────────────────────
 MAE_PERCENTILE      = 90    # % of winner MAE → stop distance
 MAE_WARMUP_TRADES   = 20    # trades before MAE activates (use ATR fallback)
-MAE_ATR_FALLBACK    = 3.0   # ATR multiplier for fallback stops
-MAE_ATR_PERIOD      = 14
+MAE_ATR_FALLBACK    = 2.0   # ATR multiplier for fallback stops (2× = 1:1 R:R for tier3)
+MAE_ATR_PERIOD      = 60   # longer period captures daily range, not just the coil
 
 # ── Higher timeframe context ──────────────────────────────────────────────────
 HTF_LEVEL_TOL          = 0.003   # ±0.3% of price = "at level"
