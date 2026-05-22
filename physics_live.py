@@ -363,7 +363,9 @@ class PaperTrader:
 
         # Pre-flip entries use tier=2: depth-confirmed but physics wave hasn't
         # turned yet — size conservatively until the wave confirms.
-        entry_tier = 2 if (preflip_ok and not reversal_ok) else sig['tier']
+        # Tier=4 means "weak signal — skip" (TIER4_RR=0.0); cap at 3 so
+        # standard-signal bypasses still get valid R:R parameters.
+        entry_tier = 2 if (preflip_ok and not reversal_ok) else min(sig['tier'], 3)
 
         entry  = cur
         stop   = self._pm.entry_stop(entry, +1, atr, entry_tier)
