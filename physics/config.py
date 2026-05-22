@@ -85,5 +85,5 @@ SYMBOL        = 'BTCUSDC'
 INTERVAL      = '1m'
 HISTORY_BARS  = 5_000       # total bars to pull for backtest
 WARMUP_BARS   = 100         # bars consumed before first trade allowed
-MAX_HOLD_BARS = 30          # timeout backstop (bars) — exit stalled trades in 30m
+MAX_HOLD_BARS = 90          # timeout backstop (bars) — 90m max hold
 INITIAL_BAL   = 1_000.0     # starting balance for backtest ($)

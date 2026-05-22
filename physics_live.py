@@ -283,17 +283,32 @@ class PaperTrader:
             t['mae'] = max(t['mae'], float(t['entry'] - cur))
             t['mfe'] = max(t['mfe'], float(cur - t['entry']))
 
-            if self._bars - t['bar_idx'] >= self._CF.MAX_HOLD_BARS:
+            bars_held = self._bars - t['bar_idx']
+            # Smart timeout: exit only if trade has made no meaningful progress
+            # (MFE < 1×ATR). If price moved significantly, give it more time —
+            # reversals at support can take 60-90m to fully develop.
+            atr_now = float(_atr(
+                self._window_arrays()['highs'],
+                self._window_arrays()['lows'],
+                self._window_arrays()['closes'],
+                self._CF.MAE_ATR_PERIOD,
+            )[-1]) if len(list(self._w)) >= self._CF.MAE_ATR_PERIOD else 0
+            made_progress = atr_now > 0 and t['mfe'] >= atr_now
+            hard_timeout  = bars_held >= self._CF.MAX_HOLD_BARS * 2
+            soft_timeout  = bars_held >= self._CF.MAX_HOLD_BARS and not made_progress
+
+            if hard_timeout or soft_timeout:
+                reason = 'hard_timeout' if hard_timeout else 'timeout_no_progress'
                 pnl = (cur - t['entry']) / t['entry'] * 100.0
                 t.update(pnl_pct=pnl, exit_price=cur,
-                         exit_reason='timeout', exit_bar=self._bars)
+                         exit_reason=reason, exit_bar=self._bars)
                 self._pm.on_close(pnl, t['mae'], t['tier'], t['size_usd'])
                 self._trades.append(t)
                 self._open = None
                 self._save_open_trade()
                 col = G if pnl > 0 else R
-                log(f"  [timeout] pnl={pnl:+.3f}%  "
-                    f"held={self._CF.MAX_HOLD_BARS}bars  tier={t['tier']}", col)
+                log(f"  [{reason}] pnl={pnl:+.3f}%  held={bars_held}bars  "
+                    f"mfe={t['mfe']:.2f}  atr={atr_now:.2f}  tier={t['tier']}", col)
 
         # Always update HTF context — needed for stop/target logic and logging
         # even when a trade is open (early-exit path below skips signal engine).
