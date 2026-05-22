@@ -157,8 +157,17 @@ def allows_entry(sig: dict, ctx: dict) -> tuple:
         return False, (f"falling knife — trend down, not at support, "
                        f"5m/10m not turning up (bias={ctx['bias']:.2f})")
 
-    # Reversal: downtrend at support — require water hammer OR CVD confirmation
+    # Reversal: downtrend at support.
+    # Require short-TF momentum turning (5m or 15m not still down) — entering
+    # long while every timeframe is pointing down is fighting the full trend.
     if ctx['reversal_setup']:
+        t5m  = ctx.get('trend_5m',  'down')
+        t15m = ctx.get('trend_15m', 'down')
+        stf_turning = (t5m != 'down' or t15m != 'down')
+        if not stf_turning:
+            return False, (f"reversal setup but short TFs still down "
+                           f"(5m={t5m} 15m={t15m}) — wait for turn")
+
         wh  = sig.get('water_hammer', {})
         cvd = sig.get('cvd', {})
         obi = sig.get('obi', {})
