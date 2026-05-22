@@ -488,6 +488,14 @@ class LiveEngine:
         self._last_dark_side: str   = ''
         self._last_dark_obi:  float = 0.0
 
+        # Absorption tracking — filled vs cancelled volume per bar.
+        # Filled: qty decreases at level currently AT the spread (taker hit it).
+        # Pulled: qty decreases at level AWAY from spread (maker cancelled).
+        self._bid_filled:  float = 0.0   # BTC absorbed on bid side (taker sells)
+        self._ask_filled:  float = 0.0   # BTC absorbed on ask side (taker buys)
+        self._bid_pulled:  float = 0.0   # BTC cancelled on bid side (spoofed)
+        self._ask_pulled:  float = 0.0   # BTC cancelled on ask side (spoofed)
+
     def _reload(self):
         """Hot-reload params from updated config.py."""
         flush_physics()
@@ -606,52 +614,107 @@ class LiveEngine:
         if sig:
             self._log_waveforms(bar, sig, bids)
 
+        # Log bar absorption summary and reset counters
+        if (self._bid_filled + self._ask_filled +
+                self._bid_pulled + self._ask_pulled) > 0.001:
+            net = self._bid_filled - self._ask_filled
+            log(f"  [ABSORB] bid_fill={self._bid_filled:.4f}  "
+                f"ask_fill={self._ask_filled:.4f}  "
+                f"bid_pull={self._bid_pulled:.4f}  "
+                f"ask_pull={self._ask_pulled:.4f}  "
+                f"net={net:+.4f}BTC", Y)
+        self._bid_filled = self._ask_filled = 0.0
+        self._bid_pulled = self._ask_pulled = 0.0
+
         # Reset peak OB tracking for the next bar
         self._peak_bid_wall = 0.0
         self._peak_ask_wall = 0.0
         self._peak_bids     = []
         self._peak_asks     = []
+        self._last_dark_side = ''
+        self._last_dark_obi  = 0.0
 
         self._write_stats()
 
     def _handle_depth(self, data: dict):
-        bids = [(float(p), float(q)) for p, q in data.get('bids', [])]
-        asks = [(float(p), float(q)) for p, q in data.get('asks', [])]
-        self._bids = bids
-        self._asks = asks
+        new_bids = [(float(p), float(q)) for p, q in data.get('bids', [])]
+        new_asks = [(float(p), float(q)) for p, q in data.get('asks', [])]
 
-        if not bids or not asks:
+        # Absorption measurement before overwriting current snapshot.
+        # Each L20 update is a full replacement — compare qty changes per level.
+        if self._bids and self._asks and new_bids and new_asks:
+            best_bid = new_bids[0][0]
+            best_ask = new_asks[0][0]
+            tol = 0.0005   # within 0.05% of spread = "at level" (microstructure)
+
+            # Ask side: qty that left since last snapshot
+            prev_ask = {p: q for p, q in self._asks}
+            seen_ask = {p for p, q in new_asks}
+            for price, new_qty in new_asks:
+                prev_qty = prev_ask.get(price, 0.0)
+                if prev_qty > new_qty:
+                    delta = prev_qty - new_qty
+                    if abs(price - best_ask) / best_ask < tol:
+                        self._ask_filled += delta   # taker bought here
+                    else:
+                        self._ask_pulled += delta   # maker cancelled
+            for price, qty in self._asks:            # levels that vanished
+                if price not in seen_ask:
+                    if abs(price - best_ask) / best_ask < tol:
+                        self._ask_filled += qty
+                    else:
+                        self._ask_pulled += qty
+
+            # Bid side
+            prev_bid = {p: q for p, q in self._bids}
+            seen_bid = {p for p, q in new_bids}
+            for price, new_qty in new_bids:
+                prev_qty = prev_bid.get(price, 0.0)
+                if prev_qty > new_qty:
+                    delta = prev_qty - new_qty
+                    if abs(price - best_bid) / best_bid < tol:
+                        self._bid_filled += delta   # taker sold here
+                    else:
+                        self._bid_pulled += delta
+            for price, qty in self._bids:
+                if price not in seen_bid:
+                    if abs(price - best_bid) / best_bid < tol:
+                        self._bid_filled += qty
+                    else:
+                        self._bid_pulled += qty
+
+        self._bids = new_bids
+        self._asks = new_asks
+
+        if not new_bids or not new_asks:
             return
 
-        # Track peak wall seen across every push since last bar close.
-        # Pushes are event-driven (variable rate, not fixed 100ms intervals) —
-        # we process each one as it arrives. Dark pool walls post and absorb
-        # in seconds; the bar-close snapshot often misses them entirely.
-        top_bid = bids[0][1]
-        top_ask = asks[0][1]
-
+        # Peak wall tracking
+        top_bid = new_bids[0][1]
+        top_ask = new_asks[0][1]
         if top_bid > self._peak_bid_wall:
             self._peak_bid_wall = top_bid
-            self._peak_bids     = bids   # snapshot when wall was largest
-
+            self._peak_bids     = new_bids
         if top_ask > self._peak_ask_wall:
             self._peak_ask_wall = top_ask
-            self._peak_asks     = asks
+            self._peak_asks     = new_asks
 
-        # Log unusually large walls (>3× normal) as dark pool events
-        bid_vol5 = sum(q for _, q in bids[:5])
-        ask_vol5 = sum(q for _, q in asks[:5])
+        # OBI imbalance — log on change with filled/pulled context
+        bid_vol5 = sum(q for _, q in new_bids[:5])
+        ask_vol5 = sum(q for _, q in new_asks[:5])
         total5   = bid_vol5 + ask_vol5
         if total5 > 0:
             obi = (bid_vol5 - ask_vol5) / total5
             if abs(obi) > 0.40:
                 side = 'BID' if obi > 0 else 'ASK'
-                # Only log when side flips or OBI shifts >0.05 — same wall repeats every push
                 if side != self._last_dark_side or abs(obi - self._last_dark_obi) > 0.05:
                     self._last_dark_side = side
                     self._last_dark_obi  = obi
-                    log(f"  [DARK] {side} wall OBI={obi:+.3f}  "
-                        f"bid5={bid_vol5:.2f}  ask5={ask_vol5:.2f}", Y)
+                    filled = self._bid_filled if side == 'BID' else self._ask_filled
+                    pulled = self._bid_pulled if side == 'BID' else self._ask_pulled
+                    log(f"  [DARK] {side} OBI={obi:+.3f}  "
+                        f"bid5={bid_vol5:.3f}  ask5={ask_vol5:.3f}  "
+                        f"filled={filled:.4f}  pulled={pulled:.4f}", Y)
             else:
                 self._last_dark_side = ''
                 self._last_dark_obi  = 0.0
