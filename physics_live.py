@@ -334,10 +334,13 @@ class PaperTrader:
             return sig
 
         # ── HTF entry gate ────────────────────────────────────────────────────
-        if preflip_ok and not reversal_ok:
-            # Depth-confirmed pre-flip — microstructure leads, skip fusion OBI check
+        # Depth signals (intra-bar) lead the physics wave and fusion-level OBI.
+        # If either the pre-flip or reversal window is active AND depth confirms
+        # accumulation, bypass the fusion WH/CVD/OBI gate entirely.
+        depth_confirmed = bar_ask_cleared or bar_obi_bull >= 0.40
+        if depth_confirmed and (preflip_ok or reversal_ok):
             allowed = True
-            reason  = (f"pre-flip depth confirm: "
+            reason  = (f"depth confirm: "
                        f"ask_cleared={bar_ask_cleared}  obi_bull={bar_obi_bull:.2f}")
             log(f"  [PRE-FLIP] {reason}", G)
         else:
