@@ -665,10 +665,18 @@ class LiveEngine:
                 new_qty = new_ask_map.get(price, 0.0)
                 if prev_qty > new_qty:
                     delta = prev_qty - new_qty
-                    if price < new_best_ask:    # spread moved above this level
+                    if price < new_best_ask:
                         self._ask_filled += delta
-                    else:                        # spread still at/above — maker pulled
+                    else:
                         self._ask_pulled += delta
+                        # Large instantaneous pull on ask = resistance cleared.
+                        # Someone yanked liquidity before price reached it —
+                        # the path up is being deliberately opened. Bullish.
+                        pull_pct = delta / prev_qty
+                        if pull_pct >= 0.50 and delta >= 0.05:
+                            log(f"  [CLEAR ASK] {delta:.4f}BTC pulled "
+                                f"({pull_pct:.0%} of level @{price:.2f}) "
+                                f"→ path opened UPSIDE", G)
 
             # Bid side
             prev_bid = {p: q for p, q in self._bids}
@@ -677,10 +685,17 @@ class LiveEngine:
                 new_qty = new_bid_map.get(price, 0.0)
                 if prev_qty > new_qty:
                     delta = prev_qty - new_qty
-                    if price > new_best_bid:    # spread moved below this level
+                    if price > new_best_bid:
                         self._bid_filled += delta
-                    else:                        # spread still at/below — maker pulled
+                    else:
                         self._bid_pulled += delta
+                        # Large pull on bid = support removed before price got there.
+                        # Buyers stepped aside intentionally — path down cleared. Bearish.
+                        pull_pct = delta / prev_qty
+                        if pull_pct >= 0.50 and delta >= 0.05:
+                            log(f"  [CLEAR BID] {delta:.4f}BTC pulled "
+                                f"({pull_pct:.0%} of level @{price:.2f}) "
+                                f"→ path opened DOWNSIDE", R)
 
         self._bids = new_bids
         self._asks = new_asks
