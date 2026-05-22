@@ -111,33 +111,57 @@ def _atr(highs, lows, closes, period=14):
     return out
 
 
-# ── Bootstrap: seed window with REST history ──────────────────────────────────
+# ── Bootstrap: seed 1m window + HTF bars ─────────────────────────────────────
+
+def _parse_bars(raw, interval: str) -> list:
+    from physics import data as D
+    data = D.parse_klines(raw)
+    bars = []
+    for i in range(len(data['closes'])):
+        bars.append({
+            'ts':        int(data['timestamps'][i]),
+            'open':      float(data['opens'][i]),
+            'high':      float(data['highs'][i]),
+            'low':       float(data['lows'][i]),
+            'close':     float(data['closes'][i]),
+            'volume':    float(data['volumes'][i]),
+            'taker_buy': float(data.get('taker_buy', [0]*len(data['closes']))[i]),
+            'interval':  interval,
+        })
+    return bars
+
 
 def bootstrap_rest(symbol: str, n: int = 300) -> list:
-    """Return list of bar dicts from REST (for ATR/signal warmup)."""
-    log(f"Fetching {n} bars from Binance REST for warmup...", C)
+    """Return list of 1m bar dicts from REST (for ATR/signal warmup)."""
+    log(f"Fetching {n} 1m bars from Binance REST for warmup...", C)
     flush_physics()
     try:
         from physics import data as D, config as CF
         raw  = D.fetch_klines_bulk(symbol, CF.INTERVAL, n)
-        data = D.parse_klines(raw)
-        bars = []
-        for i in range(len(data['closes'])):
-            bars.append({
-                'ts':        int(data['timestamps'][i]),
-                'open':      float(data['opens'][i]),
-                'high':      float(data['highs'][i]),
-                'low':       float(data['lows'][i]),
-                'close':     float(data['closes'][i]),
-                'volume':    float(data['volumes'][i]),
-                'taker_buy': float(data['taker_buy'][i]),
-                'live':      False,
-            })
-        log(f"  {len(bars)} REST bars loaded", G)
+        bars = _parse_bars(raw, '1m')
+        for b in bars:
+            b['live'] = False
+        log(f"  {len(bars)} 1m REST bars loaded", G)
         return bars
     except Exception as e:
         log(f"REST bootstrap error: {e}", R)
         return []
+
+
+def bootstrap_htf(symbol: str) -> dict:
+    """Fetch 1h and 4h bars for immediate HTF regime context."""
+    from physics import data as D, config as CF
+    htf = {'1h': [], '4h': []}
+    for interval, n_bars, key in [('1h', CF.HTF_1H_BARS, '1h'),
+                                   ('4h', CF.HTF_4H_BARS, '4h')]:
+        try:
+            raw  = D.fetch_klines_bulk(symbol, interval, n_bars)
+            bars = _parse_bars(raw, interval)
+            htf[key] = bars
+            log(f"  HTF {interval}: {len(bars)} bars loaded", G)
+        except Exception as e:
+            log(f"  HTF {interval} bootstrap error: {e}", Y)
+    return htf
 
 
 # ── Paper trade tracker ───────────────────────────────────────────────────────
@@ -157,6 +181,7 @@ class PaperTrader:
         self._start       = time.time()
         self._last_bids_n = 0    # depth diagnostic
         self._last_cav    = {}   # cavitation breakdown
+        self._last_htf    = {}   # HTF regime context
 
     def reload_params(self, CF):
         self._CF = CF
@@ -200,14 +225,15 @@ class PaperTrader:
             return True
         return False
 
-    def on_bar(self, bar: dict, bids, asks, accum):
+    def on_bar(self, bar: dict, bids, asks, accum,
+               htf_1h: list = None, htf_4h: list = None):
         """
         Process one closed 1m bar.
         Stop/target already handled by tick_price() intrabar.
         This handles: timeout, new signal entry, MAE/MFE tracking, bar counter.
         Returns signal dict if a trade was entered.
         """
-        from physics import fusion, config as CF
+        from physics import fusion, config as CF, htf as HTF
 
         self._bars += 1
         cur = bar['close']
@@ -256,13 +282,38 @@ class PaperTrader:
         self._last_dir    = int(sig.get('direction', 0))
         self._last_tier   = int(sig.get('tier', 4))
 
+        # ── HTF regime context ────────────────────────────────────────────────
+        htf_ctx = None
+        if (htf_1h and len(htf_1h) >= 4) or (htf_4h and len(htf_4h) >= 4):
+            htf_ctx = HTF.regime(cur, htf_1h or [], htf_4h or [])
+            self._last_htf = htf_ctx
+            log(f"  HTF 1h={htf_ctx['trend_1h']} 4h={htf_ctx['trend_4h']}  "
+                f"bias={htf_ctx['bias']:+.2f}  "
+                f"sup={htf_ctx['at_support']}  rev={htf_ctx['reversal_setup']}  "
+                f"fk={htf_ctx['falling_knife']}", C)
+
         log(f"  score={self._last_score:+.4f}  dir={self._last_dir:+d}  "
             f"tier={self._last_tier}  snr={self._last_snr:.2f}  "
             f"threshold={self._CF.LONG_THRESHOLD}", C)
 
-        if sig['direction'] != 1 or sig['tier'] >= 4:
-            return sig
+        # ── Reversal override: enter long at HTF support even if score < threshold
+        score_abs = abs(self._last_score)
+        reversal_ok = (
+            htf_ctx is not None and
+            htf_ctx['reversal_setup'] and
+            score_abs >= CF.HTF_REVERSAL_MIN_SCORE
+        )
+
+        if not reversal_ok:
+            if sig['direction'] != 1 or sig['tier'] >= 4:
+                return sig
         if sig['snr'] < self._CF.SNR_MIN:
+            return sig
+
+        # ── HTF entry gate ────────────────────────────────────────────────────
+        allowed, reason = HTF.allows_entry(sig, htf_ctx)
+        if not allowed:
+            log(f"  [HTF block] {reason}", Y)
             return sig
 
         entry  = cur
@@ -359,10 +410,17 @@ class PaperTrader:
             'last_tier':     self._last_tier,
             'threshold':     float(CF.LONG_THRESHOLD),
             'snr_min':       float(CF.SNR_MIN),
-            # OB diagnostic — tells us whether real depth data reached fusion
-            'last_bids_n':   self._last_bids_n,
+            # OB / cavitation diagnostics
+            'last_bids_n':     self._last_bids_n,
             'last_cav_active': bool(self._last_cav.get('active', False)),
             'last_cav_risk':   round(float(self._last_cav.get('risk', 0)), 4),
+            # HTF regime
+            'htf_trend_1h':   self._last_htf.get('trend_1h', 'none'),
+            'htf_trend_4h':   self._last_htf.get('trend_4h', 'none'),
+            'htf_bias':       round(float(self._last_htf.get('bias', 0)), 3),
+            'htf_at_sup':     bool(self._last_htf.get('at_support', False)),
+            'htf_reversal':   bool(self._last_htf.get('reversal_setup', False)),
+            'htf_fk':         bool(self._last_htf.get('falling_knife', False)),
         }
         for tier in [1, 2, 3]:
             tt = [t for t in self._trades if t['tier'] == tier]
@@ -399,6 +457,12 @@ class LiveEngine:
         self._peak_ask_wall: float = 0.0
         self._peak_bids: list = []
         self._peak_asks: list = []
+
+        # HTF bars — seeded via REST at startup, updated as live candles close
+        self._htf_1h: list = []
+        self._htf_4h: list = []
+        self._last_1h_ts: int = 0
+        self._last_4h_ts: int = 0
 
         self._last_fetch  = 0.0
         self._running     = True
@@ -445,7 +509,36 @@ class LiveEngine:
 
         # Bar closed — commit to permanent window and run full signal engine
         self._window.append(bar)
-        sig = self._trader.on_bar(bar, bids or None, asks or None, self._accum)
+
+        # Update HTF bars as live candles close (no extra REST calls)
+        ts_ms   = int(k['t'])
+        h1_slot = ts_ms // 3_600_000     # hour bucket
+        h4_slot = ts_ms // 14_400_000    # 4h bucket
+        if h1_slot != self._last_1h_ts and self._last_1h_ts != 0:
+            # A new 1h candle just closed — append it
+            self._htf_1h.append({
+                'ts': ts_ms, 'open': float(k['o']), 'high': float(k['h']),
+                'low': float(k['l']), 'close': cur_price,
+                'volume': float(k['v']),
+            })
+            if len(self._htf_1h) > 200:
+                self._htf_1h = self._htf_1h[-100:]
+        self._last_1h_ts = h1_slot
+
+        if h4_slot != self._last_4h_ts and self._last_4h_ts != 0:
+            self._htf_4h.append({
+                'ts': ts_ms, 'open': float(k['o']), 'high': float(k['h']),
+                'low': float(k['l']), 'close': cur_price,
+                'volume': float(k['v']),
+            })
+            if len(self._htf_4h) > 60:
+                self._htf_4h = self._htf_4h[-30:]
+        self._last_4h_ts = h4_slot
+
+        sig = self._trader.on_bar(
+            bar, bids or None, asks or None, self._accum,
+            htf_1h=self._htf_1h, htf_4h=self._htf_4h,
+        )
         if sig:
             self._log_waveforms(bar, sig, bids)
 
@@ -666,6 +759,17 @@ async def _main():
         engine._window.append(bar)
     if boot:
         log(f"Window seeded with {len(boot)} REST bars — now on live stream", G)
+
+    # Seed HTF bars (1h + 4h) from REST so regime context is immediate.
+    # Without this the engine has no structure until 4h of live bars accumulate.
+    log("Fetching HTF bars (1h / 4h) for regime context...", C)
+    htf_data = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: bootstrap_htf(CF.SYMBOL)
+    )
+    engine._htf_1h = htf_data.get('1h', [])
+    engine._htf_4h = htf_data.get('4h', [])
+    if engine._htf_1h:
+        log(f"HTF seeded: {len(engine._htf_1h)}×1h  {len(engine._htf_4h)}×4h bars", G)
 
     # Seed OB so cavitation has real depth data from bar 1, not just after the
     # first depth WebSocket push (which could be seconds into the first bar).

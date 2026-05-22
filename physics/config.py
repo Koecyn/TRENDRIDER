@@ -71,6 +71,12 @@ MAE_WARMUP_TRADES   = 20    # trades before MAE activates (use ATR fallback)
 MAE_ATR_FALLBACK    = 3.0   # ATR multiplier for fallback stops
 MAE_ATR_PERIOD      = 14
 
+# ── Higher timeframe context ──────────────────────────────────────────────────
+HTF_LEVEL_TOL          = 0.003   # ±0.3% of price = "at level"
+HTF_REVERSAL_MIN_SCORE = 0.06    # score floor for reversal entries (half of normal)
+HTF_1H_BARS            = 48      # 1h bars to fetch at startup (2 days)
+HTF_4H_BARS            = 30      # 4h bars to fetch at startup (5 days)
+
 # ── Data / backtest ───────────────────────────────────────────────────────────
 SYMBOL        = 'BTCUSDC'
 INTERVAL      = '1m'
