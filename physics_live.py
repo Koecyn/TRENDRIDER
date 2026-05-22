@@ -324,7 +324,7 @@ class PaperTrader:
             htf_ctx is not None and
             htf_ctx['reversal_setup'] and
             self._last_score <= -CF.LONG_THRESHOLD and
-            (bar_ask_cleared or bar_obi_bull >= 0.40)
+            (bar_ask_cleared or bar_obi_bull >= 0.25)
         )
 
         if not reversal_ok and not preflip_ok:
@@ -337,7 +337,7 @@ class PaperTrader:
         # Depth signals (intra-bar) lead the physics wave and fusion-level OBI.
         # If either the pre-flip or reversal window is active AND depth confirms
         # accumulation, bypass the fusion WH/CVD/OBI gate entirely.
-        depth_confirmed = bar_ask_cleared or bar_obi_bull >= 0.40
+        depth_confirmed = bar_ask_cleared or bar_obi_bull >= 0.25
         if depth_confirmed and (preflip_ok or reversal_ok):
             allowed = True
             reason  = (f"depth confirm: "
