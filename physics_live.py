@@ -346,11 +346,18 @@ class PaperTrader:
         # accumulation (asks being pulled / bid OBI loading) before dir flips.
         # The depth signals lead the physics wave — entering here catches the
         # bottom of the upswing instead of the middle.
+        # Requires at least one short TF (5m or 15m) to be turning (not still
+        # down) — same gate as allows_entry() reversal path. Don't pre-flip
+        # into a 4-TF downtrend with no counter-trend momentum anywhere.
+        _t5m  = htf_ctx.get('trend_5m',  'down') if htf_ctx else 'down'
+        _t15m = htf_ctx.get('trend_15m', 'down') if htf_ctx else 'down'
+        _stf_turning = (_t5m != 'down' or _t15m != 'down')
         preflip_ok = (
             htf_ctx is not None and
             htf_ctx['reversal_setup'] and
             self._last_score <= -CF.LONG_THRESHOLD and
-            (bar_ask_cleared or bar_obi_bull >= 0.25)
+            (bar_ask_cleared or bar_obi_bull >= 0.25) and
+            _stf_turning
         )
 
         if not reversal_ok and not preflip_ok:
