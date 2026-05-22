@@ -480,6 +480,15 @@ class PaperTrader:
                 tw = [x for x in tt if x['pnl_pct'] > 0]
                 d[f't{tier}_n']        = len(tt)
                 d[f't{tier}_win_rate'] = round(len(tw)/len(tt)*100, 1)
+        # Open trade visibility — n_trades only counts closed trades
+        if self._open:
+            o = self._open
+            d['open_entry']  = round(o['entry'], 2)
+            d['open_stop']   = round(o['stop'], 2)
+            d['open_target'] = round(o['target'], 2)
+            d['open_tier']   = o['tier']
+            d['open_mae']    = round(o['mae'], 4)
+            d['open_mfe']    = round(o['mfe'], 4)
         return d
 
 
