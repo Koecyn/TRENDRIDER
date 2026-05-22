@@ -738,16 +738,29 @@ class LiveEngine:
             RESULTS_F.write_text(content)   # restore local copy
 
     async def _fetch_params(self):
-        """Pull latest params from remote (every FETCH_EVERY_S seconds)."""
+        """Pull latest params from remote (every FETCH_EVERY_S seconds).
+        If physics_live.py itself changed, stop cleanly — start_live.sh restarts.
+        If only physics/* changed, flush and hot-reload in-process.
+        """
         now = time.time()
         if now - self._last_fetch < FETCH_EVERY_S:
             return
         self._last_fetch = now
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: (git("fetch", "origin", CODE_BRANCH, "--quiet"),
-                     git("reset", "--hard", f"origin/{CODE_BRANCH}"))
-        )
+
+        def _pull():
+            git("fetch", "origin", CODE_BRANCH, "--quiet")
+            r = git("diff", f"HEAD..origin/{CODE_BRANCH}", "--name-only")
+            changed = set(r.stdout.strip().split('\n')) if r.stdout.strip() else set()
+            git("reset", "--hard", f"origin/{CODE_BRANCH}")
+            return changed
+
+        changed = await asyncio.get_event_loop().run_in_executor(None, _pull)
+
+        if 'physics_live.py' in changed:
+            log("physics_live.py updated — exiting for full reload (start_live.sh restarts)", Y)
+            self.stop()
+            return
+
         self._reload()
 
     async def run(self):
