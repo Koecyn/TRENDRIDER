@@ -485,6 +485,8 @@ class LiveEngine:
         self._last_fetch  = 0.0
         self._running     = True
         self._htf_mod     = None   # cached after each reload
+        self._last_dark_side: str   = ''
+        self._last_dark_obi:  float = 0.0
 
     def _reload(self):
         """Hot-reload params from updated config.py."""
@@ -642,11 +644,17 @@ class LiveEngine:
         total5   = bid_vol5 + ask_vol5
         if total5 > 0:
             obi = (bid_vol5 - ask_vol5) / total5
-            # Require OBI > 0.60 AND >= 1.0 BTC total — filters noise on thin books
-            if abs(obi) > 0.60 and total5 >= 1.0:
+            if abs(obi) > 0.40:
                 side = 'BID' if obi > 0 else 'ASK'
-                log(f"  [DARK] {side} wall OBI={obi:+.3f}  "
-                    f"bid5={bid_vol5:.2f}  ask5={ask_vol5:.2f}", Y)
+                # Only log when side flips or OBI shifts >0.05 — same wall repeats every push
+                if side != self._last_dark_side or abs(obi - self._last_dark_obi) > 0.05:
+                    self._last_dark_side = side
+                    self._last_dark_obi  = obi
+                    log(f"  [DARK] {side} wall OBI={obi:+.3f}  "
+                        f"bid5={bid_vol5:.2f}  ask5={ask_vol5:.2f}", Y)
+            else:
+                self._last_dark_side = ''
+                self._last_dark_obi  = 0.0
 
     def _log_waveforms(self, bar: dict, sig: dict, bids: list):
         """Print the wave equation breakdown for every signal bar."""
