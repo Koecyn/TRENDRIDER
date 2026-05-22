@@ -1,14 +1,17 @@
 """
 Higher-timeframe regime context — entry filter, not a signal generator.
 
-Uses pre-fetched 1h / 4h bars (seeded at startup via REST, updated live)
-to determine price position within the larger wave structure:
+Uses pre-fetched 1m / 5m / 10m / 1h / 4h bars (seeded at startup via REST,
+updated live) to determine price position within the full wave structure:
 
   continuation_setup  — HTF uptrend, not approaching resistance
   reversal_setup      — HTF downtrend, price at or near support
-  falling_knife       — downtrend, price NOT at support → block entries
+  falling_knife       — downtrend, price NOT at support AND short TFs not
+                        showing counter-trend momentum → block entries
 
-Keeps physics/signals.py and physics/fusion.py untouched.
+All five timeframes contribute to bias (shorter TFs get lower weight).
+Short-term (5m/10m) showing counter-trend momentum prevents falling_knife
+even when HTF is bearish, allowing reversal entries at support.
 """
 
 import numpy as np
@@ -41,22 +44,33 @@ def _levels(bars: list, n: int = 20):
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def regime(price: float, bars_1h: list, bars_4h: list) -> dict:
+def regime(price: float,
+           bars_1h: list, bars_4h: list,
+           bars_1m: list = None,
+           bars_5m: list = None,
+           bars_10m: list = None) -> dict:
     """
-    Compute HTF context from pre-fetched 1h and 4h bars.
+    Compute HTF context across all available timeframes.
+
+    Timeframe weights for bias (normalized to weights actually available):
+      1m → 0.05   5m → 0.10   10m → 0.15   1h → 0.30   4h → 0.40
 
     Returns:
-      trend_1h / trend_4h  'up' | 'down' | 'neutral'
-      support / resistance  nearest key levels
+      trend_1m / trend_5m / trend_10m / trend_1h / trend_4h
+      support / resistance  nearest key levels (all TFs combined)
       at_support / at_resistance  bool (within HTF_LEVEL_TOL)
-      reversal_setup        downtrend + at support
-      continuation_setup    uptrend + not at resistance
-      falling_knife         downtrend + NOT at support → block
+      reversal_setup        HTF downtrend + at support
+      continuation_setup    HTF uptrend + not at resistance
+      falling_knife         HTF down, NOT at support, AND short TFs not
+                            showing counter-trend (5m/10m both not up)
       bias                  float  -1 (bearish) … +1 (bullish)
     """
     tol = C.HTF_LEVEL_TOL
 
     ctx = {
+        'trend_1m':           'neutral',
+        'trend_5m':           'neutral',
+        'trend_10m':          'neutral',
         'trend_1h':           'neutral',
         'trend_4h':           'neutral',
         'support':            0.0,
@@ -70,16 +84,30 @@ def regime(price: float, bars_1h: list, bars_4h: list) -> dict:
     }
 
     sup = res = None
+    bias_raw   = 0.0
+    total_w    = 0.0
+    s_map      = {'up': 1.0, 'neutral': 0.0, 'down': -1.0}
 
-    for bars, w_trend, label in [(bars_1h, 0.4, '1h'), (bars_4h, 0.6, '4h')]:
-        if len(bars) < 4:
+    tf_specs = [
+        (bars_1m,   0.05, '1m'),
+        (bars_5m,   0.10, '5m'),
+        (bars_10m,  0.15, '10m'),
+        (bars_1h,   0.30, '1h'),
+        (bars_4h,   0.40, '4h'),
+    ]
+
+    for bars, w, label in tf_specs:
+        if not bars or len(bars) < 4:
             continue
         h = np.array([b['high'] for b in bars])
         l = np.array([b['low']  for b in bars])
-        ctx[f'trend_{label}'] = _trend(h, l)
+        trend = _trend(h, l)
+        ctx[f'trend_{label}'] = trend
         r, s = _levels(bars)
         if sup is None or s > sup: sup = s
         if res is None or r < res: res = r
+        bias_raw += s_map[trend] * w
+        total_w  += w
 
     ctx['support']    = float(sup) if sup else 0.0
     ctx['resistance'] = float(res) if res else 0.0
@@ -89,14 +117,22 @@ def regime(price: float, bars_1h: list, bars_4h: list) -> dict:
     if res and res > 0:
         ctx['at_resistance'] = abs(price - res) / res < tol
 
-    t1, t4 = ctx['trend_1h'], ctx['trend_4h']
+    t1h, t4h = ctx['trend_1h'], ctx['trend_4h']
+    t5m, t10m = ctx['trend_5m'], ctx['trend_10m']
 
-    ctx['reversal_setup']     = (t1 == 'down' or t4 == 'down') and ctx['at_support']
-    ctx['continuation_setup'] = (t1 == 'up'   or t4 == 'up')   and not ctx['at_resistance']
-    ctx['falling_knife']      = (t1 == 'down' or t4 == 'down') and not ctx['at_support']
+    htf_down = (t1h == 'down' or t4h == 'down')
+    htf_up   = (t1h == 'up'   or t4h == 'up')
 
-    s_map = {'up': 1.0, 'neutral': 0.0, 'down': -1.0}
-    bias  = s_map[t1] * 0.4 + s_map[t4] * 0.6
+    # Short-term counter-trend momentum — prevents falling_knife block
+    stf_up   = (t5m == 'up' or t10m == 'up')
+
+    ctx['reversal_setup']     = htf_down and ctx['at_support']
+    ctx['continuation_setup'] = htf_up and not ctx['at_resistance']
+    # Falling knife only when HTF down, not at support, AND shorter TFs
+    # aren't showing a counter-trend bounce yet
+    ctx['falling_knife']      = htf_down and not ctx['at_support'] and not stf_up
+
+    bias = bias_raw / total_w if total_w > 0 else 0.0
     if ctx['at_support']:    bias += 0.3
     if ctx['at_resistance']: bias -= 0.3
     ctx['bias'] = float(np.clip(bias, -1.0, 1.0))
@@ -116,9 +152,10 @@ def allows_entry(sig: dict, ctx: dict) -> tuple:
     if ctx is None:
         return True, ''
 
-    # Falling knife: downtrend and NOT at support → skip
+    # Falling knife: HTF down, not at support, short TFs not reversing → skip
     if ctx['falling_knife']:
-        return False, f"falling knife — trend down, not at support (bias={ctx['bias']:.2f})"
+        return False, (f"falling knife — trend down, not at support, "
+                       f"5m/10m not turning up (bias={ctx['bias']:.2f})")
 
     # Reversal: downtrend at support — require water hammer OR CVD confirmation
     if ctx['reversal_setup']:

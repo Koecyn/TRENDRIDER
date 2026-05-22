@@ -149,11 +149,15 @@ def bootstrap_rest(symbol: str, n: int = 300) -> list:
 
 
 def bootstrap_htf(symbol: str) -> dict:
-    """Fetch 1h and 4h bars for immediate HTF regime context."""
+    """Fetch 5m, 10m, 1h, and 4h bars for immediate HTF regime context."""
     from physics import data as D, config as CF
-    htf = {'1h': [], '4h': []}
-    for interval, n_bars, key in [('1h', CF.HTF_1H_BARS, '1h'),
-                                   ('4h', CF.HTF_4H_BARS, '4h')]:
+    htf = {'5m': [], '10m': [], '1h': [], '4h': []}
+    for interval, n_bars, key in [
+        ('5m',  CF.HTF_5M_BARS,  '5m'),
+        ('10m', CF.HTF_10M_BARS, '10m'),
+        ('1h',  CF.HTF_1H_BARS,  '1h'),
+        ('4h',  CF.HTF_4H_BARS,  '4h'),
+    ]:
         try:
             raw  = D.fetch_klines_bulk(symbol, interval, n_bars)
             bars = _parse_bars(raw, interval)
@@ -285,7 +289,10 @@ class PaperTrader:
         # ── HTF regime context (pre-computed every kline packet — always live) ─
         if htf_ctx:
             self._last_htf = htf_ctx
-            log(f"  HTF 1h={htf_ctx['trend_1h']} 4h={htf_ctx['trend_4h']}  "
+            log(f"  HTF 1m={htf_ctx.get('trend_1m','?')} "
+                f"5m={htf_ctx.get('trend_5m','?')} "
+                f"10m={htf_ctx.get('trend_10m','?')} "
+                f"1h={htf_ctx['trend_1h']} 4h={htf_ctx['trend_4h']}  "
                 f"bias={htf_ctx['bias']:+.2f}  "
                 f"sup={htf_ctx['at_support']}  rev={htf_ctx['reversal_setup']}  "
                 f"fk={htf_ctx['falling_knife']}", C)
@@ -414,8 +421,11 @@ class PaperTrader:
             'last_cav_active': bool(self._last_cav.get('active', False)),
             'last_cav_risk':   round(float(self._last_cav.get('risk', 0)), 4),
             # HTF regime
-            'htf_trend_1h':   self._last_htf.get('trend_1h', 'none'),
-            'htf_trend_4h':   self._last_htf.get('trend_4h', 'none'),
+            'htf_trend_1m':   self._last_htf.get('trend_1m',  'none'),
+            'htf_trend_5m':   self._last_htf.get('trend_5m',  'none'),
+            'htf_trend_10m':  self._last_htf.get('trend_10m', 'none'),
+            'htf_trend_1h':   self._last_htf.get('trend_1h',  'none'),
+            'htf_trend_4h':   self._last_htf.get('trend_4h',  'none'),
             'htf_bias':       round(float(self._last_htf.get('bias', 0)), 3),
             'htf_at_sup':     bool(self._last_htf.get('at_support', False)),
             'htf_reversal':   bool(self._last_htf.get('reversal_setup', False)),
@@ -458,15 +468,19 @@ class LiveEngine:
         self._peak_asks: list = []
 
         # HTF bars — seeded via REST, updated from live stream on every packet.
-        # _htf_1h/_htf_4h: completed candles.
-        # _live_1h/_live_4h: running partial candle — updated every kline push
-        # so htf.regime() always reflects the current bar's high/low, not a
-        # 60-second-old snapshot.
-        self._htf_1h: list  = []
-        self._htf_4h: list  = []
-        self._live_1h: dict = {}   # partial 1h bar (ts_slot, open, high, low, close)
-        self._live_4h: dict = {}   # partial 4h bar
-        self._htf_ctx: dict = {}   # latest regime — recomputed every kline packet
+        # _htf_*: completed candles per timeframe.
+        # _live_*: running partial candle — updated every kline push so
+        # htf.regime() always reflects the current bar's live high/low.
+        # 1m bars come from self._window (closed bars only — no separate live).
+        self._htf_5m:   list  = []
+        self._htf_10m:  list  = []
+        self._htf_1h:   list  = []
+        self._htf_4h:   list  = []
+        self._live_5m:  dict  = {}
+        self._live_10m: dict  = {}
+        self._live_1h:  dict  = {}
+        self._live_4h:  dict  = {}
+        self._htf_ctx:  dict  = {}   # latest regime — recomputed every kline packet
 
         self._last_fetch  = 0.0
         self._running     = True
@@ -482,28 +496,29 @@ class LiveEngine:
 
     def _update_live_htf(self, k: dict):
         """
-        Update running 1h and 4h partial bars from every kline packet.
-        Called on EVERY push (x=False and x=True) so htf.regime() always
-        sees the current bar's live high/low/close, not a 60-second snapshot.
+        Update 5m / 10m / 1h / 4h partial bars from every kline packet.
+        Called on EVERY push so htf.regime() always reflects the current
+        bar's live high/low/close, not a 60-second snapshot.
 
-        When a new 1h/4h slot starts, the completed candle is committed
-        to the historical list and the partial bar is reset.
+        1m structure comes directly from self._window (closed 1m bars).
         """
-        from physics import htf as HTF
-        ts_ms   = int(k['t'])
-        h1_slot = ts_ms // 3_600_000
-        h4_slot = ts_ms // 14_400_000
-        cur     = float(k['c'])
+        ts_ms    = int(k['t'])
+        m5_slot  = ts_ms // 300_000
+        m10_slot = ts_ms // 600_000
+        h1_slot  = ts_ms // 3_600_000
+        h4_slot  = ts_ms // 14_400_000
+        cur      = float(k['c'])
 
-        for slot, key, live_attr, hist_attr, maxbars in [
-            (h1_slot, '1h', '_live_1h', '_htf_1h', 100),
-            (h4_slot, '4h', '_live_4h', '_htf_4h', 40),
+        for slot, live_attr, hist_attr, maxbars in [
+            (m5_slot,  '_live_5m',  '_htf_5m',  600),
+            (m10_slot, '_live_10m', '_htf_10m', 300),
+            (h1_slot,  '_live_1h',  '_htf_1h',  100),
+            (h4_slot,  '_live_4h',  '_htf_4h',  40),
         ]:
             live = getattr(self, live_attr)
             hist = getattr(self, hist_attr)
 
             if not live or live.get('slot') != slot:
-                # New candle started — commit the completed one if we had one
                 if live:
                     hist.append({
                         'ts':    live['ts'],
@@ -523,18 +538,24 @@ class LiveEngine:
                     'close': cur,
                 })
             else:
-                # Same candle — update running high/low/close
                 live['high']  = max(live['high'],  float(k['h']))
                 live['low']   = min(live['low'],   float(k['l']))
                 live['close'] = cur
 
-        # Build full 1h/4h arrays = historical + current partial
-        bars_1h = list(self._htf_1h) + ([self._live_1h] if self._live_1h else [])
-        bars_4h = list(self._htf_4h) + ([self._live_4h] if self._live_4h else [])
+        # All TFs = historical + current partial bar
+        bars_5m  = list(self._htf_5m)  + ([self._live_5m]  if self._live_5m  else [])
+        bars_10m = list(self._htf_10m) + ([self._live_10m] if self._live_10m else [])
+        bars_1h  = list(self._htf_1h)  + ([self._live_1h]  if self._live_1h  else [])
+        bars_4h  = list(self._htf_4h)  + ([self._live_4h]  if self._live_4h  else [])
+        # 1m: use closed bars from window (REST-seeded + live closed bars)
+        bars_1m  = list(self._window)
 
-        if len(bars_1h) >= 4 or len(bars_4h) >= 4:
+        if any(len(b) >= 4 for b in [bars_1h, bars_4h, bars_5m, bars_10m, bars_1m]):
             from physics import htf as HTF
-            self._htf_ctx = HTF.regime(cur, bars_1h, bars_4h)
+            self._htf_ctx = HTF.regime(
+                cur, bars_1h, bars_4h,
+                bars_1m=bars_1m, bars_5m=bars_5m, bars_10m=bars_10m,
+            )
 
     def _handle_kline(self, k: dict):
         is_closed = k.get('x', False)
@@ -796,16 +817,18 @@ async def _main():
     if boot:
         log(f"Window seeded with {len(boot)} REST bars — now on live stream", G)
 
-    # Seed HTF bars (1h + 4h) from REST so regime context is immediate.
-    # Without this the engine has no structure until 4h of live bars accumulate.
-    log("Fetching HTF bars (1h / 4h) for regime context...", C)
+    # Seed HTF bars (5m / 10m / 1h / 4h) from REST for immediate regime context.
+    log("Fetching HTF bars (5m / 10m / 1h / 4h) for regime context...", C)
     htf_data = await asyncio.get_event_loop().run_in_executor(
         None, lambda: bootstrap_htf(CF.SYMBOL)
     )
-    engine._htf_1h = htf_data.get('1h', [])
-    engine._htf_4h = htf_data.get('4h', [])
-    if engine._htf_1h:
-        log(f"HTF seeded: {len(engine._htf_1h)}×1h  {len(engine._htf_4h)}×4h bars", G)
+    engine._htf_5m  = htf_data.get('5m',  [])
+    engine._htf_10m = htf_data.get('10m', [])
+    engine._htf_1h  = htf_data.get('1h',  [])
+    engine._htf_4h  = htf_data.get('4h',  [])
+    log(f"HTF seeded: "
+        f"{len(engine._htf_5m)}×5m  {len(engine._htf_10m)}×10m  "
+        f"{len(engine._htf_1h)}×1h  {len(engine._htf_4h)}×4h bars", G)
 
     # Seed OB so cavitation has real depth data from bar 1, not just after the
     # first depth WebSocket push (which could be seconds into the first bar).

@@ -74,6 +74,9 @@ MAE_ATR_PERIOD      = 14
 # ── Higher timeframe context ──────────────────────────────────────────────────
 HTF_LEVEL_TOL          = 0.003   # ±0.3% of price = "at level"
 HTF_REVERSAL_MIN_SCORE = 0.06    # score floor for reversal entries (half of normal)
+HTF_1M_BARS            = 500     # 1m bars used from live window (no REST fetch needed)
+HTF_5M_BARS            = 288     # 5m bars to fetch at startup (24h)
+HTF_10M_BARS           = 144     # 10m bars to fetch at startup (24h)
 HTF_1H_BARS            = 48      # 1h bars to fetch at startup (2 days)
 HTF_4H_BARS            = 30      # 4h bars to fetch at startup (5 days)
 
