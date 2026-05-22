@@ -730,11 +730,15 @@ class LiveEngine:
                 if side != self._last_dark_side or abs(obi - self._last_dark_obi) > 0.05:
                     self._last_dark_side = side
                     self._last_dark_obi  = obi
-                    filled = self._bid_filled if side == 'BID' else self._ask_filled
-                    pulled = self._bid_pulled if side == 'BID' else self._ask_pulled
+                    bf = self._bid_filled; af = self._ask_filled
+                    bp = self._bid_pulled; ap = self._ask_pulled
+                    total = bf + af + bp + ap
+                    ratio = (bf + af) / total if total > 0 else 0.0
+                    # ratio → 1.0 = all real absorption, → 0.0 = all fake walls
                     log(f"  [DARK] {side} OBI={obi:+.3f}  "
                         f"bid5={bid_vol5:.3f}  ask5={ask_vol5:.3f}  "
-                        f"filled={filled:.4f}  pulled={pulled:.4f}", Y)
+                        f"fill={bf+af:.4f}  pull={bp+ap:.4f}  "
+                        f"real={ratio:.0%}", Y)
             else:
                 self._last_dark_side = ''
                 self._last_dark_obi  = 0.0
