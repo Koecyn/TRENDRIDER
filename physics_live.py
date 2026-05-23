@@ -811,6 +811,29 @@ class LiveEngine:
                 bars_1m=bars_1m, bars_5m=bars_5m, bars_15m=bars_15m,
             )
 
+    def _update_live_waveform(self, cur_price: float):
+        """
+        Recompute waveform decomposition with current live price appended to
+        the closed-bar window. Stateless (pure SGF) — safe to call every tick.
+        Throttled to max once per 5s to avoid excessive CPU.
+        Physics score is not touched — stays from last bar close.
+        """
+        now = time.time()
+        if now - getattr(self, '_last_wf_ts', 0.0) < 5.0:
+            return
+        if len(self._window) < 35:
+            return
+        self._last_wf_ts = now
+        try:
+            import numpy as np
+            from physics.waveform import run as _waveform
+            prices = np.array([b['close'] for b in list(self._window)] + [cur_price])
+            wf = _waveform(prices, entry=cur_price, direction=1)
+            self._trader._last_waveform = wf
+            self._write_stats()
+        except Exception:
+            pass
+
     def _handle_kline(self, k: dict):
         is_closed = k.get('x', False)
         cur_price = float(k['c'])
@@ -841,6 +864,7 @@ class LiveEngine:
 
         if not is_closed:
             self._trader.scan_intrabar(bar, bids or None, asks or None, self._accum)
+            self._update_live_waveform(cur_price)
             return
 
         # Bar closed — commit and run full signal engine (fusion + accumulator)
