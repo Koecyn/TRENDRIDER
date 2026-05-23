@@ -627,6 +627,11 @@ class PaperTrader:
             'wf_tgt_extended':  round(float(((self._last_waveform or {}).get('targets') or {}).get('extended', 0)), 2),
             'wf_tgt_resonance': round(float(((self._last_waveform or {}).get('targets') or {}).get('resonance', 0)), 2),
             'wf_confidence':    round(float(((self._last_waveform or {}).get('targets') or {}).get('confidence', 0)), 3),
+            # Per-band phase/direction/velocity — for predictive trough/peak detection
+            **{f'wf_{b}_{k}': round(float(v), 4) if isinstance(v, float) else v
+               for b in ['micro', 'subharm', 'carrier', 'macro']
+               for k, v in ((self._last_waveform or {}).get('components', {}).get(b) or {}).items()
+               if k in ('phase', 'direction', 'velocity', 'amplitude')},
         }
         for tier in [1, 2, 3]:
             tt = [t for t in self._trades if t['tier'] == tier]
