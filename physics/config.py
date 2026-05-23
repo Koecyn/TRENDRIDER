@@ -80,6 +80,12 @@ HTF_15M_BARS           = 96      # 15m bars to fetch at startup (24h)
 HTF_1H_BARS            = 48      # 1h bars to fetch at startup (2 days)
 HTF_4H_BARS            = 30      # 4h bars to fetch at startup (5 days)
 
+# ── Multi-TF Wave Resonance ───────────────────────────────────────────────────
+RES_ALIGN_THRESH    = 0.75   # min alignment for resonance size boost + wider target
+RES_FULL_TARGET_ATR = 5.0    # target ATR mult when all TFs aligned (vs tier default)
+RES_SIZE_BOOST      = 1.50   # size multiplier at full resonance (alignment ≥ thresh)
+RES_SIZE_REDUCE     = 0.70   # size multiplier at dissonance or low alignment (< 0.35)
+
 # ── Data / backtest ───────────────────────────────────────────────────────────
 SYMBOL        = 'BTCUSDC'
 INTERVAL      = '1m'

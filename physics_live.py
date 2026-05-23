@@ -264,7 +264,9 @@ class PaperTrader:
         return False
 
     def on_bar(self, bar: dict, bids, asks, accum, htf_ctx: dict = None,
-               bar_ask_cleared: bool = False, bar_obi_bull: float = 0.0):
+               bar_ask_cleared: bool = False, bar_obi_bull: float = 0.0,
+               bars_5m: list = None, bars_15m: list = None,
+               bars_1h: list = None, bars_4h: list = None):
         """
         Process one closed 1m bar.
         Stop/target already handled by tick_price() intrabar.
@@ -334,6 +336,19 @@ class PaperTrader:
         atr = float(atr_arr[-1]) if atr_arr[-1] > 0 else cur * 0.002
 
         sig = fusion.run(p, o, c, v, tb, accum, bids=bids, asks=asks)
+
+        # ── Multi-TF resonance ──────────────────────────────────────────────
+        from physics.resonance import resonance as _resonance
+        res = _resonance(list(self._w), bars_5m, bars_15m, bars_1h, bars_4h)
+        self._last_resonance = res
+        log(f"  RESONANCE score={res['score']:+.4f}  dir={res['direction']:+d}  "
+            f"align={res['alignment']:.2f}  dominant={res['dominant_tf']}  "
+            f"dissonance={res['dissonance']}  "
+            f"1m={res['tf_scores'].get('1m',0):+.3f} "
+            f"5m={res['tf_scores'].get('5m',0):+.3f} "
+            f"15m={res['tf_scores'].get('15m',0):+.3f} "
+            f"1h={res['tf_scores'].get('1h',0):+.3f} "
+            f"4h={res['tf_scores'].get('4h',0):+.3f}", C)
 
         self._last_bids_n = len(bids) if bids else 0
         self._last_cav    = sig.get('cavitation', {})
@@ -427,6 +442,27 @@ class PaperTrader:
         target = self._pm.entry_target(entry, stop, +1, entry_tier, atr)
         size   = self._pm.size(entry_tier, sig['confidence'])
 
+        # ── Resonance sizing and target adjustments ─────────────────────────
+        if self._last_resonance:
+            _res = self._last_resonance
+            _align = _res['alignment']
+            _bal   = self._pm.balance
+            if _res['dissonance']:
+                # Macro wave opposing — trade smaller, don't widen target
+                size = max(size * CF.RES_SIZE_REDUCE, _bal * CF.KELLY_MIN)
+                log(f"  [RES] dissonance → size reduced ×{CF.RES_SIZE_REDUCE:.2f}", Y)
+            elif _align >= CF.RES_ALIGN_THRESH and not _res['dissonance']:
+                # All TFs aligned — full resonance: bigger size + wider target
+                size   = min(size * CF.RES_SIZE_BOOST, _bal * CF.KELLY_MAX)
+                target = entry + atr * CF.RES_FULL_TARGET_ATR
+                log(f"  [RES] full resonance align={_align:.2f} → "
+                    f"size ×{CF.RES_SIZE_BOOST:.2f}  target={target:.2f} "
+                    f"({CF.RES_FULL_TARGET_ATR:.1f}×ATR)", G)
+            elif _align < 0.35:
+                # Low alignment — cautious
+                size = max(size * CF.RES_SIZE_REDUCE, _bal * CF.KELLY_MIN)
+                log(f"  [RES] low alignment={_align:.2f} → size reduced ×{CF.RES_SIZE_REDUCE:.2f}", Y)
+
         self._open = {
             'bar_idx':    self._bars,
             'ts':         bar['ts'],
@@ -463,10 +499,11 @@ class PaperTrader:
         }
 
     # Last fusion scores — updated every bar for remote diagnostics
-    _last_score: float = 0.0
-    _last_snr:   float = 0.0
-    _last_dir:   int   = 0
-    _last_tier:  int   = 4
+    _last_score:     float = 0.0
+    _last_snr:       float = 0.0
+    _last_dir:       int   = 0
+    _last_tier:      int   = 4
+    _last_resonance: dict  = None
 
     def stats(self):
         CF = self._CF
@@ -531,6 +568,17 @@ class PaperTrader:
             'htf_at_sup':     bool(self._last_htf.get('at_support', False)),
             'htf_reversal':   bool(self._last_htf.get('reversal_setup', False)),
             'htf_fk':         bool(self._last_htf.get('falling_knife', False)),
+            # Resonance
+            'res_score':      round(float((self._last_resonance or {}).get('score', 0)), 4),
+            'res_direction':  int((self._last_resonance or {}).get('direction', 0)),
+            'res_alignment':  round(float((self._last_resonance or {}).get('alignment', 0)), 3),
+            'res_dissonance': bool((self._last_resonance or {}).get('dissonance', False)),
+            'res_dominant':   str((self._last_resonance or {}).get('dominant_tf', '')),
+            'res_tf_1m':      round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('1m', 0)), 4),
+            'res_tf_5m':      round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('5m', 0)), 4),
+            'res_tf_15m':     round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('15m', 0)), 4),
+            'res_tf_1h':      round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('1h', 0)), 4),
+            'res_tf_4h':      round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('4h', 0)), 4),
         }
         for tier in [1, 2, 3]:
             tt = [t for t in self._trades if t['tier'] == tier]
@@ -727,6 +775,10 @@ class LiveEngine:
             htf_ctx=self._htf_ctx,
             bar_ask_cleared=self._bar_ask_cleared,
             bar_obi_bull=self._bar_obi_bull,
+            bars_5m=(list(self._htf_5m)  + ([self._live_5m]  if self._live_5m  else [])),
+            bars_15m=(list(self._htf_15m) + ([self._live_15m] if self._live_15m else [])),
+            bars_1h=(list(self._htf_1h)  + ([self._live_1h]  if self._live_1h  else [])),
+            bars_4h=(list(self._htf_4h)  + ([self._live_4h]  if self._live_4h  else [])),
         )
         if sig:
             self._log_waveforms(bar, sig, bids)
