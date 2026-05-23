@@ -337,6 +337,24 @@ class PaperTrader:
 
         sig = fusion.run(p, o, c, v, tb, accum, bids=bids, asks=asks)
 
+        # ── Waveform decomposition — amplitude/phase/interference/targets ──
+        from physics.waveform import run as _waveform
+        wf = _waveform(p, entry=cur, direction=1)
+        self._last_waveform = wf
+        itf  = wf['interference']
+        comp = wf['components']
+        log(f"  WAVEFORM  {itf['type'].upper()}  score={itf['score']:+.3f}  "
+            f"dom={itf['dominant']}  aligned={itf['aligned']}  "
+            f"amp_sum=${itf['amplitude_sum']:.2f}  "
+            f"carrier=${itf['carrier_amp']:.2f}  "
+            f"macro=${itf['macro_amp']:.2f}", C)
+        for band in ['micro','subharm','carrier','macro']:
+            c = comp.get(band, {})
+            if c.get('amplitude', 0) > 0:
+                log(f"    {band:8s}  amp=${c['amplitude']:.2f}  "
+                    f"phase={c['phase']:+.2f}  dir={c['direction']:+d}  "
+                    f"v={c['velocity']:+.4f}", C)
+
         # ── Multi-TF resonance ──────────────────────────────────────────────
         from physics.resonance import resonance as _resonance
         res = _resonance(list(self._w), bars_5m, bars_15m, bars_1h, bars_4h)
@@ -439,7 +457,23 @@ class PaperTrader:
 
         entry  = cur
         stop   = self._pm.entry_stop(entry, +1, atr, entry_tier)
-        target = self._pm.entry_target(entry, stop, +1, entry_tier, atr)
+
+        # ── Waveform-derived target (amplitude-based, not ATR multiple) ─────
+        wf_tgt = None
+        if self._last_waveform:
+            tgts  = self._last_waveform.get('targets', {})
+            _itf  = self._last_waveform['interference']
+            if _itf['type'] == 'constructive':
+                wf_tgt = tgts.get('resonance')
+            elif _itf['type'] == 'partial':
+                wf_tgt = tgts.get('extended')
+            else:
+                wf_tgt = tgts.get('primary')
+            # Only use waveform target if it's meaningfully beyond entry
+            if wf_tgt and (wf_tgt - entry) < atr:
+                wf_tgt = None   # fallback to ATR if wave amplitude too small
+
+        target = wf_tgt if wf_tgt else self._pm.entry_target(entry, stop, +1, entry_tier, atr)
         size   = self._pm.size(entry_tier, sig['confidence'])
 
         # ── Resonance sizing and target adjustments ─────────────────────────
@@ -504,6 +538,7 @@ class PaperTrader:
     _last_dir:       int   = 0
     _last_tier:      int   = 4
     _last_resonance: dict  = None
+    _last_waveform:  dict  = None
 
     def stats(self):
         CF = self._CF
@@ -579,6 +614,18 @@ class PaperTrader:
             'res_tf_15m':     round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('15m', 0)), 4),
             'res_tf_1h':      round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('1h', 0)), 4),
             'res_tf_4h':      round(float(((self._last_resonance or {}).get('tf_scores') or {}).get('4h', 0)), 4),
+            # Waveform decomposition
+            'wf_type':        str((self._last_waveform or {}).get('interference', {}).get('type', '')),
+            'wf_score':       round(float((self._last_waveform or {}).get('interference', {}).get('score', 0)), 4),
+            'wf_dominant':    str((self._last_waveform or {}).get('interference', {}).get('dominant', '')),
+            'wf_amp_sum':     round(float((self._last_waveform or {}).get('interference', {}).get('amplitude_sum', 0)), 4),
+            'wf_carrier_amp': round(float((self._last_waveform or {}).get('interference', {}).get('carrier_amp', 0)), 4),
+            'wf_macro_amp':   round(float((self._last_waveform or {}).get('interference', {}).get('macro_amp', 0)), 4),
+            'wf_subharm_amp': round(float((self._last_waveform or {}).get('interference', {}).get('subharm_amp', 0)), 4),
+            'wf_tgt_primary':   round(float(((self._last_waveform or {}).get('targets') or {}).get('primary', 0)), 2),
+            'wf_tgt_extended':  round(float(((self._last_waveform or {}).get('targets') or {}).get('extended', 0)), 2),
+            'wf_tgt_resonance': round(float(((self._last_waveform or {}).get('targets') or {}).get('resonance', 0)), 2),
+            'wf_confidence':    round(float(((self._last_waveform or {}).get('targets') or {}).get('confidence', 0)), 3),
         }
         for tier in [1, 2, 3]:
             tt = [t for t in self._trades if t['tier'] == tier]
