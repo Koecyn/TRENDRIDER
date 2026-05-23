@@ -586,6 +586,23 @@ class PaperTrader:
                 tw = [x for x in tt if x['pnl_pct'] > 0]
                 d[f't{tier}_n']        = len(tt)
                 d[f't{tier}_win_rate'] = round(len(tw)/len(tt)*100, 1)
+        # Full trade log — every closed trade
+        d['trade_log'] = [
+            {
+                'n':      i + 1,
+                'entry':  round(t['entry'], 2),
+                'exit':   round(t.get('exit_price', 0), 2),
+                'stop':   round(t['stop'], 2),
+                'target': round(t['target'], 2),
+                'tier':   t['tier'],
+                'pnl':    round(t.get('pnl_pct', 0), 4),
+                'mae':    round(t.get('mae', 0), 2),
+                'mfe':    round(t.get('mfe', 0), 2),
+                'reason': t.get('exit_reason', ''),
+                'held':   t.get('exit_bar', 0) - t.get('bar_idx', 0),
+            }
+            for i, t in enumerate(self._trades)
+        ]
         # Open trade visibility — n_trades only counts closed trades
         if self._open:
             o = self._open
