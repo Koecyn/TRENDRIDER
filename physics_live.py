@@ -236,11 +236,9 @@ class PaperTrader:
     def tick_price(self, price: float) -> bool:
         """
         Called on EVERY intrabar kline update (x=False).
-        Checks stop/target on the live price — don't wait 60s for bar close.
-        Returns True if a trade was closed so the caller can write stats.
+        Observation only — no positions tracked.
         """
-        if self._open is None:
-            return False
+        return False
         t   = self._open
         cur = price
         t['mae'] = max(t['mae'], float(t['entry'] - cur))
@@ -388,6 +386,9 @@ class PaperTrader:
         log(f"  score={self._last_score:+.4f}  dir={self._last_dir:+d}  "
             f"tier={self._last_tier}  snr={self._last_snr:.2f}  "
             f"threshold={self._CF.LONG_THRESHOLD}", C)
+
+        # OBSERVATION ONLY — signal analysis runs; no positions opened
+        return sig
 
         # ── Reversal override: enter long at HTF support even if score < threshold
         score_abs = abs(self._last_score)
