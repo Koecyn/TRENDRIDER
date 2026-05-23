@@ -81,6 +81,9 @@ HTF_1H_BARS            = 48      # 1h bars to fetch at startup (2 days)
 HTF_4H_BARS            = 30      # 4h bars to fetch at startup (5 days)
 
 # ── Multi-TF Wave Resonance ───────────────────────────────────────────────────
+LARGE_TRADE_BTC     = 0.50   # minimum BTC size to flag as a large print
+
+# ── Multi-TF Wave Resonance ───────────────────────────────────────────────────
 RES_ALIGN_THRESH    = 0.75   # min alignment for resonance size boost + wider target
 RES_FULL_TARGET_ATR = 5.0    # target ATR mult when all TFs aligned (vs tier default)
 RES_SIZE_BOOST      = 1.50   # size multiplier at full resonance (alignment ≥ thresh)

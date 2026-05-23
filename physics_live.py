@@ -50,7 +50,7 @@ LOG_F       = REPO / "physics_live.log"
 TRADE_F     = REPO / "physics_live_trade.json"     # open trade persisted across restarts
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
-          "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms")
+          "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms/btcusdc@aggTrade")
 
 FETCH_EVERY_S = 30   # pull param changes from git
 
@@ -668,6 +668,12 @@ class LiveEngine:
         self._bar_ask_cleared: bool  = False  # [CLEAR ASK] fired this bar
         self._bar_obi_bull:    float = 0.0    # peak bullish depth OBI this bar
 
+        # Intrabar trade flow — from aggTrade stream (every matched trade)
+        # buy = aggressive buyer (taker), sell = aggressive seller (taker)
+        self._bar_buy_vol:   float = 0.0
+        self._bar_sell_vol:  float = 0.0
+        self._bar_trade_n:   int   = 0
+
         # Absorption tracking — filled vs cancelled volume per bar.
         # Filled: qty decreases at level currently AT the spread (taker hit it).
         # Pulled: qty decreases at level AWAY from spread (maker cancelled).
@@ -800,6 +806,19 @@ class LiveEngine:
         if sig:
             self._log_waveforms(bar, sig, bids)
 
+        # Log bar trade flow summary
+        cvd_delta = self._bar_buy_vol - self._bar_sell_vol
+        if self._bar_trade_n > 0:
+            total_vol = self._bar_buy_vol + self._bar_sell_vol
+            buy_pct   = self._bar_buy_vol / total_vol * 100 if total_vol > 0 else 50
+            col = G if cvd_delta > 0 else R
+            log(f"  [TRADES] n={self._bar_trade_n}  "
+                f"buy={self._bar_buy_vol:.4f}({buy_pct:.0f}%)  "
+                f"sell={self._bar_sell_vol:.4f}  "
+                f"cvd_delta={cvd_delta:+.4f}", col)
+        self._bar_buy_vol = self._bar_sell_vol = 0.0
+        self._bar_trade_n = 0
+
         # Log bar absorption summary and reset counters
         if (self._bid_filled + self._ask_filled +
                 self._bid_pulled + self._ask_pulled) > 0.001:
@@ -927,6 +946,39 @@ class LiveEngine:
             else:
                 self._last_dark_side = ''
                 self._last_dark_obi  = 0.0
+
+    def _handle_trade(self, data: dict):
+        """
+        aggTrade stream — every matched trade on the exchange.
+        m=False → buyer is taker → aggressive BUY hitting the ask.
+        m=True  → buyer is maker → aggressive SELL hitting the bid.
+        """
+        try:
+            qty    = float(data['q'])
+            price  = float(data['p'])
+            is_buy = not data.get('m', True)
+
+            self._bar_trade_n += 1
+            if is_buy:
+                self._bar_buy_vol += qty
+            else:
+                self._bar_sell_vol += qty
+
+            # Update peak bullish OBI using real trade flow ratio
+            total = self._bar_buy_vol + self._bar_sell_vol
+            if total > 0 and is_buy:
+                flow_obi = self._bar_buy_vol / total
+                self._bar_obi_bull = max(self._bar_obi_bull, flow_obi)
+
+            # Large print alert
+            threshold = getattr(self._CF, 'LARGE_TRADE_BTC', 0.5)
+            if qty >= threshold:
+                side = 'BUY ' if is_buy else 'SELL'
+                col  = G if is_buy else R
+                log(f"  [PRINT] {side} {qty:.4f}BTC @ {price:.2f}  "
+                    f"bar_cvd={self._bar_buy_vol - self._bar_sell_vol:+.4f}", col)
+        except Exception:
+            pass
 
     def _log_waveforms(self, bar: dict, sig: dict, bids: list):
         """Print the wave equation breakdown for every signal bar."""
@@ -1072,6 +1124,8 @@ class LiveEngine:
                                         self._handle_kline(data.get('k', {}))
                                     elif '@depth' in stream:
                                         self._handle_depth(data)
+                                    elif 'aggTrade' in stream:
+                                        self._handle_trade(data)
                                     await self._fetch_params()
                                 except Exception as e:
                                     log(f"Parse error: {e}", R)

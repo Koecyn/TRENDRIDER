@@ -76,7 +76,7 @@ OUT_DIR     = Path(__file__).resolve().parent / "data" / "raw"
 LOG_F       = Path(__file__).resolve().parent / "collect_raw.log"
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
-          "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms")
+          "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms/btcusdc@aggTrade")
 
 # Flush a checkpoint to disk every N closed bars (in addition to day rollover)
 FLUSH_EVERY = 30
@@ -146,6 +146,7 @@ class Collector:
         self._bids:      list  = []
         self._asks:      list  = []
         self._book_ts:   int   = 0
+        self._bar_trades: list = []   # all trades in current bar
 
         self._running:   bool  = True
         self._today:     str   = self._utc_date()
@@ -161,9 +162,23 @@ class Collector:
         self._asks    = [[float(p), float(q)] for p, q in data.get('asks', [])]
         self._book_ts = int(time.time() * 1000)
 
+    def _handle_trade(self, data: dict):
+        # m=False → buyer is taker → aggressive BUY; m=True → aggressive SELL
+        self._bar_trades.append([
+            int(data['T']),       # trade time ms
+            float(data['p']),     # price
+            float(data['q']),     # qty BTC
+            0 if data.get('m') else 1,  # 1=buy, 0=sell
+        ])
+
     def _handle_kline(self, k: dict):
         if not k.get('x', False):
             return   # only closed bars
+
+        trades      = list(self._bar_trades)
+        buy_vol     = sum(t[2] for t in trades if t[3] == 1)
+        sell_vol    = sum(t[2] for t in trades if t[3] == 0)
+        self._bar_trades = []
 
         bar = {
             'ts':        int(k['t']),
@@ -177,6 +192,13 @@ class Collector:
                 'ts':   self._book_ts,
                 'bids': list(self._bids),
                 'asks': list(self._asks),
+            },
+            'trades': {
+                'n':        len(trades),
+                'buy_vol':  round(buy_vol,  6),
+                'sell_vol': round(sell_vol, 6),
+                'cvd':      round(buy_vol - sell_vol, 6),
+                'prints':   trades,   # [ts_ms, price, qty, side(1=buy/0=sell)]
             },
         }
 
@@ -232,6 +254,8 @@ class Collector:
                                         self._handle_kline(data.get('k', {}))
                                     elif '@depth' in stream:
                                         self._handle_depth(data)
+                                    elif 'aggTrade' in stream:
+                                        self._handle_trade(data)
                                 except Exception as e:
                                     log(f"Parse error: {e}", R)
                             elif msg.type in (aiohttp.WSMsgType.CLOSED,
