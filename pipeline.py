@@ -62,9 +62,11 @@ SEC_FILE  = Path("/tmp/tr_sec.json.gz")    # recent 1s OHLCV bars (gzip)
 WAVE_FILE = Path("/tmp/tr_waves.json.gz")  # latest wave decomposition (gzip)
 OUT_FILE  = REPO / "physics_live_results.json"   # plain JSON — git-readable
 LOG_FILE  = Path("/tmp/tr_pipeline.log")
+RAW_DIR   = REPO / "raw"                   # gitignored — daily raw tick JSONL
 
 GC_EVERY_BARS = 10    # force gc.collect() every N closed bars
 MEM_LOG_BARS  = 30    # log RSS memory every N closed bars
+RAW_FLUSH     = 200   # flush raw buffer to disk every N trades
 
 RING_SIZE    = 10_000   # circular buffer length
 MAX_BARS     = 300      # 1m bar history to keep
@@ -311,7 +313,7 @@ def process_waves(buf: np.memmap, idx: int, bars: list,
     stats['sec_bars_n'] = len(sec_bars) if sec_bars else 0  # just the count
     wave_payload = {'waves': waves, 'stats': stats, 'ts': time.time()}
     tmp = WAVE_FILE.with_suffix('.tmp.gz')
-    with gzip.open(tmp, 'wt', compresslevel=1) as f:
+    with gzip.open(tmp, 'wt', compresslevel=6) as f:
         json.dump(wave_payload, f, separators=(',', ':'))
     tmp.rename(WAVE_FILE)
     return stats
@@ -344,6 +346,24 @@ def publish(stats: dict):
              f"score={c.get('last_score',0):+.3f}")
 
 
+# ── Raw tick archiver ─────────────────────────────────────────────────────────
+
+def _gzip_file(path: Path):
+    """Compress a plain JSONL file to .jsonl.gz, then delete the original."""
+    gz = path.with_suffix('.gz')
+    try:
+        with open(path, 'rb') as fi, gzip.open(gz, 'wb', compresslevel=6) as fo:
+            while True:
+                chunk = fi.read(65536)
+                if not chunk:
+                    break
+                fo.write(chunk)
+        path.unlink()
+        _log(f"archived {path.name} → {gz.name} ({gz.stat().st_size//1024}KB)")
+    except Exception as e:
+        _log(f"gzip_file error {path}: {e}")
+
+
 # ── Layer 1: WebSocket capture ────────────────────────────────────────────────
 
 class Capture:
@@ -372,6 +392,12 @@ class Capture:
         self._sec_c:     float = 0.0
         self._sec_vol:   float = 0.0
         self._sec_n:     int   = 0
+        # Raw tick archiver — daily rotating JSONL, buffered writes
+        RAW_DIR.mkdir(exist_ok=True)
+        self._raw_fh    = None
+        self._raw_day:  str  = ''
+        self._raw_buf:  list = []
+        self._raw_open(time.strftime('%Y%m%d', time.gmtime()))
 
     def _load_bars(self) -> list:
         try:
@@ -384,15 +410,36 @@ class Capture:
 
     def _save_bars(self):
         tmp = BARS_FILE.with_suffix('.tmp.gz')
-        with gzip.open(tmp, 'wt', compresslevel=1) as f:
+        with gzip.open(tmp, 'wt', compresslevel=6) as f:
             json.dump(self.bars[-MAX_BARS:], f, separators=(',', ':'))
         tmp.rename(BARS_FILE)
 
     def _save_sec(self):
         tmp = SEC_FILE.with_suffix('.tmp.gz')
-        with gzip.open(tmp, 'wt', compresslevel=1) as f:
+        with gzip.open(tmp, 'wt', compresslevel=6) as f:
             json.dump(self.sec_bars[-MAX_SEC_BARS:], f, separators=(',', ':'))
         tmp.rename(SEC_FILE)
+
+    def _raw_open(self, day: str):
+        """Open a new daily raw tick file, gzip previous day's file in background."""
+        self._raw_flush()
+        if self._raw_fh:
+            self._raw_fh.close()
+            # Gzip the just-closed day's file if it exists
+            old = RAW_DIR / f"BTCUSDC_{self._raw_day}.jsonl"
+            if old.exists():
+                self._pool.submit(_gzip_file, old)
+        path = RAW_DIR / f"BTCUSDC_{day}.jsonl"
+        self._raw_fh  = open(path, 'a', buffering=8192)
+        self._raw_day = day
+        _log(f"raw ticks → {path.name}")
+
+    def _raw_flush(self):
+        """Flush buffered raw tick rows to disk."""
+        if self._raw_buf and self._raw_fh:
+            self._raw_fh.writelines(self._raw_buf)
+            self._raw_fh.flush()
+            self._raw_buf.clear()
 
     # ── Handlers (called from asyncio — MUST NOT BLOCK) ──────────────────────
 
@@ -412,9 +459,24 @@ class Capture:
     def on_trade(self, data: dict):
         price  = float(data['p'])
         qty    = float(data.get('q', 0.0))
-        sec    = int(data.get('T', time.time() * 1000)) // 1000
+        ts_ms  = int(data.get('T', time.time() * 1000))
+        sec    = ts_ms // 1000
         self.cur_price = price
         self.idx = buf_write(self.buf, self.idx, price)
+
+        # Raw tick archiver — [ts_ms, price*100_int, qty*10000_int, side]
+        # m=True → maker is buyer → sell aggressor (side=0), m=False → buy (side=1)
+        side = 0 if data.get('m', True) else 1
+        self._raw_buf.append(
+            f'[{ts_ms},{int(price * 100)},{int(qty * 10000)},{side}]\n'
+        )
+        if len(self._raw_buf) >= RAW_FLUSH:
+            self._raw_flush()
+
+        # Day rollover — gzip yesterday's file in background
+        day = time.strftime('%Y%m%d', time.gmtime(sec))
+        if day != self._raw_day:
+            self._raw_open(day)
 
         # Seal previous second bucket when second rolls over
         if sec != self._sec_ts and self._sec_ts != 0:
@@ -450,6 +512,7 @@ class Capture:
         self.bars.append(bar)
         self.bars = self.bars[-MAX_BARS:]
         self._seal_sec()   # seal any partial 1s bucket at bar boundary
+        self._raw_flush()  # guaranteed flush at each bar close
         self._save_bars()
         self._save_sec()
         n = len(self.bars)
