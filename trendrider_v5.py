@@ -170,6 +170,10 @@ while True:
     # ── Signal: decel at trough is the trigger ───────────────────────────
     score_ok = eff_score > thresh and not cav and not fk
 
+    # Wave-confirmed entry: AT_SUP + REV + 3+ decel bars = structure beats score gate
+    # Order book can suppress score at exact inflection — wave confirmation overrides
+    wave_confirmed = (at_trough and at_sup and rev and c_decel_bars >= 3 and not fk and not cav)
+
     # High conviction: tier gate (adaptive) + no re-acceleration happening
     waves_ok    = not (c_dp < -10 or sh_dp < -10)  # not re-accelerating this bar
     high_conv   = tier <= 2 and score_ok and waves_ok
@@ -189,6 +193,8 @@ while True:
         sig = f'* ENTRY FORMING — carrier decel {c_dp}% at trough{wall_note}'
     elif at_trough and (sh_deceling or sh_decel_bars >= 1) and score_ok:
         sig = f'PRE-ENTRY — sub momentum falling {sh_dp}%, trough forming{wall_note}'
+    elif wave_confirmed:
+        sig = f'** ENTRY — wave-confirmed: {c_decel_bars}bar decel at AT_SUP+REV, score={score:+.3f} suppressed'
     elif at_trough and score_ok:
         sig = f'AT TROUGH — watching for decel{wall_note}'
     elif at_trough and c_deceling:
