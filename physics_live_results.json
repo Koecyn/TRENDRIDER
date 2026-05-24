@@ -1,5 +1,5 @@
 {
-  "ts": "2026-05-24T17:49:02.166475+00:00",
+  "ts": "2026-05-24T17:50:00.108838+00:00",
   "trigger_id": "p0",
   "status": "live",
   "stats": {
@@ -10,9 +10,9 @@
     "max_dd": 0.0,
     "avg_pnl": 0.0,
     "equity_final": 1000.0,
-    "bars_live": 101,
-    "last_score": -0.0103,
-    "last_snr": 5099.99,
+    "bars_live": 102,
+    "last_score": 0.0,
+    "last_snr": 5106.34,
     "last_dir": 0,
     "last_tier": 5,
     "threshold": 0.12,
