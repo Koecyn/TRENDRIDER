@@ -1156,38 +1156,22 @@ class LiveEngine:
         asyncio.get_event_loop().run_in_executor(None, self._push_results, content)
 
     def _push_results(self, content: str):
-        """Runs in a thread executor — never blocks the WebSocket event loop."""
+        """Runs in a thread executor — never blocks the WebSocket event loop.
+
+        Stays on the current code branch — no stash/checkout dance.
+        Commits only the results file, pushes to data/live ref.
+        Fast enough for 5s intrabar cadence.
+        """
         rel = str(RESULTS_F.relative_to(REPO))
         with _GIT_LOCK:
             try:
-                git("stash")
-                git("fetch", "origin", DATA_BRANCH)
-                r = git("checkout", "-B", DATA_BRANCH, f"origin/{DATA_BRANCH}")
-                if r.returncode != 0:
-                    log(f"  push: checkout data/live failed: {r.stderr[:80]}", R)
-                    git("checkout", CODE_BRANCH)
-                    git("stash", "pop")
-                    RESULTS_F.write_text(content)
-                    return
-                RESULTS_F.write_text(content)
+                RESULTS_F.write_text(content)          # local file always fresh
                 git("add", rel)
-                git("commit", "--allow-empty", "-m", f"live {ts_str()}")
-                pushed = False
-                for wait in [0, 2, 4, 8]:
-                    time.sleep(wait)
-                    r = git("push", "-u", "origin", DATA_BRANCH, "--force")
-                    if r.returncode == 0:
-                        pushed = True
-                        break
-                    log(f"  push attempt failed: {r.stderr[:60]}", Y)
-                if not pushed:
-                    log("  push: all attempts failed — optimizer reads from local file", R)
+                r = git("commit", "-m", f"live {ts_str()}")
+                if r.returncode == 0:
+                    git("push", "origin", f"HEAD:{DATA_BRANCH}")
             except Exception as e:
                 log(f"  push error: {e}", R)
-            finally:
-                git("checkout", CODE_BRANCH)
-                git("stash", "pop")
-                RESULTS_F.write_text(content)   # restore local copy
 
     async def _fetch_params(self):
         """Pull latest params from remote (every FETCH_EVERY_S seconds).
