@@ -180,30 +180,51 @@ while True:
     # Downgrade signal confidence when market is dominated by spoofers
     fake_market = ob_fill_ratio < 0.20 and (ob_ask_pull + ob_bid_pull) > 0.1
 
-    # ── Size tier ────────────────────────────────────────────────────────
-    if fk or cav or peak_exhaust_strong:
-        size = 'SKIP'
-    elif fake_market:
-        size = 'SMALL'    # spoof-dominated market: max size = small
-    elif align >= 0.75 and not dis:
-        size = 'LARGE'
-    elif align >= 0.50:
-        size = 'MEDIUM'
-    elif align >= 0.35:
-        size = 'SMALL'
-    else:
-        size = 'SKIP'
+    # ── ATR asymmetry from HTF bias ───────────────────────────────────────
+    # HTF trend doesn't gate entries — it splits the ATR range.
+    # bias=+0.5 → 70% up / 30% down.  bias=-0.5 → 30% up / 70% down.
+    # High ATR + downtrend = big intrabar moves with upward bounces still tradeable.
+    htf_bias   = s.get('htf_bias', 0.0)
+    atr        = max(c_amp, 1.0)
+    up_frac    = max(0.10, min(0.90, 0.50 + htf_bias * 0.40))
+    dn_frac    = 1.0 - up_frac
+    atr_up     = atr * up_frac    # expected upside range given HTF
+    atr_dn     = atr * dn_frac    # expected downside range given HTF
+    # R ratio: upside available vs downside risk for a long at current phase
+    r_ratio    = atr_up / max(atr_dn, 0.01)
+    # Minimum profit threshold: must exceed 0.002% taker fee (round trip ~0.004%)
+    min_profit = price * 0.00004 if 'price' in dir() else 1.0   # calc after price below
 
-    # ── Targets ──────────────────────────────────────────────────────────
-    t_small = sh_amp * 0.6
-    t_med   = c_amp
-    t_large = c_amp + sh_amp * 0.5
-
+    # ── Targets — asymmetric based on HTF split ───────────────────────────
     tgt_p  = s.get('wf_tgt_primary', 0.0)
     pf     = (1.0 - c_ph) / 2.0
     price  = tgt_p - c_amp * pf if pf > 1e-6 else tgt_p
     trough = price - (c_ph + 1) / 2.0 * c_amp
     peak   = trough + c_amp
+
+    min_profit = price * 0.00004   # 0.004% round-trip fee floor
+    # Targets sized to ATR upside fraction — not full ATR
+    t_small = max(atr_up * 0.40, min_profit)   # sub-harmonic partial: 40% of up-range
+    t_med   = max(atr_up * 0.70, min_profit)   # carrier partial:      70% of up-range
+    t_large = max(atr_up,        min_profit)   # full upside allocation
+
+    # ── Size tier — driven by R ratio + structural conditions ─────────────
+    if fk or cav or peak_exhaust_strong:
+        size = 'SKIP'
+    elif r_ratio < 0.50:
+        size = 'SKIP'   # downside risk > 2× upside — not worth it even at trough
+    elif fake_market and r_ratio < 1.0:
+        size = 'SKIP'   # spoof market + unfavorable ratio = skip
+    elif fake_market:
+        size = 'SMALL'  # spoof market but ratio ok — cap at small
+    elif r_ratio >= 2.0 and align >= 0.60 and not dis:
+        size = 'LARGE'  # strong upside asymmetry + aligned
+    elif r_ratio >= 1.2 and align >= 0.45:
+        size = 'MEDIUM'
+    elif r_ratio >= 0.80:
+        size = 'SMALL'
+    else:
+        size = 'SKIP'
 
     score_delta  = score - prev_score
 
@@ -332,7 +353,9 @@ while True:
     if f_sub_amp > 0.5:
         print(f'fast1s:  sub ph={f_sub_ph:+.2f} dir={f_sub_dir:+d} amp=${f_sub_amp:.0f}  car ph={f_c_ph:+.2f} dir={f_c_dir:+d}  mac ph={f_mc_ph:+.2f} dir={f_mc_dir:+d}{fast_lead_tag}', flush=True)
     print(f'price~${price:.0f}  trough~${trough:.0f}  peak~${peak:.0f}', flush=True)
-    print(f'targets: SMALL +${t_small:.0f}  MEDIUM +${t_med:.0f}  LARGE +${t_large:.0f}', flush=True)
+    print(f'targets: SMALL +${t_small:.0f}  MEDIUM +${t_med:.0f}  LARGE +${t_large:.0f}'
+          f'  |  atr=${atr:.0f} up=${atr_up:.0f}({up_frac:.0%}) dn=${atr_dn:.0f}({dn_frac:.0%})'
+          f'  R={r_ratio:.2f}  bias={htf_bias:+.2f}', flush=True)
     tf_str = ' '.join(f'{k}={v:+.2f}' for k,v in tf.items())
     print(f'waves: {tf_str}  align={align:.2f} {"DIS" if dis else ""}', flush=True)
     # Wall behavior line — only print when there's meaningful OB activity
