@@ -62,8 +62,8 @@ LOG_FILE  = Path("/tmp/tr_pipeline.log")
 RING_SIZE    = 10_000   # circular buffer length
 MAX_BARS     = 300      # bar history to keep
 HEARTBEAT_S  = 10       # reconnect if WS silent this long
-MIN_PUSH_S   = 15       # min seconds between git pushes (bar close overrides)
-INTRABAR_S   = 5        # intrabar wave recompute interval
+MIN_PUSH_S   = 5        # min seconds between git pushes — floor to prevent push storms
+INTRABAR_S   = 1        # recompute every second intrabar
 
 BANDS = {
     'subharm': (6,  22),
