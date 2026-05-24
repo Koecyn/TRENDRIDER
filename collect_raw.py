@@ -30,7 +30,7 @@ REPO        = Path(__file__).resolve().parent
 RAW_DIR     = REPO / "data" / "raw"
 RAW_FILE    = RAW_DIR / "BTCUSDC_LIVE.jsonl"
 GZ_FILE     = RAW_DIR / "BTCUSDC_LIVE.jsonl.gz"
-DATA_BRANCH = "data/live"
+DATA_BRANCH = "data/raw"
 PUSH_S      = 10
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
