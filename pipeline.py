@@ -31,6 +31,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -342,7 +343,7 @@ def _tc(t):
     return _g(t) if t == 'up' else _r(t) if t == 'down' else _d(t)
 
 def display_signal(stats: dict, cur_price: float,
-                   bids: list, asks: list, ob: dict):
+                   bids: list, asks: list, ob: dict, slide: dict = None):
     s      = stats
     score  = s.get('last_score', 0)
     tier   = s.get('last_tier', 5)
@@ -404,11 +405,26 @@ def display_signal(stats: dict, cur_price: float,
     elif at_peak and score < -0.05 and mc_head < c_amp * 0.15:
         sig = _r('  !! EXHAUSTION — downside bias')
 
+    # Sliding window line — shows real/synthetic slot balance and rolling OHLCV
+    slide_str = ''
+    if slide:
+        real_n = slide.get('real_slots', 0)
+        synth_n = 60 - real_n
+        fill_pct = real_n / 60 * 100
+        bar_filled = '█' * (real_n // 6) + '░' * (10 - real_n // 6)
+        slide_h = slide.get('high', 0); slide_l = slide.get('low', 0)
+        slide_rng = slide_h - slide_l
+        slide_str = (f"[1m~]  [{bar_filled}] {real_n}real/{synth_n}syn "
+                     f"O={slide.get('open',0):.2f} H={slide_h:.2f} "
+                     f"L={slide_l:.2f} C={slide.get('close',0):.2f} "
+                     f"rng=${slide_rng:.2f}")
+
     print(
         f"[wave] {_c(bar_n)} | {ph_lbl} | score={sc_str} | "
         f"c_ph={c_ph:+.2f}{_arr(c_dir)} sub{_arr(sh_dir)} mc{_arr(mc_dir)} | "
         f"align={align:.2f} T{tier} | mc_head=${mc_head:.0f} | ${cur_price:,.2f}"
-        f"\n[ob]   {ba_str} | {ob_wall}"
+        + (f"\n{slide_str}" if slide_str else '')
+        + f"\n[ob]   {ba_str} | {ob_wall}"
         f"\n[tf]   1m:{_tc(t1)} 5m:{_tc(t5)} 15m:{_tc(t15)} 1h:{_tc(t1h)} 4h:{_tc(t4h)}"
         + (f"\n[fast] {fast_str}" if fast_str else '')
         + (sig if sig else ''),
@@ -489,6 +505,12 @@ class Capture:
         self._sec_c:     float = 0.0
         self._sec_vol:   float = 0.0
         self._sec_n:     int   = 0
+        # Sliding 60-slot 1s window — bootstrap with 59 copies of last bar,
+        # real seconds fill in one by one until the exchange data falls off.
+        self._slide: deque = deque(maxlen=60)
+        self._slide_real: int = 0   # count of real 1s slots in window
+        self._init_slide()
+
         # Order book fill/pull tracker
         self._prev_asks: dict = {}   # price_str → qty from last depth snapshot
         self._prev_bids: dict = {}
@@ -550,6 +572,35 @@ class Capture:
             json.dump(self.sec_bars[-MAX_SEC_BARS:], f, separators=(',', ':'))
         tmp.rename(SEC_FILE)
 
+    def _init_slide(self):
+        """Pre-fill sliding window with 59 synthetic 1s slots from last closed bar.
+        Real seconds replace them one by one — after 59s the window is 100% real.
+        Mimic the compression phase: data density present from second 1."""
+        self._slide.clear()
+        self._slide_real = 0
+        if not self.bars:
+            return
+        last = self.bars[-1]
+        c = last['close']
+        vol_per = last['volume'] / 59.0
+        slot = {'o': c, 'h': c, 'l': c, 'c': c, 'vol': vol_per, 'real': False}
+        for _ in range(59):
+            self._slide.append(slot)
+
+    def _slide_ohlcv(self) -> dict | None:
+        """Compute rolling OHLCV from the 60-slot sliding window."""
+        w = list(self._slide)
+        if not w:
+            return None
+        return {
+            'open':   w[0]['o'],
+            'high':   max(s['h'] for s in w),
+            'low':    min(s['l'] for s in w),
+            'close':  w[-1]['c'],
+            'volume': sum(s['vol'] for s in w),
+            'real_slots': self._slide_real,   # how many are from real 1s data
+        }
+
     def _raw_open(self, day: str):
         """Open a new daily raw tick file, gzip previous day's file in background."""
         self._raw_flush()
@@ -574,16 +625,24 @@ class Capture:
     # ── Handlers (called from asyncio — MUST NOT BLOCK) ──────────────────────
 
     def _seal_sec(self):
-        """Finalize the current 1s bucket and append to sec_bars ring."""
+        """Finalize the current 1s bucket, append to sec_bars ring + sliding window."""
         if self._sec_n == 0:
             return
-        self.sec_bars.append({
+        slot = {
             'ts': self._sec_ts,
             'o':  round(self._sec_o, 2), 'h': round(self._sec_h, 2),
             'l':  round(self._sec_l, 2), 'c': round(self._sec_c, 2),
             'vol': round(self._sec_vol, 6), 'n': self._sec_n,
-        })
+        }
+        self.sec_bars.append(slot)
         self.sec_bars = self.sec_bars[-MAX_SEC_BARS:]
+        # Feed real 1s data into the sliding window — oldest synthetic slot drops off
+        dropped = self._slide[0] if self._slide else None
+        self._slide.append({'o': slot['o'], 'h': slot['h'], 'l': slot['l'],
+                            'c': slot['c'], 'vol': slot['vol'], 'real': True})
+        if dropped is not None and not dropped['real']:
+            pass   # a synthetic slot fell off — real_slots count doesn't change
+        self._slide_real = sum(1 for s in self._slide if s['real'])
         self._sec_n = 0
 
     def on_trade(self, data: dict):
@@ -661,8 +720,9 @@ class Capture:
         }
         self.bars.append(bar)
         self.bars = self.bars[-MAX_BARS:]
-        self._seal_sec()   # seal any partial 1s bucket at bar boundary
-        self._raw_flush()  # guaranteed flush at each bar close
+        self._seal_sec()      # seal any partial 1s bucket at bar boundary
+        self._init_slide()    # reset sliding window: 59 copies of closed bar
+        self._raw_flush()     # guaranteed flush at each bar close
         self._save_bars()
         self._save_sec()
         n = len(self.bars)
@@ -695,7 +755,12 @@ class Capture:
         sec_snap   = list(self.sec_bars)
         buf_snap   = self.buf
         idx_snap   = self.idx
-        price_snap = self.cur_price
+        slide_ohlcv = self._slide_ohlcv()
+        # Rolling close from sliding window beats raw last-tick noise once
+        # at least one real second has landed in the window.
+        price_snap = (slide_ohlcv['close'] if slide_ohlcv and self._slide_real >= 1
+                      else self.cur_price)
+        slide_snap  = slide_ohlcv   # passed to display for intrabar OHLCV
         bids_snap  = list(self.bids)
         asks_snap  = list(self.asks)
         ob_snap    = dict(self._ob_stats)
@@ -721,7 +786,8 @@ class Capture:
         def _done(fut):
             stats = fut.result()
             if stats:
-                display_signal(stats, price_snap, bids_snap, asks_snap, ob_snap)
+                display_signal(stats, price_snap, bids_snap, asks_snap, ob_snap,
+                               slide_snap)
             if stats and do_publish and not self._pushing:
                 self._pushing = True
                 self.last_push = time.time()
