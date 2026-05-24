@@ -61,12 +61,15 @@ def _push_loop():
                  f"raw {int(time.time())}"],
                 capture_output=True, text=True)
             if r.returncode == 0:
-                subprocess.run(
-                    ['git','-C',str(REPO),'push','origin',
+                pr = subprocess.run(
+                    ['git','-C',str(REPO),'push','--force','origin',
                      f'HEAD:{DATA_BRANCH}'],
-                    capture_output=True)
+                    capture_output=True, text=True)
                 sz = GZ_FILE.stat().st_size
-                log(f"pushed {sz//1024}kB", G)
+                if pr.returncode == 0:
+                    log(f"pushed {sz//1024}kB", G)
+                else:
+                    log(f"push fail: {pr.stderr.strip()}", R)
         except Exception as e:
             log(f"push error: {e}", R)
 
