@@ -179,10 +179,26 @@ while True:
         sig = f'* ENTRY FORMING — sub decel {sh_dp}% at trough  {score_tag}'
     elif at_trough:
         sig = f'AT TROUGH — {score_tag}'
-    elif at_peak and c_deceling:
-        sig = f'AT PEAK — carrier decel {c_dp}%, watch for reversal  {score_tag}'
     elif at_peak:
-        sig = f'AT PEAK — {score_tag}'
+        # Peak absorption analysis: score + velocity + sub tell the story
+        peak_abs = abs(score) < thresh * 0.5    # near-zero score = balanced
+        sub_falling = sh_dir < 0                # sub confirms top
+        sub_rising_at_peak = sh_dir > 0         # sub diverging = possible continuation
+        if score < -thresh and sub_falling:
+            peak_mode = f'SMACKDOWN — supply heavy, sub confirms  {score_tag}'
+        elif score < -thresh:
+            peak_mode = f'REVERSAL — supply heavy  {score_tag}'
+        elif score > thresh and not sub_falling:
+            peak_mode = f'BREAKOUT WATCH — bids absorbing at peak  {score_tag}'
+        elif score > 0 and c_deceling:
+            peak_mode = f'STALL+ABSORB — positive score, vel fading  {score_tag}'
+        elif peak_abs and c_deceling:
+            peak_mode = f'SLOW WALK — balanced, vel fading  {score_tag}'
+        elif sub_rising_at_peak:
+            peak_mode = f'DIVERGE — sub still rising at carrier peak  {score_tag}'
+        else:
+            peak_mode = f'PEAK — {score_tag}'
+        sig = f'AT PEAK — {peak_mode}'
     else:
         sig = 'NEUTRAL'
 
