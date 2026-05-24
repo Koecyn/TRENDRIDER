@@ -84,6 +84,14 @@ while True:
     cav    = s.get('last_cav_active', False)
     snr    = s.get('last_snr', 0.0)
 
+    # Wall behavior — filled = real supply consumed, pulled = fake/cancelled
+    ob_ask_fill    = s.get('ob_ask_fill', 0.0)
+    ob_ask_pull    = s.get('ob_ask_pull', 0.0)
+    ob_bid_fill    = s.get('ob_bid_fill', 0.0)
+    ob_bid_pull    = s.get('ob_bid_pull', 0.0)
+    ob_ask_cleared = s.get('ob_ask_cleared', False)
+    ob_fill_ratio  = s.get('ob_fill_ratio', 0.0)
+
     tf  = {k: s.get(f'res_tf_{k}', 0.0) for k in ['1m','5m','15m','1h','4h']}
     htf = {k: s.get(f'htf_trend_{k}', '?') for k in ['1m','5m','15m','1h','4h']}
 
@@ -153,13 +161,48 @@ while True:
     peak   = trough + c_amp
 
     score_delta  = score - prev_score
-    # Wall absorption note: sudden score drop at trough while sub rising = fake ask wall
-    wall_fake    = (
+
+    # ── Wall behavior classification ──────────────────────────────────────
+    # PULLED > FILLED → fake wall, market maker cancelled before price got there → path open
+    # FILLED > PULLED → real supply consumed by takers → genuine resistance
+    # ob_ask_cleared → large ask yanked instantly (≥50% of level) → strong upside signal
+    ask_total   = ob_ask_fill + ob_ask_pull
+    bid_total   = ob_bid_fill + ob_bid_pull
+    ask_fake    = ask_total > 0.02 and ob_ask_pull > ob_ask_fill * 1.5  # pulled > 1.5× filled
+    ask_real    = ask_total > 0.02 and ob_ask_fill > ob_ask_pull * 1.5  # filled > 1.5× pulled
+    bid_fake    = bid_total > 0.02 and ob_bid_pull > ob_bid_fill * 1.5
+    bid_real    = bid_total > 0.02 and ob_bid_fill > ob_bid_pull * 1.5
+
+    # At trough: fake ask wall = score drag is noise, path is actually open
+    wall_fake   = ask_fake or ob_ask_cleared or (
         at_trough and c_decel_bars >= 2 and
         score < 0 and prev_score > 0 and
         score_delta < -(thresh * 1.5) and sh_rising
     )
-    wall_note    = f' [wall-abs score={score:+.3f}]' if wall_fake else ''
+    # Build wall annotation
+    if ob_ask_cleared:
+        wall_note = f' [ASK-CLEARED path open]'
+    elif ask_fake:
+        wall_note = f' [ask-pulled {ob_ask_pull:.3f}BTC fake]'
+    elif ask_real and at_trough:
+        wall_note = f' [ask-FILLED {ob_ask_fill:.3f}BTC real supply]'
+    elif ask_fake is False and wall_fake:
+        wall_note = f' [wall-abs score={score:+.3f}]'
+    else:
+        wall_note = ''
+
+    # Peak wall note: pulled bid = support fake (bearish), filled ask = bids absorbing (bullish)
+    if at_peak:
+        if bid_fake:
+            peak_wall_note = f' [bid-pulled {ob_bid_pull:.3f}BTC support fake → down]'
+        elif bid_real:
+            peak_wall_note = f' [bid-FILLED {ob_bid_fill:.3f}BTC real selling]'
+        elif ob_ask_fill > 0.02 and not ask_fake:
+            peak_wall_note = f' [ask-FILLED {ob_ask_fill:.3f}BTC bids absorbing]'
+        else:
+            peak_wall_note = ''
+    else:
+        peak_wall_note = ''
 
     # ── Signal: wave mechanics fire the signal, score/tier/align size it ──
     # score_ok gates NOTHING — it annotates conviction level only
@@ -191,14 +234,20 @@ while True:
     elif at_trough:
         sig = f'AT TROUGH — {score_tag}'
     elif at_peak:
-        # Peak absorption analysis: score + velocity + sub tell the story
+        # Peak absorption analysis: score + velocity + sub + real wall behavior
         peak_abs = abs(score) < thresh * 0.5    # near-zero score = balanced
         sub_falling = sh_dir < 0                # sub confirms top
         sub_rising_at_peak = sh_dir > 0         # sub diverging = possible continuation
-        if score < -thresh and sub_falling:
+        # bid_real at peak = real sellers hitting the bid = confirmed supply
+        # ask_fake at peak = ask walls being pulled before price reaches = bids absorbing
+        if score < -thresh and sub_falling and bid_real:
+            peak_mode = f'SMACKDOWN — supply confirmed bid-fill={ob_bid_fill:.3f}BTC  {score_tag}'
+        elif score < -thresh and sub_falling:
             peak_mode = f'SMACKDOWN — supply heavy, sub confirms  {score_tag}'
         elif score < -thresh:
             peak_mode = f'REVERSAL — supply heavy  {score_tag}'
+        elif score > thresh and ask_fake:
+            peak_mode = f'BREAKOUT — asks being pulled, bids absorbing  {score_tag}'
         elif score > thresh and not sub_falling:
             peak_mode = f'BREAKOUT WATCH — bids absorbing at peak  {score_tag}'
         elif score > 0 and c_deceling:
@@ -209,7 +258,7 @@ while True:
             peak_mode = f'DIVERGE — sub still rising at carrier peak  {score_tag}'
         else:
             peak_mode = f'PEAK — {score_tag}'
-        sig = f'AT PEAK — {peak_mode}'
+        sig = f'AT PEAK — {peak_mode}{peak_wall_note}'
     else:
         sig = 'NEUTRAL'
 
@@ -228,6 +277,13 @@ while True:
     print(f'targets: SMALL +${t_small:.0f}  MEDIUM +${t_med:.0f}  LARGE +${t_large:.0f}', flush=True)
     tf_str = ' '.join(f'{k}={v:+.2f}' for k,v in tf.items())
     print(f'waves: {tf_str}  align={align:.2f} {"DIS" if dis else ""}', flush=True)
+    # Wall behavior line — only print when there's meaningful OB activity
+    if ask_total > 0.005 or bid_total > 0.005 or ob_ask_cleared:
+        cleared_str = '  ASK-CLEARED' if ob_ask_cleared else ''
+        ask_str = f'ask fill={ob_ask_fill:.3f} pull={ob_ask_pull:.3f}' if ask_total > 0.005 else ''
+        bid_str = f'  bid fill={ob_bid_fill:.3f} pull={ob_bid_pull:.3f}' if bid_total > 0.005 else ''
+        wall_class = ('FAKE' if ask_fake else 'REAL' if ask_real else 'MIX') if ask_total > 0.005 else ''
+        print(f'OB: {ask_str}{bid_str}  ratio={ob_fill_ratio:.0%}real  [{wall_class}]{cleared_str}', flush=True)
     score_delta  = score - prev_score
     score_mom    = score_delta / max(abs(thresh), 0.01)  # delta in units of threshold
     mom_str      = f'{score_mom:+.1f}x' if abs(score_mom) >= 0.1 else '~0'

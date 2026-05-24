@@ -594,6 +594,16 @@ class PaperTrader:
             'last_bids_n':     self._last_bids_n,
             'last_cav_active': bool(self._last_cav.get('active', False)),
             'last_cav_risk':   round(float(self._last_cav.get('risk', 0)), 4),
+            # Wall behavior — filled (real) vs pulled (fake/cancelled) per bar
+            'ob_ask_fill':    round(self._last_ask_fill, 4),
+            'ob_ask_pull':    round(self._last_ask_pull, 4),
+            'ob_bid_fill':    round(self._last_bid_fill, 4),
+            'ob_bid_pull':    round(self._last_bid_pull, 4),
+            'ob_ask_cleared': bool(self._last_ask_cleared),
+            'ob_fill_ratio':  round(
+                (self._last_ask_fill + self._last_bid_fill) /
+                max(self._last_ask_fill + self._last_bid_fill +
+                    self._last_ask_pull + self._last_bid_pull, 1e-6), 3),
             # HTF regime
             'htf_trend_1m':   self._last_htf.get('trend_1m',  'none'),
             'htf_trend_5m':   self._last_htf.get('trend_5m',  'none'),
@@ -734,6 +744,13 @@ class LiveEngine:
         self._ask_filled:  float = 0.0   # BTC absorbed on ask side (taker buys)
         self._bid_pulled:  float = 0.0   # BTC cancelled on bid side (spoofed)
         self._ask_pulled:  float = 0.0   # BTC cancelled on ask side (spoofed)
+
+        # Last-bar snapshots — saved before reset so _write_stats() can export them
+        self._last_ask_fill:    float = 0.0
+        self._last_ask_pull:    float = 0.0
+        self._last_bid_fill:    float = 0.0
+        self._last_bid_pull:    float = 0.0
+        self._last_ask_cleared: bool  = False
 
     def _reload(self):
         """Hot-reload params from updated config.py."""
@@ -905,6 +922,13 @@ class LiveEngine:
                 f"bid_pull={self._bid_pulled:.4f}  "
                 f"ask_pull={self._ask_pulled:.4f}  "
                 f"net={net:+.4f}BTC", Y)
+        # Snapshot before reset so _write_stats() sees the bar's wall behavior
+        self._last_ask_fill    = self._ask_filled
+        self._last_ask_pull    = self._ask_pulled
+        self._last_bid_fill    = self._bid_filled
+        self._last_bid_pull    = self._bid_pulled
+        self._last_ask_cleared = self._bar_ask_cleared
+
         self._bid_filled = self._ask_filled = 0.0
         self._bid_pulled = self._ask_pulled = 0.0
         self._bar_ask_cleared = False
