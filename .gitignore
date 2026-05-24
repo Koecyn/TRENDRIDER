@@ -10,3 +10,4 @@ bt_results.json
 backtester/bt_run.log
 backtester/*.csv
 *.html
+physics_live.log
