@@ -105,11 +105,14 @@ while True:
         psh_vel = prev['sh_vel']
     else:
         psh_vel = sh_vel * 1.10 if abs(sh_vel) > 0.1 else sh_vel - 1.0
-    psh_dir      = prev.get('sh_dir', sh_dir)
-    c_decel_bars  = prev.get('c_decel_bars', 0)
-    sh_decel_bars = prev.get('sh_decel_bars', 0)
-    trough_bars   = prev.get('trough_bars', 0)
-    prev_score    = prev.get('score', score)  # score last bar (default=current on cold start)
+    psh_dir        = prev.get('sh_dir', sh_dir)
+    c_decel_bars   = prev.get('c_decel_bars', 0)
+    sh_decel_bars  = prev.get('sh_decel_bars', 0)
+    trough_bars    = prev.get('trough_bars', 0)
+    prev_score     = prev.get('score', score)
+    peak_bars      = prev.get('peak_bars', 0)
+    score_neg_bars = prev.get('score_neg_bars', 0)   # consecutive bars score < 0 at peak
+    score_trend    = prev.get('score_trend', 0.0)    # rolling score delta (smoothed)
 
     # ── Core: is momentum DECREASING at trough? ──────────────────────────
     at_trough   = c_ph <= -0.75
@@ -136,6 +139,23 @@ while True:
     sh_turned   = sh_dir > 0 and psh_dir <= 0
     sh_rising   = sh_dir > 0
     trough_bars = (trough_bars + 1) if at_trough else 0
+    peak_bars   = (peak_bars + 1) if at_peak else 0
+
+    # Score trend: smoothed delta — detects slow bleed before price moves
+    score_trend    = score_trend * 0.7 + (score - prev_score) * 0.3
+    # Count consecutive bars where score is negative while at peak
+    score_neg_bars = (score_neg_bars + 1) if (at_peak and score < 0) else 0
+
+    # ── Peak exhaustion: carrier ceiling + macro full + score bleeding ────
+    mc_head_val  = mc_amp * (1.0 - mc_ph) / 2.0
+    peak_exhaust = (
+        at_peak and
+        peak_bars >= 3 and          # held at peak multiple bars
+        mc_head_val < c_amp * 0.15 and   # macro headroom < 15% of carrier amp
+        score_trend < -0.005             # score consistently bleeding negative
+    )
+    # Stronger exhaustion: score has been negative + align degrading
+    peak_exhaust_strong = peak_exhaust and (score_neg_bars >= 2 or align < 0.70)
 
     # ── Size tier ────────────────────────────────────────────────────────
     if fk or cav:
@@ -240,7 +260,11 @@ while True:
         sub_rising_at_peak = sh_dir > 0         # sub diverging = possible continuation
         # bid_real at peak = real sellers hitting the bid = confirmed supply
         # ask_fake at peak = ask walls being pulled before price reaches = bids absorbing
-        if score < -thresh and sub_falling and bid_real:
+        if peak_exhaust_strong:
+            peak_mode = f'EXHAUSTION — {peak_bars}bars ceiling  mc_full  score_trend={score_trend:+.4f}  DOWNSIDE BIAS'
+        elif peak_exhaust:
+            peak_mode = f'EXHAUSTION — {peak_bars}bars ceiling  mc_full  trend bleeding  {score_tag}'
+        elif score < -thresh and sub_falling and bid_real:
             peak_mode = f'SMACKDOWN — supply confirmed bid-fill={ob_bid_fill:.3f}BTC  {score_tag}'
         elif score < -thresh and sub_falling:
             peak_mode = f'SMACKDOWN — supply heavy, sub confirms  {score_tag}'
@@ -297,7 +321,9 @@ while True:
     prev = {
         'c_vel': c_vel, 'c_dir': c_dir, 'c_decel_bars': c_decel_bars,
         'sh_vel': sh_vel, 'sh_dir': sh_dir, 'sh_decel_bars': sh_decel_bars,
-        'score': score, 'bar': bar, 'trough_bars': trough_bars
+        'score': score, 'bar': bar, 'trough_bars': trough_bars,
+        'peak_bars': peak_bars, 'score_neg_bars': score_neg_bars,
+        'score_trend': score_trend,
     }
     save_state(prev)
     time.sleep(8)
