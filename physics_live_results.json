@@ -1,5 +1,5 @@
 {
-  "ts": "2026-05-24T17:49:00.118643+00:00",
+  "ts": "2026-05-24T17:49:02.166475+00:00",
   "trigger_id": "p0",
   "status": "live",
   "stats": {
@@ -44,7 +44,7 @@
     "wf_dominant": "macro",
     "wf_amp_sum": 0.0,
     "wf_carrier_amp": 11.4408,
-    "wf_macro_amp": 435.737,
+    "wf_macro_amp": 428.6074,
     "wf_subharm_amp": 0.0,
     "wf_tgt_primary": 76634.53,
     "wf_tgt_extended": 76634.53,
@@ -62,10 +62,10 @@
     "wf_carrier_phase": -1.0,
     "wf_carrier_direction": 0,
     "wf_carrier_velocity": -0.0,
-    "wf_macro_amplitude": 435.737,
-    "wf_macro_phase": 0.8,
+    "wf_macro_amplitude": 428.6074,
+    "wf_macro_phase": 0.789,
     "wf_macro_direction": 0,
-    "wf_macro_velocity": -4.0467,
+    "wf_macro_velocity": -4.1011,
     "trade_log": []
   }
 }
