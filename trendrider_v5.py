@@ -150,8 +150,25 @@ while True:
     trough = price - (c_ph + 1) / 2.0 * c_amp
     peak   = trough + c_amp
 
+    # ── Wall absorption override ──────────────────────────────────────────
+    # Pattern: score drops > 1.5x thresh in one bar at confirmed trough
+    # while sub velocity is bouncing positive. This is a large ask wall
+    # appearing as price lifts off trough — these walls are routinely pulled
+    # before execution. Velocity passed through them = they were fake.
+    # Blend prior positive score (65%) with physics (35%) to dampen the signal.
+    score_delta  = score - prev_score
+    wall_fake    = (
+        at_trough and
+        c_decel_bars >= 2 and          # carrier already confirmed decelerating
+        score < 0 and prev_score > 0 and  # score just flipped negative
+        score_delta < -(thresh * 1.5) and # sudden large drop (> 1.5x threshold)
+        sh_rising                          # sub velocity already turned up
+    )
+    eff_score    = score * 0.35 + prev_score * 0.65 if wall_fake else score
+    wall_note    = f' [wall-override eff={eff_score:+.3f}]' if wall_fake else ''
+
     # ── Signal: decel at trough is the trigger ───────────────────────────
-    score_ok = score > thresh and not cav and not fk
+    score_ok = eff_score > thresh and not cav and not fk
 
     # High conviction: tier gate (adaptive) + no re-acceleration happening
     waves_ok    = not (c_dp < -10 or sh_dp < -10)  # not re-accelerating this bar
@@ -159,26 +176,22 @@ while True:
     if fk or cav:
         sig = 'AVOID — FK/CAV'
     elif at_trough and high_conv and sh_rising:
-        sig = f'*** ENTRY — tier={tier} sub rising  score={score:+.3f}'
+        sig = f'*** ENTRY — tier={tier} sub rising  score={score:+.3f}{wall_note}'
     elif at_trough and high_conv and (c_deceling or sh_deceling or sh_decel_bars >= 1 or c_decel_bars >= 1):
-        sig = f'*** ENTRY — tier={tier} decel confirmed ({c_decel_bars}c/{sh_decel_bars}s bars)  score={score:+.3f}'
+        sig = f'*** ENTRY — tier={tier} decel confirmed ({c_decel_bars}c/{sh_decel_bars}s bars)  score={score:+.3f}{wall_note}'
     elif at_trough and sh_rising and c_deceling and score_ok:
-        # Sub turned, carrier also decelerating → full confirmation
-        sig = f'*** ENTRY — sub up + carrier decel {c_dp}% (both causes visible)'
+        sig = f'*** ENTRY — sub up + carrier decel {c_dp}%{wall_note}'
     elif at_trough and sh_rising and score_ok:
-        # Sub turned positive while carrier still loading at trough — sub leads
-        sig = f'** ENTRY — sub rising ph={sh_ph:+.2f}, carrier loading at trough'
+        sig = f'** ENTRY — sub rising ph={sh_ph:+.2f}, carrier loading at trough{wall_note}'
     elif at_trough and c_decel_bars >= 2 and score_ok:
-        sig = f'** ENTRY — carrier decel {c_decel_bars} bars straight at trough'
+        sig = f'** ENTRY — carrier decel {c_decel_bars} bars straight at trough{wall_note}'
     elif at_trough and c_deceling and score_ok:
-        sig = f'* ENTRY FORMING — carrier decel {c_dp}% at trough'
+        sig = f'* ENTRY FORMING — carrier decel {c_dp}% at trough{wall_note}'
     elif at_trough and (sh_deceling or sh_decel_bars >= 1) and score_ok:
-        # Sub decelerating hard — pre-turn signal, carrier trough forming
-        sig = f'PRE-ENTRY — sub momentum falling {sh_dp}%, trough forming'
+        sig = f'PRE-ENTRY — sub momentum falling {sh_dp}%, trough forming{wall_note}'
     elif at_trough and score_ok:
-        sig = 'AT TROUGH — watching for decel'
+        sig = f'AT TROUGH — watching for decel{wall_note}'
     elif at_trough and c_deceling:
-        # Decel visible but score not over threshold yet
         sig = f'WATCH — carrier decel {c_dp}% at trough, score={score:+.3f} below {thresh}'
     elif at_peak and score < -thresh:
         sig = 'AT PEAK — exit watch'
