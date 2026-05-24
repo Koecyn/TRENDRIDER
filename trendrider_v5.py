@@ -163,8 +163,17 @@ while True:
     # score_ok gates NOTHING — it annotates conviction level only
     score_tag = f'score={score:+.3f}' if abs(score) >= thresh * 0.5 else f'score={score:+.3f}(low)'
 
+    # Triple-wave trough: carrier + sub + macro all near trough simultaneously
+    triple_trough = at_trough and mc_ph <= -0.75 and sh_ph <= -0.75
+
     if fk or cav:
         sig = 'AVOID — FK/CAV'
+    elif triple_trough and sh_rising:
+        sig = f'**** ENTRY — TRIPLE TROUGH carrier+sub+macro  sub rising  {score_tag}{wall_note}'
+    elif triple_trough and (c_deceling or c_decel_bars >= 1):
+        sig = f'**** ENTRY — TRIPLE TROUGH carrier+sub+macro  c_decel={c_dp}%  {score_tag}{wall_note}'
+    elif triple_trough:
+        sig = f'*** ENTRY — TRIPLE TROUGH all waves at bottom  {score_tag}{wall_note}'
     elif at_trough and sh_rising and (c_deceling or c_decel_bars >= 1):
         sig = f'*** ENTRY — sub rising + carrier decel {c_dp}%  {score_tag}{wall_note}'
     elif at_trough and sh_rising:
@@ -220,7 +229,11 @@ while True:
     score_delta  = score - prev_score
     score_mom    = score_delta / max(abs(thresh), 0.01)  # delta in units of threshold
     mom_str      = f'{score_mom:+.1f}x' if abs(score_mom) >= 0.1 else '~0'
-    print(f'score={score:+.3f}  Δ={score_delta:+.3f}({mom_str}thresh)  tier={tier}  snr={snr:.0f}  htf:{htf["1m"]}/{htf["5m"]}/{htf["15m"]}/{htf["1h"]}/{htf["4h"]}', flush=True)
+    # Recovery flag: score bouncing back after absorption event
+    recovering   = at_trough and score_delta > thresh * 0.5 and score < thresh
+    rec_str      = '  [RECOVERING]' if recovering else ''
+    mc_head      = mc_amp * (1 - mc_ph) / 2
+    print(f'score={score:+.3f}  Δ={score_delta:+.3f}({mom_str}thresh)  tier={tier}  snr={snr:.0f}  mc_head=${mc_head:.0f}{rec_str}  htf:{htf["1m"]}/{htf["5m"]}/{htf["15m"]}/{htf["1h"]}/{htf["4h"]}', flush=True)
     print('---', flush=True)
 
     prev = {
