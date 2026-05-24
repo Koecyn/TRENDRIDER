@@ -55,13 +55,17 @@ REPO     = Path(__file__).resolve().parent
 WS_URL   = ("wss://stream.binance.us:9443/stream"
             "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms/btcusdc@aggTrade")
 
-TICK_BIN  = Path("/tmp/tr_ticks.bin")      # float64 ring buffer (prices)
-TICK_IDX  = Path("/tmp/tr_ticks.idx")      # write index (int64)
-BARS_FILE = Path("/tmp/tr_bars.json.gz")   # closed 1m bar history (gzip)
-SEC_FILE  = Path("/tmp/tr_sec.json.gz")    # recent 1s OHLCV bars (gzip)
-WAVE_FILE = Path("/tmp/tr_waves.json.gz")  # latest wave decomposition (gzip)
+# Cache dir — /tmp doesn't exist on Termux; use ~/.tr_cache instead
+_CACHE    = Path.home() / '.tr_cache'
+_CACHE.mkdir(exist_ok=True)
+
+TICK_BIN  = _CACHE / 'tr_ticks.bin'      # float64 ring buffer (prices)
+TICK_IDX  = _CACHE / 'tr_ticks.idx'      # write index (int64)
+BARS_FILE = _CACHE / 'tr_bars.json.gz'   # closed 1m bar history (gzip)
+SEC_FILE  = _CACHE / 'tr_sec.json.gz'    # recent 1s OHLCV bars (gzip)
+WAVE_FILE = _CACHE / 'tr_waves.json.gz'  # latest wave decomposition (gzip)
 OUT_FILE  = REPO / "physics_live_results.json"   # plain JSON — git-readable
-LOG_FILE  = Path("/tmp/tr_pipeline.log")
+LOG_FILE  = _CACHE / 'tr_pipeline.log'
 RAW_DIR   = REPO / "raw"                   # gitignored — daily raw tick JSONL
 
 GC_EVERY_BARS = 10    # force gc.collect() every N closed bars
