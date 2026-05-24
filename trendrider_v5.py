@@ -208,17 +208,28 @@ while True:
     t_med   = max(atr_up * 0.70, min_profit)   # carrier partial:      70% of up-range
     t_large = max(atr_up,        min_profit)   # full upside allocation
 
+    # ── Dynamic stop distance — collared by HTF bias ──────────────────────
+    # Downtrend (bias < 0): tight collar — ATR can snap back hard, cut fast
+    # Uptrend (bias > 0): wider stop — pullbacks are shallower, give room
+    # stop_mult: 0.25 (bias=-1, tight) → 0.90 (bias=+1, wide)
+    stop_mult   = 0.25 + (htf_bias + 1.0) / 2.0 * 0.65   # maps [-1,+1] → [0.25, 0.90]
+    stop_dist   = atr_dn * stop_mult                        # $ distance below entry
+    stop_pct    = stop_dist / max(price, 1.0) * 100        # % of price
+
     # ── Size tier — driven by R ratio + structural conditions ─────────────
+    MIN_TARGET = 40.0   # below $40 upside = not worth the fee risk, data still shown
     if fk or cav or peak_exhaust_strong:
         size = 'SKIP'
+    elif atr_up < MIN_TARGET:
+        size = 'SKIP'   # insufficient upside range regardless of direction
     elif r_ratio < 0.50:
-        size = 'SKIP'   # downside risk > 2× upside — not worth it even at trough
+        size = 'SKIP'   # downside risk > 2× upside
     elif fake_market and r_ratio < 1.0:
-        size = 'SKIP'   # spoof market + unfavorable ratio = skip
+        size = 'SKIP'   # spoof market + unfavorable ratio
     elif fake_market:
         size = 'SMALL'  # spoof market but ratio ok — cap at small
     elif r_ratio >= 2.0 and align >= 0.60 and not dis:
-        size = 'LARGE'  # strong upside asymmetry + aligned
+        size = 'LARGE'
     elif r_ratio >= 1.2 and align >= 0.45:
         size = 'MEDIUM'
     elif r_ratio >= 0.80:
@@ -356,6 +367,8 @@ while True:
     print(f'targets: SMALL +${t_small:.0f}  MEDIUM +${t_med:.0f}  LARGE +${t_large:.0f}'
           f'  |  atr=${atr:.0f} up=${atr_up:.0f}({up_frac:.0%}) dn=${atr_dn:.0f}({dn_frac:.0%})'
           f'  R={r_ratio:.2f}  bias={htf_bias:+.2f}', flush=True)
+    print(f'stop:    -${stop_dist:.0f} ({stop_pct:.2f}%)  [mult={stop_mult:.2f} '
+          f'{"TIGHT" if htf_bias < -0.2 else "WIDE" if htf_bias > 0.2 else "NEUTRAL"}]', flush=True)
     tf_str = ' '.join(f'{k}={v:+.2f}' for k,v in tf.items())
     print(f'waves: {tf_str}  align={align:.2f} {"DIS" if dis else ""}', flush=True)
     # Wall behavior line — only print when there's meaningful OB activity
