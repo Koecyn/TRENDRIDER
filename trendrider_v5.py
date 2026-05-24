@@ -98,9 +98,10 @@ while True:
     else:
         psh_vel = sh_vel * 1.10 if abs(sh_vel) > 0.1 else sh_vel - 1.0
     psh_dir      = prev.get('sh_dir', sh_dir)
-    c_decel_bars = prev.get('c_decel_bars', 0)
-    sh_decel_bars= prev.get('sh_decel_bars', 0)
-    prev_score   = prev.get('score', score)  # score last bar (default=current on cold start)
+    c_decel_bars  = prev.get('c_decel_bars', 0)
+    sh_decel_bars = prev.get('sh_decel_bars', 0)
+    trough_bars   = prev.get('trough_bars', 0)
+    prev_score    = prev.get('score', score)  # score last bar (default=current on cold start)
 
     # ── Core: is momentum DECREASING at trough? ──────────────────────────
     at_trough   = c_ph <= -0.75
@@ -124,8 +125,9 @@ while True:
     c_dp  = int((abs(pc_vel) - abs(c_vel)) / max(abs(pc_vel), 0.01) * 100)
     sh_dp = int((abs(psh_vel) - abs(sh_vel)) / max(abs(psh_vel), 0.01) * 100)
 
-    sh_turned = sh_dir > 0 and psh_dir <= 0
-    sh_rising = sh_dir > 0
+    sh_turned   = sh_dir > 0 and psh_dir <= 0
+    sh_rising   = sh_dir > 0
+    trough_bars = (trough_bars + 1) if at_trough else 0
 
     # ── Size tier ────────────────────────────────────────────────────────
     if fk or cav:
@@ -219,7 +221,7 @@ while True:
     ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f'[{ts}] bar={bar}  {size}  {flag_str}', flush=True)
     print(f'{sig}', flush=True)
-    print(f'carrier: ph={c_ph:+.2f}  dir={c_dir:+d}  amp=${c_amp:.0f}  vel={c_vel:+.2f}  decel={c_dp}%  ({c_decel_bars}bars)', flush=True)
+    print(f'carrier: ph={c_ph:+.2f}  dir={c_dir:+d}  amp=${c_amp:.0f}  vel={c_vel:+.2f}  decel={c_dp}%  ({c_decel_bars}bars)  [trough {trough_bars}bars]', flush=True)
     print(f'subharm: ph={sh_ph:+.2f}  dir={sh_dir:+d}  amp=${sh_amp:.0f}  vel={sh_vel:+.2f}  decel={sh_dp}%  ({sh_decel_bars}bars)', flush=True)
     print(f'macro:   ph={mc_ph:+.2f}  dir={mc_dir:+d}  amp=${mc_amp:.0f}  headroom=${mc_amp*(1-mc_ph)/2:.0f}  (4h only)', flush=True)
     print(f'price~${price:.0f}  trough~${trough:.0f}  peak~${peak:.0f}', flush=True)
@@ -239,7 +241,7 @@ while True:
     prev = {
         'c_vel': c_vel, 'c_dir': c_dir, 'c_decel_bars': c_decel_bars,
         'sh_vel': sh_vel, 'sh_dir': sh_dir, 'sh_decel_bars': sh_decel_bars,
-        'score': score, 'bar': bar
+        'score': score, 'bar': bar, 'trough_bars': trough_bars
     }
     save_state(prev)
     time.sleep(8)
