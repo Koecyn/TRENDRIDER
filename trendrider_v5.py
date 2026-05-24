@@ -84,6 +84,20 @@ while True:
     cav    = s.get('last_cav_active', False)
     snr    = s.get('last_snr', 0.0)
 
+    # Fast 1s wave stats — leading indicator, leads 1m bar close by up to 59s
+    f_sub_ph  = s.get('fast_sub_phase',     0.0)
+    f_sub_dir = s.get('fast_sub_dir',       0)
+    f_sub_vel = s.get('fast_sub_vel',       0.0)
+    f_sub_amp = s.get('fast_sub_amp',       0.0)
+    f_c_ph    = s.get('fast_carrier_phase', 0.0)
+    f_c_dir   = s.get('fast_carrier_dir',   0)
+    f_mc_ph   = s.get('fast_macro_phase',   0.0)
+    f_mc_dir  = s.get('fast_macro_dir',     0)
+    # Fast sub turning positive at 1s resolution = entry forming before 1m bar sees it
+    fast_sub_rising  = f_sub_dir > 0 and f_sub_amp > 0.5
+    fast_sub_falling = f_sub_dir < 0 and f_sub_amp > 0.5
+    fast_at_trough   = f_c_ph <= -0.75 and f_sub_amp > 0.5
+
     # Wall behavior — filled = real supply consumed, pulled = fake/cancelled
     ob_ask_fill    = s.get('ob_ask_fill', 0.0)
     ob_ask_pull    = s.get('ob_ask_pull', 0.0)
@@ -231,8 +245,15 @@ while True:
     # Triple-wave trough: carrier + sub + macro all near trough simultaneously
     triple_trough = at_trough and mc_ph <= -0.75 and sh_ph <= -0.75
 
+    # Fast 1s sub leading signal — fires before 1m bar sub flips
+    fast_lead = fast_sub_rising and (at_trough or fast_at_trough)
+    fast_lead_tag = f'  [1s-sub rising ph={f_sub_ph:+.2f}]' if fast_lead else ''
+
     if fk or cav:
         sig = 'AVOID — FK/CAV'
+    elif fast_lead and not sh_rising and not at_trough:
+        # 1s sub turning positive before 1m bar reaches trough — early warning
+        sig = f'* ENTRY FORMING — 1s sub leading, 1m trough approaching  {score_tag}'
     elif triple_trough and sh_rising:
         sig = f'**** ENTRY — TRIPLE TROUGH carrier+sub+macro  sub rising  {score_tag}{wall_note}'
     elif triple_trough and (c_deceling or c_decel_bars >= 1):
@@ -297,6 +318,8 @@ while True:
     print(f'carrier: ph={c_ph:+.2f}  dir={c_dir:+d}  amp=${c_amp:.0f}  vel={c_vel:+.2f}  decel={c_dp}%  ({c_decel_bars}bars)  [trough {trough_bars}bars]', flush=True)
     print(f'subharm: ph={sh_ph:+.2f}  dir={sh_dir:+d}  amp=${sh_amp:.0f}  vel={sh_vel:+.2f}  decel={sh_dp}%  ({sh_decel_bars}bars)', flush=True)
     print(f'macro:   ph={mc_ph:+.2f}  dir={mc_dir:+d}  amp=${mc_amp:.0f}  headroom=${mc_amp*(1-mc_ph)/2:.0f}  (4h only)', flush=True)
+    if f_sub_amp > 0.5:
+        print(f'fast1s:  sub ph={f_sub_ph:+.2f} dir={f_sub_dir:+d} amp=${f_sub_amp:.0f}  car ph={f_c_ph:+.2f} dir={f_c_dir:+d}  mac ph={f_mc_ph:+.2f} dir={f_mc_dir:+d}{fast_lead_tag}', flush=True)
     print(f'price~${price:.0f}  trough~${trough:.0f}  peak~${peak:.0f}', flush=True)
     print(f'targets: SMALL +${t_small:.0f}  MEDIUM +${t_med:.0f}  LARGE +${t_large:.0f}', flush=True)
     tf_str = ' '.join(f'{k}={v:+.2f}' for k,v in tf.items())

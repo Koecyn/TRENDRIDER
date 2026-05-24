@@ -62,17 +62,27 @@ LOG_FILE  = Path("/tmp/tr_pipeline.log")
 
 RING_SIZE    = 10_000   # circular buffer length
 MAX_BARS     = 300      # 1m bar history to keep
-MAX_SEC_BARS = 120      # 1s bars to keep (2 minutes of 1s data)
+MAX_SEC_BARS = 300      # 1s bars to keep (5 minutes of 1s data)
 HEARTBEAT_S  = 10       # reconnect if WS silent this long
 MIN_PUSH_S   = 5        # min seconds between git pushes — floor to prevent push storms
 INTRABAR_S   = 1        # recompute every second intrabar
 
+# 1m-bar bands — period in bars (1 bar = 1 minute)
 BANDS = {
     'subharm': (6,  22),
     'carrier': (15, 45),
     'macro':   (40, 130),
 }
 BAND_MIN = {'subharm': 50, 'carrier': 80, 'macro': 200}
+
+# 1s-bar bands — period in bars (1 bar = 1 second)
+# Same wave structures but at 1s resolution for intrabar leading signal
+BANDS_1S = {
+    'fast_sub':     (6,   22),    # 6-22s  swings
+    'fast_carrier': (15,  60),    # 15-60s swings
+    'fast_macro':   (60, 180),    # 1-3min swings
+}
+BAND_MIN_1S = {'fast_sub': 30, 'fast_carrier': 60, 'fast_macro': 150}
 
 
 # ── Logging (file only — no terminal spam blocking WebSocket) ─────────────────
@@ -183,10 +193,20 @@ def _hilbert_stats(filtered: np.ndarray) -> dict:
         return null
 
 def decompose_prices(prices: np.ndarray) -> dict:
-    """Full Hilbert wave decomposition. Pure math — no I/O."""
+    """Full Hilbert wave decomposition on 1m bars. Pure math — no I/O."""
     waves = {}
     for band, (lo_p, hi_p) in BANDS.items():
         if len(prices) < BAND_MIN[band]:
+            waves[band] = {'amp': 0.0, 'phase': 0.0, 'vel': 0.0, 'dir': 0}
+            continue
+        waves[band] = _hilbert_stats(_bandpass(prices, lo_p, hi_p))
+    return waves
+
+def decompose_1s(prices: np.ndarray) -> dict:
+    """Fast Hilbert decomposition on 1s bars — intrabar leading signal."""
+    waves = {}
+    for band, (lo_p, hi_p) in BANDS_1S.items():
+        if len(prices) < BAND_MIN_1S[band]:
             waves[band] = {'amp': 0.0, 'phase': 0.0, 'vel': 0.0, 'dir': 0}
             continue
         waves[band] = _hilbert_stats(_bandpass(prices, lo_p, hi_p))
@@ -257,9 +277,30 @@ def process_waves(buf: np.memmap, idx: int, bars: list,
         closes = np.append(closes, cur_price)
     if len(closes) < 10:
         return None
+
+    # 1m decomposition — carrier/macro context
     waves = decompose_prices(closes)
     stats = build_stats(waves, len(bars), cur_price)
-    # Attach 1s bars so cloud can compute rolling averages on them
+
+    # 1s decomposition — intrabar leading signal (sub/carrier at 1s resolution)
+    if sec_bars and len(sec_bars) >= BAND_MIN_1S['fast_sub']:
+        sec_closes = np.array([b['c'] for b in sec_bars], dtype=float)
+        fast = decompose_1s(sec_closes)
+        # Attach fast wave stats — leading indicator for sub/carrier turns
+        stats['fast_sub_phase']     = fast.get('fast_sub',     {}).get('phase', 0.0)
+        stats['fast_sub_dir']       = fast.get('fast_sub',     {}).get('dir',   0)
+        stats['fast_sub_vel']       = fast.get('fast_sub',     {}).get('vel',   0.0)
+        stats['fast_sub_amp']       = fast.get('fast_sub',     {}).get('amp',   0.0)
+        stats['fast_carrier_phase'] = fast.get('fast_carrier', {}).get('phase', 0.0)
+        stats['fast_carrier_dir']   = fast.get('fast_carrier', {}).get('dir',   0)
+        stats['fast_carrier_amp']   = fast.get('fast_carrier', {}).get('amp',   0.0)
+        stats['fast_macro_phase']   = fast.get('fast_macro',   {}).get('phase', 0.0)
+        stats['fast_macro_dir']     = fast.get('fast_macro',   {}).get('dir',   0)
+    else:
+        stats['fast_sub_phase'] = stats['fast_sub_dir'] = 0
+        stats['fast_carrier_phase'] = stats['fast_carrier_dir'] = 0
+        stats['fast_macro_phase']   = stats['fast_macro_dir']   = 0
+
     stats['sec_bars'] = (sec_bars or [])[-MAX_SEC_BARS:]
     WAVE_FILE.write_text(json.dumps({'waves': waves, 'stats': stats,
                                      'ts': time.time()}))
