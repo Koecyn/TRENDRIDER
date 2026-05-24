@@ -323,6 +323,99 @@ def process_waves(buf: np.memmap, idx: int, bars: list,
     return stats
 
 
+# ── Terminal display ─────────────────────────────────────────────────────────
+
+_R = '\033[0m'
+_BOLD = '\033[1m'
+_DIM  = '\033[2m'
+def _g(t): return f'\033[92m{t}{_R}'   # green
+def _r(t): return f'\033[91m{t}{_R}'   # red
+def _y(t): return f'\033[93m{t}{_R}'   # yellow
+def _c(t): return f'\033[96m{t}{_R}'   # cyan
+def _m(t): return f'\033[95m{t}{_R}'   # magenta
+def _d(t): return f'\033[2m{t}{_R}'    # dim
+
+def _arr(d):
+    return _g('↑') if d > 0 else _r('↓') if d < 0 else _d('→')
+
+def _tc(t):
+    return _g(t) if t == 'up' else _r(t) if t == 'down' else _d(t)
+
+def display_signal(stats: dict, cur_price: float,
+                   bids: list, asks: list, ob: dict):
+    s      = stats
+    score  = s.get('last_score', 0)
+    tier   = s.get('last_tier', 5)
+    align  = s.get('res_alignment', 0)
+    c_ph   = s.get('wf_carrier_phase', 0)
+    c_dir  = s.get('wf_carrier_direction', 0)
+    c_amp  = s.get('wf_carrier_amp', 0)
+    sh_dir = s.get('wf_subharm_direction', 0)
+    mc_dir = s.get('wf_macro_direction', 0)
+    mc_ph  = s.get('wf_macro_phase', 0)
+    mc_amp = s.get('wf_macro_amp', 0)
+    bar_n  = s.get('bars_live', 0)
+
+    at_peak   = c_ph >  0.75
+    at_trough = c_ph < -0.75
+    if at_peak:    ph_lbl = _r(f'{_BOLD}PEAK{_R}')
+    elif at_trough: ph_lbl = _g(f'{_BOLD}TROUGH{_R}')
+    else:           ph_lbl = _y('MID')
+
+    sc_str = (_g if score > 0.2 else _r if score < -0.2 else _d)(f'{score:+.3f}')
+    mc_head = mc_amp * (1.0 - mc_ph) / 2.0
+
+    t1  = s.get('htf_trend_1m',  'neutral')
+    t5  = s.get('htf_trend_5m',  'neutral')
+    t15 = s.get('htf_trend_15m', 'neutral')
+    t1h = s.get('htf_trend_1h',  'neutral')
+    t4h = s.get('htf_trend_4h',  'neutral')
+
+    # OB line
+    ba_str = ''
+    if asks and bids:
+        best_a = asks[0][0]
+        best_b = bids[0][0]
+        ba_str = f'ask={_r(f"${best_a:.2f}")} bid={_g(f"${best_b:.2f}")} spread={best_a-best_b:.2f}'
+
+    af = ob.get('ask_fill', 0); ap = ob.get('ask_pull', 0)
+    bf = ob.get('bid_fill', 0); bp = ob.get('bid_pull', 0)
+    ask_lbl = (_r('REAL') if af > ap * 1.5 else _g('FAKE') if ap > af * 1.5
+               else _y('MIX')) if (af + ap) > 0 else _d('—')
+    bid_lbl = (_g('REAL') if bf > bp * 1.5 else _r('FAKE') if bp > bf * 1.5
+               else _y('MIX')) if (bf + bp) > 0 else _d('—')
+    ob_wall = f'ask_wall:{ask_lbl}(f{af}/p{ap}) bid_wall:{bid_lbl}(f{bf}/p{bp})'
+
+    # Fast 1s
+    f_sd  = s.get('fast_sub_dir', 0)
+    f_sa  = s.get('fast_sub_amp', 0.0)
+    f_cd  = s.get('fast_carrier_dir', 0)
+    f_md  = s.get('fast_macro_dir', 0)
+    fast_str = (f'fast1s: sub{_arr(f_sd)} amp={f_sa:.1f} | '
+                f'car{_arr(f_cd)} | mac{_arr(f_md)}') if f_sa > 0.5 else ''
+
+    # Entry/exit annotation
+    sig = ''
+    fast_lead = f_sd > 0 and f_sa > 0.5 and (at_trough or c_ph < -0.5)
+    if fast_lead:
+        sig = _g('  *** ENTRY FORMING — 1s sub leading')
+    elif at_trough and sh_dir > 0:
+        sig = _g('  ** ENTRY — trough + sub rising')
+    elif at_peak and score < -0.05 and mc_head < c_amp * 0.15:
+        sig = _r('  !! EXHAUSTION — downside bias')
+
+    print(
+        f"[wave] {_c(bar_n)} | {ph_lbl} | score={sc_str} | "
+        f"c_ph={c_ph:+.2f}{_arr(c_dir)} sub{_arr(sh_dir)} mc{_arr(mc_dir)} | "
+        f"align={align:.2f} T{tier} | mc_head=${mc_head:.0f} | ${cur_price:,.2f}"
+        f"\n[ob]   {ba_str} | {ob_wall}"
+        f"\n[tf]   1m:{_tc(t1)} 5m:{_tc(t5)} 15m:{_tc(t15)} 1h:{_tc(t1h)} 4h:{_tc(t4h)}"
+        + (f"\n[fast] {fast_str}" if fast_str else '')
+        + (sig if sig else ''),
+        flush=True
+    )
+
+
 # ── Layer 3: git publisher (runs in thread pool) ──────────────────────────────
 
 def _git(*args) -> bool:
@@ -396,6 +489,11 @@ class Capture:
         self._sec_c:     float = 0.0
         self._sec_vol:   float = 0.0
         self._sec_n:     int   = 0
+        # Order book fill/pull tracker
+        self._prev_asks: dict = {}   # price_str → qty from last depth snapshot
+        self._prev_bids: dict = {}
+        self._ob_stats:  dict = {'ask_fill': 0, 'ask_pull': 0,
+                                  'bid_fill': 0, 'bid_pull': 0}
         # Raw tick archiver — daily rotating JSONL, buffered writes
         RAW_DIR.mkdir(exist_ok=True)
         self._raw_fh    = None
@@ -498,6 +596,26 @@ class Capture:
         self._sec_n   += 1
 
     def on_depth(self, data: dict):
+        new_asks = {p: float(q) for p, q in data.get('asks', [])}
+        new_bids = {p: float(q) for p, q in data.get('bids', [])}
+        px = self.cur_price or 0.0
+
+        # Levels that vanished from the snapshot
+        for p_str, qty in self._prev_asks.items():
+            if p_str not in new_asks and qty > 0.01:
+                if px >= float(p_str):           # price crossed it → takers filled
+                    self._ob_stats['ask_fill'] += 1
+                else:                            # price never reached → maker pulled
+                    self._ob_stats['ask_pull'] += 1
+        for p_str, qty in self._prev_bids.items():
+            if p_str not in new_bids and qty > 0.01:
+                if px <= float(p_str):
+                    self._ob_stats['bid_fill'] += 1
+                else:
+                    self._ob_stats['bid_pull'] += 1
+
+        self._prev_asks = new_asks
+        self._prev_bids = new_bids
         self.bids = [[float(p), float(q)] for p, q in data.get('bids', [])]
         self.asks = [[float(p), float(q)] for p, q in data.get('asks', [])]
 
@@ -550,8 +668,14 @@ class Capture:
         buf_snap   = self.buf
         idx_snap   = self.idx
         price_snap = self.cur_price
+        bids_snap  = list(self.bids)
+        asks_snap  = list(self.asks)
+        ob_snap    = dict(self._ob_stats)
         do_publish = self._publish and (force_publish or
                      (now - self.last_push >= MIN_PUSH_S))
+        if force_publish:
+            self._ob_stats = {'ask_fill': 0, 'ask_pull': 0,
+                              'bid_fill': 0, 'bid_pull': 0}
 
         loop = asyncio.get_event_loop()
 
@@ -568,6 +692,8 @@ class Capture:
 
         def _done(fut):
             stats = fut.result()
+            if stats:
+                display_signal(stats, price_snap, bids_snap, asks_snap, ob_snap)
             if stats and do_publish and not self._pushing:
                 self._pushing = True
                 self.last_push = time.time()
