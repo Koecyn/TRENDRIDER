@@ -162,18 +162,29 @@ while True:
 
     # ── Peak exhaustion: carrier ceiling + macro full + score bleeding ────
     mc_head_val  = mc_amp * (1.0 - mc_ph) / 2.0
+    # Double-ceiling: both carrier AND macro pinned at top simultaneously
+    double_ceiling = at_peak and mc_ph >= 0.95 and mc_amp > 50
     peak_exhaust = (
         at_peak and
-        peak_bars >= 3 and          # held at peak multiple bars
+        peak_bars >= 2 and               # lowered: double-ceiling needs fewer bars
         mc_head_val < c_amp * 0.15 and   # macro headroom < 15% of carrier amp
-        score_trend < -0.005             # score consistently bleeding negative
+        (score_trend < -0.005 or double_ceiling)   # OR double ceiling overrides
     )
-    # Stronger exhaustion: score has been negative + align degrading
-    peak_exhaust_strong = peak_exhaust and (score_neg_bars >= 2 or align < 0.70)
+    # Stronger exhaustion: score has been negative + align degrading OR double-ceiling
+    peak_exhaust_strong = peak_exhaust and (
+        score_neg_bars >= 2 or align < 0.70 or double_ceiling
+    )
+
+    # ── OB fake market detection ─────────────────────────────────────────
+    # fill_ratio < 20% = walls are almost entirely fake (being pulled not filled)
+    # Downgrade signal confidence when market is dominated by spoofers
+    fake_market = ob_fill_ratio < 0.20 and (ob_ask_pull + ob_bid_pull) > 0.1
 
     # ── Size tier ────────────────────────────────────────────────────────
-    if fk or cav:
+    if fk or cav or peak_exhaust_strong:
         size = 'SKIP'
+    elif fake_market:
+        size = 'SMALL'    # spoof-dominated market: max size = small
     elif align >= 0.75 and not dis:
         size = 'LARGE'
     elif align >= 0.50:
@@ -330,7 +341,8 @@ while True:
         ask_str = f'ask fill={ob_ask_fill:.3f} pull={ob_ask_pull:.3f}' if ask_total > 0.005 else ''
         bid_str = f'  bid fill={ob_bid_fill:.3f} pull={ob_bid_pull:.3f}' if bid_total > 0.005 else ''
         wall_class = ('FAKE' if ask_fake else 'REAL' if ask_real else 'MIX') if ask_total > 0.005 else ''
-        print(f'OB: {ask_str}{bid_str}  ratio={ob_fill_ratio:.0%}real  [{wall_class}]{cleared_str}', flush=True)
+        fake_tag = '  [FAKE-MARKET]' if fake_market else ''
+        print(f'OB: {ask_str}{bid_str}  ratio={ob_fill_ratio:.0%}real  [{wall_class}]{cleared_str}{fake_tag}', flush=True)
     score_delta  = score - prev_score
     score_mom    = score_delta / max(abs(thresh), 0.01)  # delta in units of threshold
     mom_str      = f'{score_mom:+.1f}x' if abs(score_mom) >= 0.1 else '~0'
@@ -338,7 +350,8 @@ while True:
     recovering   = at_trough and score_delta > thresh * 0.5 and score < thresh
     rec_str      = '  [RECOVERING]' if recovering else ''
     mc_head      = mc_amp * (1 - mc_ph) / 2
-    print(f'score={score:+.3f}  Δ={score_delta:+.3f}({mom_str}thresh)  tier={tier}  snr={snr:.0f}  mc_head=${mc_head:.0f}{rec_str}  htf:{htf["1m"]}/{htf["5m"]}/{htf["15m"]}/{htf["1h"]}/{htf["4h"]}', flush=True)
+    dbl_tag      = '  [DOUBLE-CEILING]' if double_ceiling else ''
+    print(f'score={score:+.3f}  Δ={score_delta:+.3f}({mom_str}thresh)  tier={tier}  snr={snr:.0f}  mc_head=${mc_head:.0f}{rec_str}{dbl_tag}  htf:{htf["1m"]}/{htf["5m"]}/{htf["15m"]}/{htf["1h"]}/{htf["4h"]}', flush=True)
     print('---', flush=True)
 
     prev = {
