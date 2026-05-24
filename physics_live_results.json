@@ -1,5 +1,5 @@
 {
-  "ts": "2026-05-24T17:33:00.143508+00:00",
+  "ts": "2026-05-24T17:33:02.174474+00:00",
   "trigger_id": "p0",
   "status": "live",
   "stats": {
@@ -43,11 +43,11 @@
     "wf_score": 0.0,
     "wf_dominant": "macro",
     "wf_amp_sum": 0.0,
-    "wf_carrier_amp": 165.9292,
-    "wf_macro_amp": 483.1115,
+    "wf_carrier_amp": 162.3925,
+    "wf_macro_amp": 475.0951,
     "wf_subharm_amp": 0.0,
-    "wf_tgt_primary": 76639.68,
-    "wf_tgt_extended": 76639.68,
+    "wf_tgt_primary": 76639.33,
+    "wf_tgt_extended": 76639.33,
     "wf_tgt_resonance": 76623.09,
     "wf_confidence": 0.05,
     "wf_micro_amplitude": 0.0,
@@ -58,14 +58,14 @@
     "wf_subharm_phase": 0.0,
     "wf_subharm_direction": 0,
     "wf_subharm_velocity": 0.0,
-    "wf_carrier_amplitude": 165.9292,
-    "wf_carrier_phase": 0.862,
+    "wf_carrier_amplitude": 162.3925,
+    "wf_carrier_phase": 0.859,
     "wf_carrier_direction": 0,
     "wf_carrier_velocity": -0.0,
-    "wf_macro_amplitude": 483.1115,
+    "wf_macro_amplitude": 475.0951,
     "wf_macro_phase": 1.0,
     "wf_macro_direction": 0,
-    "wf_macro_velocity": 2.8024,
+    "wf_macro_velocity": 1.7071,
     "trade_log": []
   }
 }
