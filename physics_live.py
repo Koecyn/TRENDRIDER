@@ -540,6 +540,12 @@ class PaperTrader:
     _last_tier:      int   = 4
     _last_resonance: dict  = None
     _last_waveform:  dict  = None
+    # OB wall fill/pull — updated by LiveEngine before stats() is called
+    _last_ask_fill:    float = 0.0
+    _last_ask_pull:    float = 0.0
+    _last_bid_fill:    float = 0.0
+    _last_bid_pull:    float = 0.0
+    _last_ask_cleared: bool  = False
 
     def stats(self):
         CF = self._CF
@@ -922,12 +928,18 @@ class LiveEngine:
                 f"bid_pull={self._bid_pulled:.4f}  "
                 f"ask_pull={self._ask_pulled:.4f}  "
                 f"net={net:+.4f}BTC", Y)
-        # Snapshot before reset so _write_stats() sees the bar's wall behavior
+        # Snapshot before reset — push to both LiveEngine and PaperTrader
+        # so PaperTrader.stats() can include OB data without AttributeError
         self._last_ask_fill    = self._ask_filled
         self._last_ask_pull    = self._ask_pulled
         self._last_bid_fill    = self._bid_filled
         self._last_bid_pull    = self._bid_pulled
         self._last_ask_cleared = self._bar_ask_cleared
+        self._trader._last_ask_fill    = self._ask_filled
+        self._trader._last_ask_pull    = self._ask_pulled
+        self._trader._last_bid_fill    = self._bid_filled
+        self._trader._last_bid_pull    = self._bid_pulled
+        self._trader._last_ask_cleared = self._bar_ask_cleared
 
         self._bid_filled = self._ask_filled = 0.0
         self._bid_pulled = self._ask_pulled = 0.0

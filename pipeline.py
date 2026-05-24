@@ -505,9 +505,37 @@ class Capture:
         try:
             with gzip.open(BARS_FILE, 'rt') as f:
                 bars = json.load(f)[-MAX_BARS:]
-            _print(f"Loaded {len(bars)} closed bars")
-            return bars
+            if len(bars) >= 50:
+                _print(f"Loaded {len(bars)} closed bars from cache")
+                return bars
         except Exception:
+            pass
+        # Cache empty or cold — bootstrap from Binance REST API
+        return self._bootstrap_bars()
+
+    def _bootstrap_bars(self) -> list:
+        """Fetch last MAX_BARS 1m klines from Binance REST to warm up waves."""
+        import urllib.request
+        try:
+            url = (f"https://api.binance.us/api/v3/klines"
+                   f"?symbol=BTCUSDC&interval=1m&limit={MAX_BARS}")
+            with urllib.request.urlopen(url, timeout=10) as r:
+                raw = json.loads(r.read())
+            bars = [{
+                'ts':        int(k[0]),
+                'open':      float(k[1]),
+                'high':      float(k[2]),
+                'low':       float(k[3]),
+                'close':     float(k[4]),
+                'volume':    float(k[5]),
+                'taker_buy': float(k[9]),
+            } for k in raw[:-1]]   # drop last (open/partial bar)
+            _print(f"Bootstrapped {len(bars)} bars from Binance REST")
+            self.bars = bars
+            self._save_bars()
+            return bars
+        except Exception as e:
+            _print(f"Bootstrap failed ({e}) — starting cold")
             return []
 
     def _save_bars(self):
