@@ -54,13 +54,15 @@ WS_URL   = ("wss://stream.binance.us:9443/stream"
 
 TICK_BIN  = Path("/tmp/tr_ticks.bin")   # float64 ring buffer (prices)
 TICK_IDX  = Path("/tmp/tr_ticks.idx")   # write index (int64)
-BARS_FILE = Path("/tmp/tr_bars.json")   # closed bar history
+BARS_FILE = Path("/tmp/tr_bars.json")   # closed 1m bar history
+SEC_FILE  = Path("/tmp/tr_sec.json")    # recent 1s OHLCV bars
 WAVE_FILE = Path("/tmp/tr_waves.json")  # latest wave decomposition
 OUT_FILE  = REPO / "physics_live_results.json"
 LOG_FILE  = Path("/tmp/tr_pipeline.log")
 
 RING_SIZE    = 10_000   # circular buffer length
-MAX_BARS     = 300      # bar history to keep
+MAX_BARS     = 300      # 1m bar history to keep
+MAX_SEC_BARS = 120      # 1s bars to keep (2 minutes of 1s data)
 HEARTBEAT_S  = 10       # reconnect if WS silent this long
 MIN_PUSH_S   = 5        # min seconds between git pushes — floor to prevent push storms
 INTRABAR_S   = 1        # recompute every second intrabar
@@ -248,15 +250,17 @@ def build_stats(waves: dict, bar_count: int, cur_price: float) -> dict:
     }
 
 def process_waves(buf: np.memmap, idx: int, bars: list,
-                  cur_price: float) -> dict | None:
+                  cur_price: float, sec_bars: list = None) -> dict | None:
     """Layer 2 worker — pure computation, called from thread pool."""
-    closes  = np.array([b['close'] for b in bars], dtype=float)
+    closes = np.array([b['close'] for b in bars], dtype=float)
     if cur_price > 0:
         closes = np.append(closes, cur_price)
     if len(closes) < 10:
         return None
     waves = decompose_prices(closes)
     stats = build_stats(waves, len(bars), cur_price)
+    # Attach 1s bars so cloud can compute rolling averages on them
+    stats['sec_bars'] = (sec_bars or [])[-MAX_SEC_BARS:]
     WAVE_FILE.write_text(json.dumps({'waves': waves, 'stats': stats,
                                      'ts': time.time()}))
     return stats
@@ -294,9 +298,9 @@ class Capture:
     def __init__(self, publish_enabled: bool = True):
         self.buf, self.idx  = buf_init()
         self.bars: list     = self._load_bars()
+        self.sec_bars: list = []   # ring of completed 1s OHLCV bars
         self.bids: list     = []
         self.asks: list     = []
-        self.bar_trades     = []
         self.cur_price      = 0.0
         self.last_push      = 0.0
         self.last_process   = 0.0
@@ -305,8 +309,16 @@ class Capture:
         self._publish       = publish_enabled
         self._pool          = ThreadPoolExecutor(max_workers=2,
                                                   thread_name_prefix='pipeline')
-        self._processing    = False  # guard: one scipy job at a time
-        self._pushing       = False  # guard: one git job at a time
+        self._processing    = False
+        self._pushing       = False
+        # 1-second OHLCV aggregator — accumulates trades, seals each second
+        self._sec_ts:    int   = 0      # current second bucket (unix second)
+        self._sec_o:     float = 0.0
+        self._sec_h:     float = 0.0
+        self._sec_l:     float = 0.0
+        self._sec_c:     float = 0.0
+        self._sec_vol:   float = 0.0
+        self._sec_n:     int   = 0
 
     def _load_bars(self) -> list:
         try:
@@ -321,10 +333,40 @@ class Capture:
 
     # ── Handlers (called from asyncio — MUST NOT BLOCK) ──────────────────────
 
+    def _seal_sec(self):
+        """Finalize the current 1s bucket and append to sec_bars ring."""
+        if self._sec_n == 0:
+            return
+        self.sec_bars.append({
+            'ts': self._sec_ts,
+            'o':  round(self._sec_o, 2), 'h': round(self._sec_h, 2),
+            'l':  round(self._sec_l, 2), 'c': round(self._sec_c, 2),
+            'vol': round(self._sec_vol, 6), 'n': self._sec_n,
+        })
+        self.sec_bars = self.sec_bars[-MAX_SEC_BARS:]
+        self._sec_n = 0
+
     def on_trade(self, data: dict):
-        price = float(data['p'])
+        price  = float(data['p'])
+        qty    = float(data.get('q', 0.0))
+        sec    = int(data.get('T', time.time() * 1000)) // 1000
         self.cur_price = price
-        self.idx = buf_write(self.buf, self.idx, price)   # raw write, immediate
+        self.idx = buf_write(self.buf, self.idx, price)
+
+        # Seal previous second bucket when second rolls over
+        if sec != self._sec_ts and self._sec_ts != 0:
+            self._seal_sec()
+            self._trigger_process()   # new 1s bar = recompute opportunity
+
+        if self._sec_n == 0:
+            self._sec_ts = sec; self._sec_o = price; self._sec_h = price
+            self._sec_l  = price
+        else:
+            self._sec_h = max(self._sec_h, price)
+            self._sec_l = min(self._sec_l, price)
+        self._sec_c   = price
+        self._sec_vol += qty
+        self._sec_n   += 1
 
     def on_depth(self, data: dict):
         self.bids = [[float(p), float(q)] for p, q in data.get('bids', [])]
@@ -365,6 +407,7 @@ class Capture:
         self.last_process = now
 
         bars_snap  = list(self.bars)
+        sec_snap   = list(self.sec_bars)
         buf_snap   = self.buf
         idx_snap   = self.idx
         price_snap = self.cur_price
@@ -375,7 +418,8 @@ class Capture:
 
         def _work():
             try:
-                stats = process_waves(buf_snap, idx_snap, bars_snap, price_snap)
+                stats = process_waves(buf_snap, idx_snap, bars_snap,
+                                      price_snap, sec_snap)
                 return stats
             except Exception as e:
                 _log(f"process error: {e}")
