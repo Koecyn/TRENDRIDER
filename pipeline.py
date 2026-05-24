@@ -22,8 +22,11 @@ On your device:
 
 import argparse
 import asyncio
+import gc
+import gzip
 import json
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -52,13 +55,16 @@ REPO     = Path(__file__).resolve().parent
 WS_URL   = ("wss://stream.binance.us:9443/stream"
             "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms/btcusdc@aggTrade")
 
-TICK_BIN  = Path("/tmp/tr_ticks.bin")   # float64 ring buffer (prices)
-TICK_IDX  = Path("/tmp/tr_ticks.idx")   # write index (int64)
-BARS_FILE = Path("/tmp/tr_bars.json")   # closed 1m bar history
-SEC_FILE  = Path("/tmp/tr_sec.json")    # recent 1s OHLCV bars
-WAVE_FILE = Path("/tmp/tr_waves.json")  # latest wave decomposition
-OUT_FILE  = REPO / "physics_live_results.json"
+TICK_BIN  = Path("/tmp/tr_ticks.bin")      # float64 ring buffer (prices)
+TICK_IDX  = Path("/tmp/tr_ticks.idx")      # write index (int64)
+BARS_FILE = Path("/tmp/tr_bars.json.gz")   # closed 1m bar history (gzip)
+SEC_FILE  = Path("/tmp/tr_sec.json.gz")    # recent 1s OHLCV bars (gzip)
+WAVE_FILE = Path("/tmp/tr_waves.json.gz")  # latest wave decomposition (gzip)
+OUT_FILE  = REPO / "physics_live_results.json"   # plain JSON — git-readable
 LOG_FILE  = Path("/tmp/tr_pipeline.log")
+
+GC_EVERY_BARS = 10    # force gc.collect() every N closed bars
+MEM_LOG_BARS  = 30    # log RSS memory every N closed bars
 
 RING_SIZE    = 10_000   # circular buffer length
 MAX_BARS     = 300      # 1m bar history to keep
@@ -301,9 +307,13 @@ def process_waves(buf: np.memmap, idx: int, bars: list,
         stats['fast_carrier_phase'] = stats['fast_carrier_dir'] = 0
         stats['fast_macro_phase']   = stats['fast_macro_dir']   = 0
 
-    stats['sec_bars'] = (sec_bars or [])[-MAX_SEC_BARS:]
-    WAVE_FILE.write_text(json.dumps({'waves': waves, 'stats': stats,
-                                     'ts': time.time()}))
+    # Keep sec_bars local (gzip cache) — strip from git payload to save bandwidth
+    stats['sec_bars_n'] = len(sec_bars) if sec_bars else 0  # just the count
+    wave_payload = {'waves': waves, 'stats': stats, 'ts': time.time()}
+    tmp = WAVE_FILE.with_suffix('.tmp.gz')
+    with gzip.open(tmp, 'wt', compresslevel=1) as f:
+        json.dump(wave_payload, f, separators=(',', ':'))
+    tmp.rename(WAVE_FILE)
     return stats
 
 
@@ -315,9 +325,11 @@ def _git(*args) -> bool:
     return r.returncode == 0
 
 def publish(stats: dict):
-    """Layer 3 worker — write JSON + git push. Blocking; called in executor."""
+    """Layer 3 worker — write compact JSON + git push. Blocking; called in executor."""
+    # Strip sec_bars from git payload — raw bars not needed on cloud side
+    pub_stats = {k: v for k, v in stats.items() if k != 'sec_bars'}
     payload = {'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-               'stats': stats}
+               'stats': pub_stats}
     tmp = OUT_FILE.with_suffix('.tmp.json')
     tmp.write_text(json.dumps(payload, separators=(',', ':')))
     tmp.rename(OUT_FILE)
@@ -363,14 +375,24 @@ class Capture:
 
     def _load_bars(self) -> list:
         try:
-            bars = json.loads(BARS_FILE.read_text())[-MAX_BARS:]
+            with gzip.open(BARS_FILE, 'rt') as f:
+                bars = json.load(f)[-MAX_BARS:]
             _print(f"Loaded {len(bars)} closed bars")
             return bars
         except Exception:
             return []
 
     def _save_bars(self):
-        BARS_FILE.write_text(json.dumps(self.bars[-MAX_BARS:]))
+        tmp = BARS_FILE.with_suffix('.tmp.gz')
+        with gzip.open(tmp, 'wt', compresslevel=1) as f:
+            json.dump(self.bars[-MAX_BARS:], f, separators=(',', ':'))
+        tmp.rename(BARS_FILE)
+
+    def _save_sec(self):
+        tmp = SEC_FILE.with_suffix('.tmp.gz')
+        with gzip.open(tmp, 'wt', compresslevel=1) as f:
+            json.dump(self.sec_bars[-MAX_SEC_BARS:], f, separators=(',', ':'))
+        tmp.rename(SEC_FILE)
 
     # ── Handlers (called from asyncio — MUST NOT BLOCK) ──────────────────────
 
@@ -427,10 +449,19 @@ class Capture:
         }
         self.bars.append(bar)
         self.bars = self.bars[-MAX_BARS:]
-        self.bar_trades = []
+        self._seal_sec()   # seal any partial 1s bucket at bar boundary
         self._save_bars()
-        _print(f"BAR {len(self.bars)}  ${self.cur_price:.2f}  "
-               f"vol={bar['volume']:.3f}")
+        self._save_sec()
+        n = len(self.bars)
+        _print(f"BAR {n}  ${self.cur_price:.2f}  vol={bar['volume']:.3f}")
+
+        # Periodic GC — prevent Termux OOM kill
+        if n % GC_EVERY_BARS == 0:
+            gc.collect()
+        if n % MEM_LOG_BARS == 0:
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            _log(f"mem rss={rss}KB  bars={n}  sec_bars={len(self.sec_bars)}")
+
         # Bar close → trigger process + publish (bypass debounce)
         self._trigger_process(force_publish=True)
 
