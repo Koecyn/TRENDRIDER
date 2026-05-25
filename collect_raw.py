@@ -195,9 +195,6 @@ def _push_loop():
                 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 log(f"mem rss={rss}KB  lines={lc}  cycle={cycle}", Y)
 
-            if cycle % 5 == 0:
-                _check_update()
-
         except Exception as e:
             log(f"push error: {e}", R)
 
