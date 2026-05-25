@@ -36,7 +36,7 @@ DATA_BRANCH = "data/raw"
 PUSH_S      = 1
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
-          "?streams=btcusdc@depth20@100ms/btcusdc@aggTrade")
+          "?streams=btcusdt@depth20@100ms/btcusdt@aggTrade")
 
 G='\033[92m'; R='\033[91m'; Z='\033[0m'
 def log(m, c=Z): print(f"{c}[raw] {m}{Z}", flush=True)
