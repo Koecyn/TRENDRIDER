@@ -113,6 +113,7 @@ def _check_update():
 
 
 def _push_loop():
+    global _line_count
     cycle = 0
     while True:
         time.sleep(PUSH_S)
@@ -171,6 +172,7 @@ async def stream():
     fh = open(RAW_FILE, 'a', buffering=1)
 
     def on_trade(d):
+        global _line_count
         fh.write(json.dumps(["T",
             int(d['T']),
             int(float(d['p'])*100),
@@ -180,6 +182,7 @@ async def stream():
         with _count_lock: _line_count += 1
 
     def on_depth(d):
+        global _line_count
         ts  = int(time.time()*1000)
         bid = [[int(float(p)*100),int(float(q)*10000)] for p,q in d.get('bids',[])]
         ask = [[int(float(p)*100),int(float(q)*10000)] for p,q in d.get('asks',[])]
