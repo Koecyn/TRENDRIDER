@@ -2,8 +2,18 @@
 """
 collect_raw.py — pipe WebSocket stream directly to file.
 
-Hot path: message arrives → write line → flush. Nothing else.
-Background thread: every PUSH_S seconds → gzip-9 → git push to data/live.
+Hot path : message → fh.write(line+\n). Nothing else.
+Push loop: every PUSH_S seconds → lzma compress → git push data/raw.
+Rotate   : every ROTATE_LINES lines, archive current file and start fresh.
+           Keeps Termux RSS low — never holds the full history in RAM.
+
+Compression: lzma preset=9 (better than gzip-9, built-in, no extra deps).
+             Typical: 1MB raw JSONL → ~35KB lzma vs ~55KB gzip-9.
+
+Signal-9 defence:
+  - JSONL file rotated every ROTATE_LINES to cap disk/memory growth
+  - gc.collect() every GC_EVERY pushes
+  - RSS logged every LOG_MEM_EVERY pushes so you can see growth
 
 Trade line: ["T", ts_ms, price_cents, qty_units, side]
 Depth line: ["D", ts_ms, [[p_c,q_u],...bids], [[p_c,q_u],...asks]]
@@ -12,9 +22,11 @@ Usage: python collect_raw.py
 """
 
 import asyncio
-import gzip
+import gc
 import json
+import lzma
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -27,73 +39,118 @@ try:
 except ImportError:
     print("ERROR: pip install aiohttp"); sys.exit(1)
 
-REPO        = Path(__file__).resolve().parent
+REPO          = Path(__file__).resolve().parent
 os.chdir(REPO)
-RAW_DIR     = REPO / "data" / "raw"
-RAW_FILE    = RAW_DIR / "BTCUSDC_LIVE.jsonl"
-GZ_FILE     = RAW_DIR / "BTCUSDC_LIVE.jsonl.gz"
-DATA_BRANCH = "data/raw"
-PUSH_S      = 1
+RAW_DIR       = REPO / "data" / "raw"
+RAW_FILE      = RAW_DIR / "BTCUSDT_LIVE.jsonl"
+XZ_FILE       = RAW_DIR / "BTCUSDT_LIVE.jsonl.xz"
+DATA_BRANCH   = "data/raw"
+
+PUSH_S        = 1        # push to git every N seconds
+ROTATE_LINES  = 50_000   # rotate JSONL after this many lines (~5MB raw)
+GC_EVERY      = 60       # gc.collect() every N push cycles
+LOG_MEM_EVERY = 300      # log RSS every N push cycles
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
           "?streams=btcusdt@depth20@100ms/btcusdt@aggTrade")
 
-G='\033[92m'; R='\033[91m'; Z='\033[0m'
+G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'
 def log(m, c=Z): print(f"{c}[raw] {m}{Z}", flush=True)
 
 def git(*a):
-    subprocess.run(['git','-C',str(REPO)]+list(a), capture_output=True)
+    return subprocess.run(['git','-C',str(REPO)]+list(a), capture_output=True, text=True)
+
+# shared line counter (written by stream coroutine, read by push thread)
+_line_count = 0
+_count_lock = threading.Lock()
+
+def _rotate():
+    """Archive current JSONL to timestamped xz file, start fresh."""
+    ts  = int(time.time())
+    arc = RAW_DIR / f"BTCUSDT_{ts}.jsonl.xz"
+    if RAW_FILE.exists() and RAW_FILE.stat().st_size > 0:
+        with open(RAW_FILE, 'rb') as src:
+            data = src.read()
+        with lzma.open(arc, 'wb', preset=9) as dst:
+            dst.write(data)
+        RAW_FILE.write_bytes(b'')  # truncate in-place (keeps fd open in stream)
+        sz_raw = len(data)
+        sz_xz  = arc.stat().st_size
+        ratio  = sz_raw / max(sz_xz, 1)
+        log(f"rotated → {arc.name}  "
+            f"{sz_raw//1024}kB → {sz_xz//1024}kB  ({ratio:.1f}x)", Y)
+        # push archive too
+        rel = str(arc.relative_to(REPO))
+        git('add', rel)
 
 def _push_loop():
-    """Background: compress latest JSONL and push to git every PUSH_S seconds."""
+    cycle = 0
     while True:
         time.sleep(PUSH_S)
+        cycle += 1
         try:
             if not RAW_FILE.exists() or RAW_FILE.stat().st_size == 0:
                 continue
-            tmp = GZ_FILE.with_suffix('.tmp.gz')
-            with open(RAW_FILE, 'rb') as src, \
-                 gzip.open(tmp, 'wb', compresslevel=9) as dst:
-                dst.write(src.read())
-            tmp.rename(GZ_FILE)
-            rel = str(GZ_FILE.relative_to(REPO))
+
+            # Check rotation
+            with _count_lock:
+                lc = _line_count
+            if lc >= ROTATE_LINES:
+                _rotate()
+                with _count_lock:
+                    _line_count = 0
+
+            # Compress current live file to xz
+            tmp = XZ_FILE.with_suffix('.tmp.xz')
+            with open(RAW_FILE, 'rb') as src:
+                data = src.read()
+            with lzma.open(tmp, 'wb', preset=9) as dst:
+                dst.write(data)
+            tmp.rename(XZ_FILE)
+
+            rel = str(XZ_FILE.relative_to(REPO))
             git('add', rel)
-            r = subprocess.run(
-                ['git','-C',str(REPO),'commit','-m',
-                 f"raw {int(time.time())}"],
-                capture_output=True, text=True)
+            r = git('commit', '-m', f"raw {int(time.time())}")
             if r.returncode == 0:
-                pr = subprocess.run(
-                    ['git','-C',str(REPO),'push','--force','origin',
-                     f'HEAD:{DATA_BRANCH}'],
-                    capture_output=True, text=True)
-                sz = GZ_FILE.stat().st_size
+                pr = git('push', '--force', 'origin', f'HEAD:{DATA_BRANCH}')
+                sz = XZ_FILE.stat().st_size
                 if pr.returncode == 0:
-                    log(f"pushed {sz//1024}kB", G)
+                    log(f"pushed {sz//1024}kB xz  lines={lc}", G)
                 else:
                     log(f"push fail: {pr.stderr.strip()}", R)
+
+            # Periodic GC
+            if cycle % GC_EVERY == 0:
+                gc.collect()
+
+            # RSS logging
+            if cycle % LOG_MEM_EVERY == 0:
+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                log(f"mem rss={rss}KB  lines={lc}  cycle={cycle}", Y)
+
         except Exception as e:
             log(f"push error: {e}", R)
 
 
 async def stream():
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    fh = open(RAW_FILE, 'a', buffering=1)   # line-buffered
+    fh = open(RAW_FILE, 'a', buffering=1)
 
     def on_trade(d):
-        line = json.dumps(["T",
+        fh.write(json.dumps(["T",
             int(d['T']),
             int(float(d['p'])*100),
             int(float(d['q'])*10000),
             0 if d.get('m') else 1
-        ], separators=(',',':'))
-        fh.write(line + '\n')
+        ], separators=(',',':')) + '\n')
+        with _count_lock: _line_count += 1
 
     def on_depth(d):
         ts  = int(time.time()*1000)
         bid = [[int(float(p)*100),int(float(q)*10000)] for p,q in d.get('bids',[])]
         ask = [[int(float(p)*100),int(float(q)*10000)] for p,q in d.get('asks',[])]
         fh.write(json.dumps(["D",ts,bid,ask], separators=(',',':')) + '\n')
+        with _count_lock: _line_count += 1
 
     log("connecting...", G)
     backoff = 1
@@ -114,14 +171,15 @@ async def stream():
                                     if 'aggTrade' in st: on_trade(da)
                                     elif '@depth'  in st: on_depth(da)
                                 except Exception as e:
-                                    log(f"parse err: {e} | stream={st} | data={str(da)[:80]}", R)
+                                    log(f"parse err: {e}", R)
                             elif msg.type in (aiohttp.WSMsgType.CLOSED,
                                               aiohttp.WSMsgType.ERROR):
                                 break
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log(f"error ({e}) retry {backoff}s", R)
+                if not fh.closed:
+                    log(f"error ({e}) retry {backoff}s", R)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff*2, 60)
     finally:
