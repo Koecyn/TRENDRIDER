@@ -142,6 +142,7 @@ def _push_loop():
             r = git('commit', '-m', f"raw {int(time.time())}")
             if r.returncode == 0:
                 pr = git('push', '--force', 'origin', f'HEAD:{DATA_BRANCH}')
+                git('reset', 'HEAD~1', '--mixed')  # drop data commit from code branch
                 sz = GZ_FILE.stat().st_size
                 if pr.returncode == 0:
                     log(f"pushed {sz//1024}kB gz  lines={lc}", G)
