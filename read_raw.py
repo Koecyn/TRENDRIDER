@@ -3,10 +3,11 @@
 read_raw.py — fetch and print raw data from data/raw branch.
 Usage: python read_raw.py
 """
-import gzip, json, subprocess, sys
+import gzip, json, os, subprocess, sys
 from pathlib import Path
 
 REPO   = Path(__file__).resolve().parent
+os.chdir(REPO)
 GZ     = REPO / "data" / "raw" / "BTCUSDC_LIVE.jsonl.gz"
 
 def git(*a):

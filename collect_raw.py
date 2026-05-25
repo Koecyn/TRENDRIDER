@@ -14,6 +14,7 @@ Usage: python collect_raw.py
 import asyncio
 import gzip
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -27,6 +28,7 @@ except ImportError:
     print("ERROR: pip install aiohttp"); sys.exit(1)
 
 REPO        = Path(__file__).resolve().parent
+os.chdir(REPO)
 RAW_DIR     = REPO / "data" / "raw"
 RAW_FILE    = RAW_DIR / "BTCUSDC_LIVE.jsonl"
 GZ_FILE     = RAW_DIR / "BTCUSDC_LIVE.jsonl.gz"
