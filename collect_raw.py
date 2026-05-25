@@ -113,7 +113,8 @@ async def stream():
                                     da = d.get('data',{})
                                     if 'aggTrade' in st: on_trade(da)
                                     elif '@depth'  in st: on_depth(da)
-                                except Exception: pass
+                                except Exception as e:
+                                    log(f"parse err: {e} | stream={st} | data={str(da)[:80]}", R)
                             elif msg.type in (aiohttp.WSMsgType.CLOSED,
                                               aiohttp.WSMsgType.ERROR):
                                 break
