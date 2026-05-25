@@ -115,41 +115,62 @@ class Window:
 
 class SecBuilder:
     def __init__(self):
-        self._sec    = 0
-        self._trades = []
-        self._sealed = []   # completed 1s candles
+        self._sec       = 0
+        self._trades    = []
+        self._sealed    = []
+        self._last_close = None   # forward-fill price when no trades
 
     def ingest(self, line: str):
         rec = json.loads(line)
-        if rec[0] != 'T':
+        if rec[0] == 'T':
+            _, ts, p_c, q_u, _ = rec
+            sec   = ts // 1000
+            price = p_c / 100
+            qty   = q_u / 10000
+            if sec != self._sec and self._sec != 0:
+                self._seal(self._sec)
+                # fill any skipped seconds between last and current
+                for gap_sec in range(self._sec + 1, sec):
+                    self._fill(gap_sec)
+            if self._sec == 0 or sec != self._sec:
+                self._sec = sec
+            self._trades.append((price, qty))
+        elif rec[0] == 'D':
+            # use mid of best bid/ask as fallback price source
+            _, ts, bids, asks = rec
+            if bids and asks and self._last_close is None:
+                self._last_close = (bids[0][0] + asks[0][0]) / 2 / 100
+
+    def _seal(self, sec: int):
+        if self._trades:
+            prices = [t[0] for t in self._trades]
+            vol    = sum(t[1] for t in self._trades)
+            c      = prices[-1]
+            self._last_close = c
+            self._sealed.append({
+                'ts': sec * 1000, 'o': prices[0],
+                'h': max(prices), 'l': min(prices),
+                'c': c, 'vol': round(vol, 6), 'real': True,
+            })
+            self._trades = []
+
+    def _fill(self, sec: int):
+        """Forward-fill — no trades this second, carry last close."""
+        if self._last_close is None:
             return
-        _, ts, p_c, q_u, _ = rec
-        sec   = ts // 1000
-        price = p_c / 100
-        qty   = q_u / 10000
-
-        if sec != self._sec and self._sec != 0:
-            self._seal()
-        if self._sec == 0 or sec != self._sec:
-            self._sec = sec
-
-        self._trades.append((price, qty))
-
-    def _seal(self):
-        if not self._trades:
-            return
-        prices = [t[0] for t in self._trades]
-        vol    = sum(t[1] for t in self._trades)
+        p = self._last_close
         self._sealed.append({
-            'ts':  self._sec * 1000,
-            'o':   prices[0],
-            'h':   max(prices),
-            'l':   min(prices),
-            'c':   prices[-1],
-            'vol': round(vol, 6),
-            'real': True,
+            'ts': sec * 1000, 'o': p, 'h': p, 'l': p,
+            'c': p, 'vol': 0.0, 'real': True,
         })
-        self._trades = []
+
+    def tick(self, now_sec: int):
+        """Call every second to flush gaps even with no new lines."""
+        if self._sec and now_sec > self._sec:
+            self._seal(self._sec)
+            for gap_sec in range(self._sec + 1, now_sec):
+                self._fill(gap_sec)
+            self._sec = now_sec
 
     def drain(self) -> list:
         out = list(self._sealed)
@@ -209,9 +230,12 @@ def main():
                     builder.ingest(line)
             seen_lines = len(lines)
 
-            for s in builder.drain():
-                for w in windows.values():
-                    w.add_second(s)
+        # flush gaps — fills empty seconds with last close
+        builder.tick(int(time.time()))
+
+        for s in builder.drain():
+            for w in windows.values():
+                w.add_second(s)
 
         print_candles(windows)
         time.sleep(1)
