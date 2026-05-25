@@ -31,7 +31,7 @@ RAW_DIR     = REPO / "data" / "raw"
 RAW_FILE    = RAW_DIR / "BTCUSDC_LIVE.jsonl"
 GZ_FILE     = RAW_DIR / "BTCUSDC_LIVE.jsonl.gz"
 DATA_BRANCH = "data/raw"
-PUSH_S      = 10
+PUSH_S      = 1
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
           "?streams=btcusdc@depth20@100ms/btcusdc@aggTrade")
