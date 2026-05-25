@@ -138,13 +138,26 @@ def _rotate():
 def _check_update():
     try:
         branch = _run('git', 'rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
+        if not branch or branch == 'HEAD':
+            return  # detached HEAD — skip
         _run('git', 'fetch', 'origin', branch)
         local  = _run('git', 'rev-parse', 'HEAD').stdout.strip()
         remote = _run('git', 'rev-parse', f'origin/{branch}').stdout.strip()
-        if remote and remote != local:
-            log("update detected — pulling and restarting...", Y)
-            _run('git', 'pull', '--rebase')
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+        if not remote or remote == local:
+            return
+        log("update detected — applying and restarting...", Y)
+        # Hard reset onto remote — safe because only collect_raw.py matters here
+        # and the JSONL data file is untracked (not in the index).
+        r = _run('git', 'reset', '--hard', f'origin/{branch}')
+        if r.returncode != 0:
+            log(f"reset failed: {r.stderr.strip()[:80]} — skipping restart", R)
+            return
+        # Confirm we're now in sync before restarting
+        new_local = _run('git', 'rev-parse', 'HEAD').stdout.strip()
+        if new_local != remote:
+            log("still diverged after reset — skipping restart", R)
+            return
+        os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
         log(f"update check error: {e}", R)
 
