@@ -89,6 +89,10 @@ RES_FULL_TARGET_ATR = 5.0    # target ATR mult when all TFs aligned (vs tier def
 RES_SIZE_BOOST      = 1.50   # size multiplier at full resonance (alignment ≥ thresh)
 RES_SIZE_REDUCE     = 0.70   # size multiplier at dissonance or low alignment (< 0.35)
 
+# ── Signal quality gates ──────────────────────────────────────────────────────
+MIN_BANDS_TO_SIGNAL = 2      # minimum active bands before signal is valid
+KDV_MIN_BALANCE     = 4.0    # minimum KdV nonlinearity/dispersion ratio to count
+
 # ── Data / backtest ───────────────────────────────────────────────────────────
 SYMBOL        = 'BTCUSDT'
 INTERVAL      = '1m'

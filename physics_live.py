@@ -125,14 +125,17 @@ def _parse_bars(raw, interval: str) -> list:
     data = D.parse_klines(raw)
     bars = []
     for i in range(len(data['closes'])):
+        _c = float(data['closes'][i])
+        _v = float(data['volumes'][i])
         bars.append({
             'ts':        int(data['timestamps'][i]),
             'open':      float(data['opens'][i]),
             'high':      float(data['highs'][i]),
             'low':       float(data['lows'][i]),
-            'close':     float(data['closes'][i]),
-            'volume':    float(data['volumes'][i]),
+            'close':     _c,
+            'volume':    _v,
             'taker_buy': float(data.get('taker_buy', [0]*len(data['closes']))[i]),
+            'eff_usd':   _c * _v,
             'interval':  interval,
         })
     return bars
@@ -353,6 +356,16 @@ class PaperTrader:
                     f"phase={c['phase']:+.2f}  dir={c['direction']:+d}  "
                     f"v={c['velocity']:+.4f}", C)
 
+        # ── Quality gates ──────────────────────────────────────────────────
+        active_bands = sum(1 for band in ['micro', 'subharm', 'carrier', 'macro']
+                           if comp.get(band, {}).get('amplitude', 0) > 0
+                           and comp.get(band, {}).get('direction', 0) != 0)
+        if active_bands < self._CF.MIN_BANDS_TO_SIGNAL:
+            log(f"  [QUAL] LOW BANDS: {active_bands}/{self._CF.MIN_BANDS_TO_SIGNAL} active — signal quality low", Y)
+        sol_balance = sig.get('soliton', {}).get('balance', 0)
+        if sol_balance < self._CF.KDV_MIN_BALANCE:
+            log(f"  [QUAL] WEAK KdV: balance={sol_balance:.3f} < {self._CF.KDV_MIN_BALANCE}", Y)
+
         # ── Multi-TF resonance ──────────────────────────────────────────────
         from physics.resonance import resonance as _resonance
         res = _resonance(list(self._w), bars_5m, bars_15m, bars_1h, bars_4h)
@@ -531,6 +544,7 @@ class PaperTrader:
             'prices':     np.array([b['close']      for b in bars]),
             'volumes':    np.array([b['volume']     for b in bars]),
             'taker_buy':  np.array([b['taker_buy']  for b in bars]),
+            'eff_usd':    np.array([b.get('eff_usd', b['close'] * b['volume']) for b in bars]),
         }
 
     # Last fusion scores — updated every bar for remote diagnostics
@@ -540,6 +554,7 @@ class PaperTrader:
     _last_tier:      int   = 4
     _last_resonance: dict  = None
     _last_waveform:  dict  = None
+    _last_book:      dict  = {}    # L20 structural analysis — updated by LiveEngine
     # OB wall fill/pull — updated by LiveEngine before stats() is called
     _last_ask_fill:    float = 0.0
     _last_ask_pull:    float = 0.0
@@ -610,6 +625,10 @@ class PaperTrader:
                 (self._last_ask_fill + self._last_bid_fill) /
                 max(self._last_ask_fill + self._last_bid_fill +
                     self._last_ask_pull + self._last_bid_pull, 1e-6), 3),
+            'book_gp':        round(float(self._last_book.get('global_pressure', 0)), 3),
+            'book_asym':      round(float(self._last_book.get('asymmetry', 0)), 3),
+            'book_bid_void':  round(float(self._last_book.get('bid_void', 0)), 3),
+            'book_ask_void':  round(float(self._last_book.get('ask_void', 0)), 3),
             # HTF regime
             'htf_trend_1m':   self._last_htf.get('trend_1m',  'none'),
             'htf_trend_5m':   self._last_htf.get('trend_5m',  'none'),
@@ -752,11 +771,12 @@ class LiveEngine:
         self._ask_pulled:  float = 0.0   # BTC cancelled on ask side (spoofed)
 
         # Last-bar snapshots — saved before reset so _write_stats() can export them
-        self._last_ask_fill:    float = 0.0
-        self._last_ask_pull:    float = 0.0
-        self._last_bid_fill:    float = 0.0
-        self._last_bid_pull:    float = 0.0
-        self._last_ask_cleared: bool  = False
+        self._last_ask_fill    = 0.0
+        self._last_ask_pull    = 0.0
+        self._last_bid_fill    = 0.0
+        self._last_bid_pull    = 0.0
+        self._last_ask_cleared = False
+        self._last_book        = {}   # L20 structural analysis from book.py
 
     def _reload(self):
         """Hot-reload params from updated config.py."""
@@ -871,14 +891,16 @@ class LiveEngine:
         # not a 60-second-old snapshot.
         self._update_live_htf(k)
 
+        _vol = float(k['v'])
         bar = {
             'ts':        int(k['t']),
             'open':      float(k['o']),
             'high':      float(k['h']),
             'low':       float(k['l']),
             'close':     cur_price,
-            'volume':    float(k['v']),
+            'volume':    _vol,
             'taker_buy': float(k['V']),
+            'eff_usd':   cur_price * _vol,
             'live':      True,
         }
 
@@ -903,6 +925,7 @@ class LiveEngine:
             bars_1h=(list(self._htf_1h)  + ([self._live_1h]  if self._live_1h  else [])),
             bars_4h=(list(self._htf_4h)  + ([self._live_4h]  if self._live_4h  else [])),
         )
+        self._trader._last_book = self._last_book
         if sig:
             self._log_waveforms(bar, sig, bids)
 
@@ -1018,6 +1041,10 @@ class LiveEngine:
                                 f"({pull_pct:.0%} of level @{price:.2f}) "
                                 f"→ path opened DOWNSIDE", R)
 
+        # L20 structural analysis — prev snapshot (self._bids/asks) used as baseline
+        from physics import book as _book_mod
+        self._last_book = _book_mod.analyze(new_bids, new_asks, self._bids, self._asks)
+
         self._bids = new_bids
         self._asks = new_asks
 
@@ -1125,6 +1152,12 @@ class LiveEngine:
             f"div={cvd.get('divergence',0):.3f}", C)
         log(f"  {ob_str}  physics={sig['physics']:.3f}  "
             f"micro={sig['micro']:.3f}", C)
+        if self._last_book:
+            bk = self._last_book
+            log(f"  Book     gp={bk['global_pressure']:+.3f}  "
+                f"asym={bk['asymmetry']:+.3f}  "
+                f"bid_void={bk['bid_void']:.2f}  ask_void={bk['ask_void']:.2f}  "
+                f"bid_rr={bk['bid_rr']:.2f}  ask_rr={bk['ask_rr']:.2f}", C)
 
         if sig['direction'] == 1 and sig['tier'] < 4:
             t = self._trader._open
