@@ -90,7 +90,7 @@ RES_SIZE_BOOST      = 1.50   # size multiplier at full resonance (alignment ≥ 
 RES_SIZE_REDUCE     = 0.70   # size multiplier at dissonance or low alignment (< 0.35)
 
 # ── Data / backtest ───────────────────────────────────────────────────────────
-SYMBOL        = 'BTCUSDC'
+SYMBOL        = 'BTCUSDT'
 INTERVAL      = '1m'
 HISTORY_BARS  = 5_000       # total bars to pull for backtest
 WARMUP_BARS   = 100         # bars consumed before first trade allowed

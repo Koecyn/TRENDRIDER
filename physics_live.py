@@ -50,7 +50,7 @@ LOG_F       = REPO / "physics_live.log"
 TRADE_F     = REPO / "physics_live_trade.json"     # open trade persisted across restarts
 
 WS_URL = ("wss://stream.binance.us:9443/stream"
-          "?streams=btcusdc@kline_1m/btcusdc@depth20@100ms/btcusdc@aggTrade")
+          "?streams=btcusdt@kline_1m/btcusdt@depth20@100ms/btcusdt@aggTrade")
 
 FETCH_EVERY_S = 30   # pull param changes from git
 
