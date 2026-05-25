@@ -23,8 +23,8 @@ Usage: python collect_raw.py
 
 import asyncio
 import gc
+import gzip
 import json
-import lzma
 import os
 import resource
 import signal
@@ -43,7 +43,7 @@ REPO          = Path(__file__).resolve().parent
 os.chdir(REPO)
 RAW_DIR       = REPO / "data" / "raw"
 RAW_FILE      = RAW_DIR / "BTCUSDT_LIVE.jsonl"
-XZ_FILE       = RAW_DIR / "BTCUSDT_LIVE.jsonl.xz"
+GZ_FILE       = RAW_DIR / "BTCUSDT_LIVE.jsonl.gz"
 DATA_BRANCH   = "data/raw"
 
 PUSH_S        = 1        # push to git every N seconds
@@ -67,18 +67,18 @@ _count_lock = threading.Lock()
 def _rotate():
     """Archive current JSONL to timestamped xz file, start fresh."""
     ts  = int(time.time())
-    arc = RAW_DIR / f"BTCUSDT_{ts}.jsonl.xz"
+    arc = RAW_DIR / f"BTCUSDT_{ts}.jsonl.gz"
     if RAW_FILE.exists() and RAW_FILE.stat().st_size > 0:
         with open(RAW_FILE, 'rb') as src:
             data = src.read()
-        with lzma.open(arc, 'wb', preset=9) as dst:
+        with gzip.open(arc, 'wb', compresslevel=9) as dst:
             dst.write(data)
         RAW_FILE.write_bytes(b'')  # truncate in-place (keeps fd open in stream)
         sz_raw = len(data)
-        sz_xz  = arc.stat().st_size
-        ratio  = sz_raw / max(sz_xz, 1)
+        sz_gz  = arc.stat().st_size
+        ratio  = sz_raw / max(sz_gz, 1)
         log(f"rotated → {arc.name}  "
-            f"{sz_raw//1024}kB → {sz_xz//1024}kB  ({ratio:.1f}x)", Y)
+            f"{sz_raw//1024}kB → {sz_gz//1024}kB  ({ratio:.1f}x)", Y)
         # push archive too
         rel = str(arc.relative_to(REPO))
         git('add', rel)
@@ -129,22 +129,22 @@ def _push_loop():
                 with _count_lock:
                     _line_count = 0
 
-            # Compress current live file to xz
-            tmp = XZ_FILE.with_suffix('.tmp.xz')
+            # Compress current live file to gz
+            tmp = GZ_FILE.with_suffix('.tmp.gz')
             with open(RAW_FILE, 'rb') as src:
                 data = src.read()
-            with lzma.open(tmp, 'wb', preset=9) as dst:
+            with gzip.open(tmp, 'wb', compresslevel=9) as dst:
                 dst.write(data)
-            tmp.rename(XZ_FILE)
+            tmp.rename(GZ_FILE)
 
-            rel = str(XZ_FILE.relative_to(REPO))
+            rel = str(GZ_FILE.relative_to(REPO))
             git('add', rel)
             r = git('commit', '-m', f"raw {int(time.time())}")
             if r.returncode == 0:
                 pr = git('push', '--force', 'origin', f'HEAD:{DATA_BRANCH}')
-                sz = XZ_FILE.stat().st_size
+                sz = GZ_FILE.stat().st_size
                 if pr.returncode == 0:
-                    log(f"pushed {sz//1024}kB xz  lines={lc}", G)
+                    log(f"pushed {sz//1024}kB gz  lines={lc}", G)
                 else:
                     log(f"push fail: {pr.stderr.strip()}", R)
 
