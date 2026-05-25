@@ -3,17 +3,15 @@
 collect_raw.py — pipe WebSocket stream directly to file.
 
 Hot path : message → fh.write(line+\n). Nothing else.
-Push loop: every PUSH_S seconds → lzma compress → git push data/raw.
+Push loop: every PUSH_S seconds → stream-compress → git plumbing push to data/raw.
 Rotate   : every ROTATE_LINES lines, archive current file and start fresh.
-           Keeps Termux RSS low — never holds the full history in RAM.
-
-Compression: lzma preset=9 (better than gzip-9, built-in, no extra deps).
-             Typical: 1MB raw JSONL → ~35KB lzma vs ~55KB gzip-9.
 
 Signal-9 defence:
-  - JSONL file rotated every ROTATE_LINES to cap disk/memory growth
+  - Streaming gzip: never reads whole file into RAM (64KB chunks)
+  - Git plumbing: hash-object + commit-tree, never touches code branch or index
+  - JSONL rotated every ROTATE_LINES to cap disk growth
   - gc.collect() every GC_EVERY pushes
-  - RSS logged every LOG_MEM_EVERY pushes so you can see growth
+  - RSS logged every LOG_MEM_EVERY pushes
 
 Trade line: ["T", ts_ms, price_cents, qty_units, side]
 Depth line: ["D", ts_ms, [[p_c,q_u],...bids], [[p_c,q_u],...asks]]
@@ -27,6 +25,7 @@ import gzip
 import json
 import os
 import resource
+import shutil
 import signal
 import subprocess
 import sys
@@ -45,6 +44,7 @@ RAW_DIR       = REPO / "data" / "raw"
 RAW_FILE      = RAW_DIR / "BTCUSDT_LIVE.jsonl"
 GZ_FILE       = RAW_DIR / "BTCUSDT_LIVE.jsonl.gz"
 DATA_BRANCH   = "data/raw"
+TMP_IDX       = REPO / ".git" / "data_push.idx"
 
 PUSH_S        = 1        # push to git every N seconds
 ROTATE_LINES  = 50_000   # rotate JSONL after this many lines (~5MB raw)
@@ -57,56 +57,93 @@ WS_URL = ("wss://stream.binance.us:9443/stream"
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'
 def log(m, c=Z): print(f"{c}[raw] {m}{Z}", flush=True)
 
-def git(*a):
-    return subprocess.run(['git','-C',str(REPO)]+list(a), capture_output=True, text=True)
+def _run(*a, env=None):
+    return subprocess.run(list(a), capture_output=True, text=True,
+                          cwd=str(REPO), env=env)
 
-# shared line counter (written by stream coroutine, read by push thread)
+# shared line counter
 _line_count = 0
 _count_lock = threading.Lock()
 
+
+def _stream_compress(src_path, dst_path):
+    """Gzip src → dst in 64KB chunks — no full-file read into RAM."""
+    tmp = dst_path.with_suffix('.tmp.gz')
+    with open(src_path, 'rb') as src, \
+         gzip.open(tmp, 'wb', compresslevel=9) as dst:
+        shutil.copyfileobj(src, dst, length=65536)
+    tmp.rename(dst_path)
+
+
+def _git_push_file(gz_path) -> bool:
+    """
+    Push gz_path to DATA_BRANCH using git plumbing only.
+    Never touches the working index or code branch.
+    """
+    rel = str(gz_path.relative_to(REPO))
+
+    # 1. Write blob object
+    r = _run('git', 'hash-object', '-w', str(gz_path))
+    blob = r.stdout.strip()
+    if not blob:
+        return False
+
+    # 2. Build a temp index seeded from current data branch
+    env = {**os.environ, 'GIT_INDEX_FILE': str(TMP_IDX)}
+    parent_r = _run('git', 'rev-parse', f'origin/{DATA_BRANCH}')
+    parent = parent_r.stdout.strip()
+    if parent:
+        _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env)
+
+    # 3. Update only our file in the temp index
+    _run('git', 'update-index', '--add',
+         '--cacheinfo', f'100644,{blob},{rel}', env=env)
+
+    # 4. Write tree from temp index
+    r = _run('git', 'write-tree', env=env)
+    tree = r.stdout.strip()
+    TMP_IDX.unlink(missing_ok=True)
+    if not tree:
+        return False
+
+    # 5. Create commit object
+    cmd = ['git', 'commit-tree', tree, '-m', f'raw {int(time.time())}']
+    if parent:
+        cmd += ['-p', parent]
+    r = _run(*cmd)
+    commit = r.stdout.strip()
+    if not commit:
+        return False
+
+    # 6. Push commit directly to data branch ref
+    r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{DATA_BRANCH}')
+    return r.returncode == 0
+
+
 def _rotate():
-    """Archive current JSONL to timestamped xz file, start fresh."""
+    """Archive current JSONL to timestamped gz, start fresh."""
     ts  = int(time.time())
     arc = RAW_DIR / f"BTCUSDT_{ts}.jsonl.gz"
     if RAW_FILE.exists() and RAW_FILE.stat().st_size > 0:
-        with open(RAW_FILE, 'rb') as src:
-            data = src.read()
-        with gzip.open(arc, 'wb', compresslevel=9) as dst:
-            dst.write(data)
-        RAW_FILE.write_bytes(b'')  # truncate in-place (keeps fd open in stream)
-        sz_raw = len(data)
-        sz_gz  = arc.stat().st_size
-        ratio  = sz_raw / max(sz_gz, 1)
+        sz_raw = RAW_FILE.stat().st_size
+        _stream_compress(RAW_FILE, arc)
+        RAW_FILE.write_bytes(b'')
+        sz_gz = arc.stat().st_size
+        ratio = sz_raw / max(sz_gz, 1)
         log(f"rotated → {arc.name}  "
             f"{sz_raw//1024}kB → {sz_gz//1024}kB  ({ratio:.1f}x)", Y)
-        # push archive too
-        rel = str(arc.relative_to(REPO))
-        git('add', rel)
+        _git_push_file(arc)
 
-def _local_hash() -> str:
-    r = subprocess.run(['git','-C',str(REPO),'rev-parse','HEAD'],
-                       capture_output=True, text=True)
-    return r.stdout.strip()
-
-def _remote_hash() -> str:
-    branch = subprocess.run(
-        ['git','-C',str(REPO),'rev-parse','--abbrev-ref','HEAD'],
-        capture_output=True, text=True).stdout.strip()
-    subprocess.run(['git','-C',str(REPO),'fetch','origin', branch],
-                   capture_output=True)
-    r = subprocess.run(
-        ['git','-C',str(REPO),'rev-parse',f'origin/{branch}'],
-        capture_output=True, text=True)
-    return r.stdout.strip()
 
 def _check_update():
     try:
-        local  = _local_hash()
-        remote = _remote_hash()
+        branch = _run('git', 'rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
+        _run('git', 'fetch', 'origin', branch)
+        local  = _run('git', 'rev-parse', 'HEAD').stdout.strip()
+        remote = _run('git', 'rev-parse', f'origin/{branch}').stdout.strip()
         if remote and remote != local:
-            log(f"update detected — pulling and restarting...", Y)
-            subprocess.run(['git','-C',str(REPO),'pull','--rebase'],
-                           capture_output=True)
+            log("update detected — pulling and restarting...", Y)
+            _run('git', 'pull', '--rebase')
             os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
         log(f"update check error: {e}", R)
@@ -122,7 +159,6 @@ def _push_loop():
             if not RAW_FILE.exists() or RAW_FILE.stat().st_size == 0:
                 continue
 
-            # Check rotation
             with _count_lock:
                 lc = _line_count
             if lc >= ROTATE_LINES:
@@ -130,36 +166,22 @@ def _push_loop():
                 with _count_lock:
                     _line_count = 0
 
-            # Compress current live file to gz
-            tmp = GZ_FILE.with_suffix('.tmp.gz')
-            with open(RAW_FILE, 'rb') as src:
-                data = src.read()
-            with gzip.open(tmp, 'wb', compresslevel=9) as dst:
-                dst.write(data)
-            tmp.rename(GZ_FILE)
+            _stream_compress(RAW_FILE, GZ_FILE)
 
-            rel = str(GZ_FILE.relative_to(REPO))
-            git('add', rel)
-            r = git('commit', '-m', f"raw {int(time.time())}")
-            if r.returncode == 0:
-                pr = git('push', '--force', 'origin', f'HEAD:{DATA_BRANCH}')
-                git('reset', 'HEAD~1', '--mixed')  # drop data commit from code branch
-                sz = GZ_FILE.stat().st_size
-                if pr.returncode == 0:
-                    log(f"pushed {sz//1024}kB gz  lines={lc}", G)
-                else:
-                    log(f"push fail: {pr.stderr.strip()}", R)
+            ok = _git_push_file(GZ_FILE)
+            sz = GZ_FILE.stat().st_size
+            if ok:
+                log(f"pushed {sz//1024}kB gz  lines={lc}", G)
+            else:
+                log(f"push fail", R)
 
-            # Periodic GC
             if cycle % GC_EVERY == 0:
                 gc.collect()
 
-            # RSS logging
             if cycle % LOG_MEM_EVERY == 0:
                 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 log(f"mem rss={rss}KB  lines={lc}  cycle={cycle}", Y)
 
-            # Hot reload — check if remote has newer code every 30 cycles
             if cycle % 30 == 0:
                 _check_update()
 
