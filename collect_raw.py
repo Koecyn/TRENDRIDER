@@ -83,6 +83,35 @@ def _rotate():
         rel = str(arc.relative_to(REPO))
         git('add', rel)
 
+def _local_hash() -> str:
+    r = subprocess.run(['git','-C',str(REPO),'rev-parse','HEAD'],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+def _remote_hash() -> str:
+    branch = subprocess.run(
+        ['git','-C',str(REPO),'rev-parse','--abbrev-ref','HEAD'],
+        capture_output=True, text=True).stdout.strip()
+    subprocess.run(['git','-C',str(REPO),'fetch','origin', branch],
+                   capture_output=True)
+    r = subprocess.run(
+        ['git','-C',str(REPO),'rev-parse',f'origin/{branch}'],
+        capture_output=True, text=True)
+    return r.stdout.strip()
+
+def _check_update():
+    try:
+        local  = _local_hash()
+        remote = _remote_hash()
+        if remote and remote != local:
+            log(f"update detected — pulling and restarting...", Y)
+            subprocess.run(['git','-C',str(REPO),'pull','--rebase'],
+                           capture_output=True)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        log(f"update check error: {e}", R)
+
+
 def _push_loop():
     cycle = 0
     while True:
@@ -127,6 +156,10 @@ def _push_loop():
             if cycle % LOG_MEM_EVERY == 0:
                 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 log(f"mem rss={rss}KB  lines={lc}  cycle={cycle}", Y)
+
+            # Hot reload — check if remote has newer code every 30 cycles
+            if cycle % 30 == 0:
+                _check_update()
 
         except Exception as e:
             log(f"push error: {e}", R)
