@@ -3,8 +3,8 @@
 physics_live.py — Live wave equation signal engine.
 
 Connects directly to Binance.US WebSocket:
-  btcusdc@kline_1m       — 1m bars; processes on bar CLOSE (x=True)
-  btcusdc@depth20@100ms  — L20 order book every 100ms
+  btcusdt@kline_1m       — 1m bars; processes on bar CLOSE (x=True)
+  btcusdt@depth20@100ms  — L20 order book every 100ms
 
 On each closed bar:
   • Runs all physics + microstructure signals with real order book depth
