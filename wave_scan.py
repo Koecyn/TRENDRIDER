@@ -154,15 +154,16 @@ def _sig_type(state, direction):
     return 'MID'
 
 def _dynamic_gates(session_kdv_bals):
-    """Compute session-adaptive KdV balance gates from observed distribution."""
-    if len(session_kdv_bals) < 5:
+    """KdV balance gates from recent 3-minute window — adapts to local momentum."""
+    recent = session_kdv_bals[-180:] if len(session_kdv_bals) >= 180 else session_kdv_bals
+    if len(recent) < 5:
         return 1.5, 3.0  # cold start defaults
-    arr = np.array(session_kdv_bals)
+    arr = np.array(recent)
     gate_rev  = max(GATE_FLOOR, float(np.percentile(arr, GATE_PCT_REV)))
     gate_cont = max(GATE_FLOOR, float(np.percentile(arr, GATE_PCT_CONT)))
     return gate_rev, gate_cont
 
-def _gates(stype, score, kdv_bal, gate_rev, gate_cont,
+def _gates(stype, score, kdv_bal, kdv_dir, gate_rev, gate_cont,
            obi_pressure, align, res_dir, sig_dir,
            at_sup, kdv_flipped, sustain):
     """Returns (pass: bool, reason: str)."""
@@ -172,16 +173,22 @@ def _gates(stype, score, kdv_bal, gate_rev, gate_cont,
         return False, f'score={score:+.3f}'
 
     if stype in ('PEAK-REV', 'TROUGH-REV'):
-        # OB pressure can substitute for KdV flip — book sees what KdV hasn't confirmed yet
+        # Three ways to confirm direction:
+        # 1. KdV already pointing in signal direction (trend established)
+        # 2. KdV just flipped to signal direction this minute (new momentum)
+        # 3. OB pressure confirms signal direction (book sees it before KdV)
+        kdv_matches = (sig_dir < 0 and kdv_dir <= -1) or (sig_dir > 0 and kdv_dir >= 1)
         ob_confirms = (stype == 'TROUGH-REV' and obi_pressure >=  OBI_CONF) or \
                       (stype == 'PEAK-REV'   and obi_pressure <= -OBI_CONF)
-        if not kdv_flipped and not ob_confirms:
-            return False, f'no-flip,obi={obi_pressure:+.2f}'
+        if not (kdv_matches or kdv_flipped or ob_confirms):
+            return False, f'kdv-dir={kdv_dir},obi={obi_pressure:+.2f}'
         if kdv_bal < gate_rev:
             return False, f'kdv-bal={kdv_bal:.1f}<{gate_rev:.1f}'
         if stype == 'TROUGH-REV' and not at_sup:
             return False, 'not-at-support'
-        confirm = 'kdv-flip' if kdv_flipped else f'ob={obi_pressure:+.2f}'
+        if kdv_flipped:   confirm = 'kdv-flip'
+        elif kdv_matches: confirm = f'kdv={kdv_dir:+d}'
+        else:             confirm = f'ob={obi_pressure:+.2f}'
         return True, confirm
 
     if stype in ('PEAK-CONT', 'TROUGH-CONT'):
@@ -251,15 +258,16 @@ def scan(mins_limit=96):
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
 
         # Signal candidate state
-        cand_sec   = None
-        cand_score = 0.0
-        cand_dir   = 0
-        cand_state = 'MID'
-        cand_stype = 'MID'
-        cand_entry = 0.0
-        cand_tgt   = 0.0
-        cand_kdvbal= 0.0
-        cand_obi   = 0.0
+        cand_sec    = None
+        cand_score  = 0.0
+        cand_dir    = 0
+        cand_state  = 'MID'
+        cand_stype  = 'MID'
+        cand_entry  = 0.0
+        cand_tgt    = 0.0
+        cand_kdvbal = 0.0
+        cand_kdvdir = 0
+        cand_obi    = 0.0
 
         sustain_count    = 0
         prev_sb          = 0
@@ -303,7 +311,7 @@ def scan(mins_limit=96):
                 f_sc     = fus['score']
                 # OB pressure from book analyzer (in fusion output)
                 obi_raw  = fus.get('obi', {})
-                obi_p    = (obi_raw.get('global_pressure', 0.0)
+                obi_p    = (obi_raw.get('obi', 0.0)     # raw weighted OBI value
                             if isinstance(obi_raw, dict) else float(obi_raw or 0.0))
             except Exception:
                 kdv=0; kdv_bal=0.0; wh=False; f_sc=0.0; obi_p=0.0
@@ -363,6 +371,7 @@ def scan(mins_limit=96):
                 cand_tgt    = tgts.get('primary',
                                 p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
                 cand_kdvbal = kdv_bal
+                cand_kdvdir = kdv
                 cand_obi    = obi_p
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
@@ -399,7 +408,7 @@ def scan(mins_limit=96):
             kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
                           (cand_dir < 0 and kdv_flipped_down)
             passed, fail_reason = _gates(
-                cand_stype, cand_score, cand_kdvbal, gate_rev, gate_cont,
+                cand_stype, cand_score, cand_kdvbal, cand_kdvdir, gate_rev, gate_cont,
                 cand_obi, align, res_dir, cand_dir,
                 at_sup, kdv_flipped, SUSTAIN_S)
             if passed:
