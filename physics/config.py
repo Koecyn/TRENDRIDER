@@ -20,7 +20,7 @@ RE_WINDOW    = 10
 VISC_BASE    = 0.0082     # base viscosity (tune to typical spread)
 
 # ── Shock Front ───────────────────────────────────────────────────────────────
-MACH_SHOCK   = 500.0    # Mach threshold — fade anything above this (calibrated for eff_usd inputs)
+MACH_SHOCK   = 2000.0   # Mach threshold — fade anything above this (calibrated for eff_usd inputs)
 SHOCK_WINDOW = 8
 
 # ── Darcy's Law ───────────────────────────────────────────────────────────────
