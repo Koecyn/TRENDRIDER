@@ -252,6 +252,10 @@ def scan(mins_limit=96, session_idx=0):
         t_start = trade_secs[trade_gaps[session_idx]]
         t_end   = trade_secs[trade_gaps[session_idx - 1] - 1] if session_idx > 0 \
                   else trade_secs[-1]
+    elif session_idx == len(trade_gaps):
+        # Earliest session: start of data to just before the oldest gap
+        t_start = trade_secs[0]
+        t_end   = trade_secs[trade_gaps[-1] - 1]
     else:
         t_start = trade_secs[0]
         t_end   = trade_secs[-1]
