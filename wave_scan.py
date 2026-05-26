@@ -227,6 +227,39 @@ def _gates(stype, score, kdv_bal, kdv_dir,
 
 # ── Main scan ─────────────────────────────────────────────────────────────────
 
+def _preseed(session_tf1m, ob_by_sec):
+    """
+    Pre-populate distribution histories from the session's own 1m bars.
+    Used when there are no prior-session history bars (e.g. first session of the day).
+    Runs a silent physics pass — no signals, just stats collection.
+    """
+    hist_s=[]; hist_ph=[]; hist_ob=[]; hist_kd=[]; hist_al=[]
+    seed_bars = []
+    seed_accum = HydraulicAccumulator()
+    for b in session_tf1m:
+        seed_bars.append(b)
+        if len(seed_bars) < 15: continue
+        closes, opens_a, volumes, taker_buy = _bars2arr(seed_bars[-200:])
+        try:
+            prices = (closes + opens_a) / 2.0
+            sec    = b['ts'] // 1000
+            bids, asks = ob_by_sec.get(sec, ([], []))
+            fus    = fusion.run(prices, opens_a, closes, volumes, taker_buy,
+                                seed_accum, bids, asks)
+            f_sc   = fus['score']
+            kd_bal = abs(fus['soliton'].get('balance', 0.0))
+            obi_r  = fus.get('obi', {})
+            obi_p  = (obi_r.get('obi', 0.0) if isinstance(obi_r, dict) else float(obi_r or 0.0))
+            wf     = WF.run(closes, entry=closes[-1], direction=1 if f_sc >= 0 else -1)
+            mph    = wf['components'].get('micro', {}).get('phase', 0.0)
+            hist_s.append(abs(f_sc)); hist_ph.append(mph)
+            hist_ob.append(obi_p);   hist_kd.append(kd_bal)
+            hist_al.append(0.5)
+        except Exception:
+            pass
+    return hist_s, hist_ph, hist_ob, hist_kd, hist_al
+
+
 def scan(mins_limit=96, session_idx=0):
     print("Fetching raw data...", flush=True)
     subprocess.run(['git','fetch','origin','data/raw'], capture_output=True, cwd=REPO)
@@ -294,9 +327,22 @@ def scan(mins_limit=96, session_idx=0):
     hist_kdv_bals= []   # KdV balance at minute end
     hist_aligns  = []   # MTF alignment at minute end
 
+    # Pre-seed distributions when no prior history (first session of the day)
+    if len(history_1m) < 15:
+        session_tf1m = [b for b in tf1m
+                        if live_secs[0]//60*60 <= b['ts']//1000 <= live_secs[-1]//60*60]
+        ps, pp, po, pk, pa = _preseed(session_tf1m, ob_by_sec)
+        hist_scores   = ps; hist_phases = pp
+        hist_obi      = po; hist_kdv_bals = pk; hist_aligns = pa
+        print(f"Pre-seeded from {len(ps)} session bars (no prior history)")
+
+    # Micro layer: rolling 1s window across minute boundaries
+    micro_window  = []   # list of 1s bar dicts
+    micro_accum   = HydraulicAccumulator()
+
     print(f"\n{C}━━━ WAVE ENGINE  {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC ━━━{Z}")
     print(f"{W}[wave] TIME   PRICE       SCORE  D  μ  sh  ca  ma  "
-          f"1m 5m 15 1h 4h  KdV  OBI   itype  STATE   NOTES{Z}\n")
+          f"1m 5m 15 1h 4h  KdV  OBI   mSC    mPH  itype  STATE   NOTES{Z}\n")
 
     for min_sec in sorted(live_by_min.keys()):
         secs_in_min = sorted(live_by_min[min_sec])
@@ -355,6 +401,27 @@ def scan(mins_limit=96, session_idx=0):
 
             closes, opens_a, volumes, taker_buy = _bars2arr(window)
             bids, asks = ob_by_sec.get(sec, ([], []))
+
+            # ── Micro layer: 1s rolling window physics ───────────────────────
+            micro_window.append(bar1s)
+            if len(micro_window) > 120: micro_window = micro_window[-120:]
+            micro_sc = 0.0; micro_ph = 0.0; micro_kdv = 0
+            if len(micro_window) >= 15:
+                mc = np.array([b['close']  for b in micro_window], dtype=float)
+                mo = np.array([b['open']   for b in micro_window], dtype=float)
+                mv = np.array([b['volume'] for b in micro_window], dtype=float)
+                mt = np.array([b.get('taker_buy', b['volume']*0.5)
+                               for b in micro_window], dtype=float)
+                try:
+                    mp   = (mc + mo) / 2.0
+                    mfus = fusion.run(mp, mo, mc, mv, mt, micro_accum, [], [])
+                    micro_sc  = mfus['score']
+                    micro_kdv = mfus['soliton']['direction']
+                    mwf       = WF.run(mc, entry=mc[-1],
+                                       direction=1 if micro_sc >= 0 else -1)
+                    micro_ph  = mwf['components'].get('micro',{}).get('phase', 0.0)
+                except Exception:
+                    pass
 
             try:
                 prices = (closes + opens_a) / 2.0
@@ -438,7 +505,8 @@ def scan(mins_limit=96, session_idx=0):
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
                      'comp':comp,'itf':itf,'sb':sb,'micro_phase':micro_phase,
-                     'sustain':sustain_count,'obi':obi_p}
+                     'sustain':sustain_count,'obi':obi_p,
+                     'micro_sc':micro_sc,'micro_ph':micro_ph,'micro_kdv':micro_kdv}
 
         if not final:
             for b in tf1m:
@@ -562,11 +630,16 @@ def scan(mins_limit=96, session_idx=0):
         state_col = (C if state_now == 'PEAK' else
                      G if state_now == 'TROUGH' else W)
 
+        msc_f  = final.get('micro_sc',  0.0)
+        mph_f  = final.get('micro_ph',  0.0)
+        mkdv_f = final.get('micro_kdv', 0)
+        msc_str = f"{msc_f:>+6.3f}" if msc_f != 0.0 else "  ---  "
+        mph_str = _ph(mph_f)
         print(f"{col}[wave] {_tm(min_sec)}  ${price:>9,.2f}  {score:>+7.4f} {_ds(wf_dir)}  "
               f"{_ph(mi.get('phase',0)):>2} {_ph(sh_.get('phase',0)):>2} "
               f"{_ph(ca.get('phase',0)):>2} {_ph(ma.get('phase',0)):>2}  "
               f"{t1m} {t5m} {t15} {t1h} {t4h}  "
-              f"{kdv_str}  {obi_str}  {itype:4}  "
+              f"{kdv_str}  {obi_str}  {msc_str}  {mph_str}  {itype:4}  "
               f"{state_col}{state_now:6}{col}  {note_str}{Z}")
 
         if kdv != 0: prev_kdv_global = kdv
