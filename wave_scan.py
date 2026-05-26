@@ -347,10 +347,32 @@ def scan(mins_limit=96, session_idx=0):
     for min_sec in sorted(live_by_min.keys()):
         secs_in_min = sorted(live_by_min[min_sec])
 
-        b5  = [b for b in tf5m  if b['ts']//1000 <= min_sec][-30:]
-        b15 = [b for b in tf15m if b['ts']//1000 <= min_sec][-20:]
-        b1h = [b for b in tf1h  if b['ts']//1000 <= min_sec][-12:]
-        b4h = [b for b in tf4h  if b['ts']//1000 <= min_sec][-6:]
+        # Live-partial HTF bars built from the closed_1m pool.
+        # Completed HTF periods: aggregate 1m bars whose period has fully elapsed.
+        # Current HTF period: live partial from completed 1m bars so far in the period.
+        # No lookahead — the pool only contains bars completed before this minute.
+        def _live_htf(full_tf, period, n):
+            ps   = (min_sec // period) * period          # start of current HTF period
+            done = [b for b in full_tf if b['ts']//1000 < ps]
+            cur  = [b for b in closed_1m
+                    if ps <= b['ts']//1000 < ps + period]
+            if cur:
+                live = {
+                    'ts':        ps * 1000,
+                    'open':      cur[0]['open'],
+                    'high':      max(b['high'] for b in cur),
+                    'low':       min(b['low']  for b in cur),
+                    'close':     cur[-1]['close'],
+                    'volume':    sum(b['volume'] for b in cur),
+                    'taker_buy': sum(b.get('taker_buy', 0) for b in cur),
+                }
+                done = done + [live]
+            return done[-n:]
+
+        b5  = _live_htf(tf5m,  300,   30)
+        b15 = _live_htf(tf15m, 900,   20)
+        b1h = _live_htf(tf1h,  3600,  12)
+        b4h = _live_htf(tf4h,  14400,  6)
 
         # Thresholds from completed candle distributions
         thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = \
