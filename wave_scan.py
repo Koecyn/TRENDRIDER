@@ -585,13 +585,13 @@ def _preseed(session_tf1m, ob_by_sec):
     return hist_s, hist_ph, hist_ob, hist_kd, hist_al
 
 
-def scan(mins_limit=96, session_idx=0):
-    print("Fetching raw data...", flush=True)
+def scan(mins_limit=96, session_idx=0, signals_only=False):
+    if not signals_only: print("Fetching raw data...", flush=True)
     subprocess.run(['git','fetch','origin','data/raw'], capture_output=True, cwd=REPO)
     raw = _fetch_raw()
-    print(f"Raw lines: {len(raw)}")
+    if not signals_only: print(f"Raw lines: {len(raw)}")
 
-    print("Building timeframes...", flush=True)
+    if not signals_only: print("Building timeframes...", flush=True)
     s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(raw)
 
     s1_by_sec = {b['ts']//1000: b for b in s1}
@@ -628,12 +628,12 @@ def scan(mins_limit=96, session_idx=0):
     live_start_min = (live_secs[0] // 60) * 60
     history_1m     = [b for b in tf1m if b['ts']//1000 < live_start_min]
 
-    print(f"Live session: {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC  "
-          f"({len(live_secs)}s,  {len(history_1m)} history bars)")
-
-    print("Computing knife-decay states...", flush=True)
+    if not signals_only:
+        print(f"Live session: {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC  "
+              f"({len(live_secs)}s,  {len(history_1m)} history bars)")
+        print("Computing knife-decay states...", flush=True)
     knife_states = _build_decay_states(raw, live_secs[0], live_secs[-1])
-    print(f"  {len(knife_states)} decay snapshots")
+    if not signals_only: print(f"  {len(knife_states)} decay snapshots")
 
     live_by_min = collections.defaultdict(list)
     for sec in live_secs:
@@ -663,15 +663,19 @@ def scan(mins_limit=96, session_idx=0):
         ps, pp, po, pk, pa = _preseed(session_tf1m, ob_by_sec)
         hist_scores   = ps; hist_phases = pp
         hist_obi      = po; hist_kdv_bals = pk; hist_aligns = pa
-        print(f"Pre-seeded from {len(ps)} session bars (no prior history)")
+        if not signals_only:
+            print(f"Pre-seeded from {len(ps)} session bars (no prior history)")
 
     # Micro layer: rolling 1s window across minute boundaries
     micro_window  = []   # list of 1s bar dicts
     micro_accum   = HydraulicAccumulator()
 
-    print(f"\n{C}━━━ WAVE ENGINE  {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC ━━━{Z}")
-    print(f"{W}[wave] TIME   PRICE       SCORE  D  μ  sh  ca  ma  "
-          f"1m 5m 15 1h 4h  KdV  OBI   mSC    mPH  itype  STATE  DECAY  NOTES{Z}\n")
+    if signals_only:
+        print(f"\n{C}━━━  {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC  ━━━{Z}")
+    else:
+        print(f"\n{C}━━━ WAVE ENGINE  {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC ━━━{Z}")
+        print(f"{W}[wave] TIME   PRICE       SCORE  D  μ  sh  ca  ma  "
+              f"1m 5m 15 1h 4h  KdV  OBI   mSC    mPH  itype  STATE  DECAY  NOTES{Z}\n")
 
     for min_sec in sorted(live_by_min.keys()):
         secs_in_min = sorted(live_by_min[min_sec])
@@ -993,16 +997,53 @@ def scan(mins_limit=96, session_idx=0):
         msc_str = f"{msc_f:>+6.3f}" if msc_f != 0.0 else "  ---  "
         mph_str = _ph(mph_f)
         dec_str = KnifeDecayBuffer.compact(min_dk_state, min_dk_ds, min_dk_fos)
-        # Colour decay column: FLOOR = green, DECAY = cyan, KNIFE = yellow, else dim
         dec_col = (G if min_dk_state >= KnifeDecayBuffer.FLOCK  else
                    C if min_dk_state >= KnifeDecayBuffer.DWATCH else
                    Y if min_dk_state >= KnifeDecayBuffer.KNIFE  else Z)
-        print(f"{col}[wave] {_tm(min_sec)}  ${price:>9,.2f}  {score:>+7.4f} {_ds(wf_dir)}  "
-              f"{_ph(mi.get('phase',0)):>2} {_ph(sh_.get('phase',0)):>2} "
-              f"{_ph(ca.get('phase',0)):>2} {_ph(ma.get('phase',0)):>2}  "
-              f"{t1m} {t5m} {t15} {t1h} {t4h}  "
-              f"{kdv_str}  {obi_str}  {msc_str}  {mph_str}  {itype:4}  "
-              f"{state_col}{state_now:6}{col}  {dec_col}{dec_str}{col}  {note_str}{Z}")
+
+        if not signals_only:
+            print(f"{col}[wave] {_tm(min_sec)}  ${price:>9,.2f}  {score:>+7.4f} {_ds(wf_dir)}  "
+                  f"{_ph(mi.get('phase',0)):>2} {_ph(sh_.get('phase',0)):>2} "
+                  f"{_ph(ca.get('phase',0)):>2} {_ph(ma.get('phase',0)):>2}  "
+                  f"{t1m} {t5m} {t15} {t1h} {t4h}  "
+                  f"{kdv_str}  {obi_str}  {msc_str}  {mph_str}  {itype:4}  "
+                  f"{state_col}{state_now:6}{col}  {dec_col}{dec_str}{col}  {note_str}{Z}")
+
+        if passed:
+            # ── Clean signal card (always printed on any passed signal) ─────
+            import re
+            arrow  = '▲' if cand_dir > 0 else '▼'
+            side   = 'LONG' if cand_dir > 0 else 'SHORT'
+            stype  = 'TROUGH REVERSAL' if 'TROUGH' in cand_stype else 'PEAK REVERSAL'
+            c      = G if cand_dir > 0 else R
+            bar    = '━' * 50
+
+            reasons = []
+            cs = confirm_str
+            m = re.search(r'ob=([+\-\d.]+)', cs)
+            if m: reasons.append(f"OBI {m.group(1)}")
+            if 'kdv' in cs.lower() or 'flip' in cs.lower():
+                reasons.append(f"KdV {'↑' if cand_dir > 0 else '↓'}")
+            if 'FLOOR' in cs and 'FLR' not in cs: reasons.append('FLOOR locked')
+            elif 'FLR?' in cs: reasons.append('Floor forming')
+            elif 'DECAY' in cs: reasons.append('Momentum decay')
+            if 'knife-floor' in cs: reasons.append('Floor lock override')
+            if not reasons: reasons.append(cs)
+            reason_str = '  ·  '.join(reasons)
+
+            def _tr(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+            mtf = f"1m{_tr(t1m)}  5m{_tr(t5m)}  15m{_tr(t15)}  1h{_tr(t1h)}  4h{_tr(t4h)}"
+
+            dk_lbl = KnifeDecayBuffer.LABELS.get(min_dk_state, '')
+            dk_str = f"{dk_lbl}  ds={min_dk_ds:.2f}  fos={min_dk_fos:.2f}" if min_dk_state else ''
+
+            print(f"\n{c}{bar}")
+            print(f"  {arrow}  {side}  ·  {stype:<20}  [{sig_count}]")
+            print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
+            if reason_str: print(f"     {reason_str}")
+            if dk_str:     print(f"     {dk_str}")
+            print(f"     {mtf}")
+            print(f"{bar}{Z}\n")
 
         if kdv != 0: prev_kdv_global = kdv
 
@@ -1013,13 +1054,14 @@ def scan(mins_limit=96, session_idx=0):
     # Final threshold state
     thresh_f, pk_f, tr_f, obi_f2, gr_f, gc_f, al_f = \
         _thresholds(hist_scores, hist_phases, hist_obi, hist_kdv_bals, hist_aligns)
-    print(f"\n{C}━━━ END  ({sig_count} signals) ━━━{Z}")
-    print(f"Final thresholds (from {len(hist_scores)} closed candles):")
-    print(f"  score≥{thresh_f:.3f}  peak_ph≥{pk_f:.2f}  trough_ph≤{tr_f:.2f}")
-    print(f"  obi_conf≥{obi_f2:.2f}  kdv_rev≥{gr_f:.1f}  kdv_cont≥{gc_f:.1f}  align≥{al_f:.2f}")
-    print(f"\nKey: STATE = micro position (PEAK/TROUGH/MID)  OBI = order book imbalance")
-    print(f"     All thresholds derived from completed candle value distributions")
-    print(f"     SUSTAIN_S={SUSTAIN_S}s is the only fixed constant")
+    print(f"\n{C}━━━ {sig_count} signal{'s' if sig_count!=1 else ''} ━━━{Z}")
+    if not signals_only:
+        print(f"Final thresholds (from {len(hist_scores)} closed candles):")
+        print(f"  score≥{thresh_f:.3f}  peak_ph≥{pk_f:.2f}  trough_ph≤{tr_f:.2f}")
+        print(f"  obi_conf≥{obi_f2:.2f}  kdv_rev≥{gr_f:.1f}  kdv_cont≥{gc_f:.1f}  align≥{al_f:.2f}")
+        print(f"\nKey: STATE = micro position (PEAK/TROUGH/MID)  OBI = order book imbalance")
+        print(f"     All thresholds derived from completed candle value distributions")
+        print(f"     SUSTAIN_S={SUSTAIN_S}s is the only fixed constant")
 
 
 if __name__ == '__main__':
@@ -1027,5 +1069,8 @@ if __name__ == '__main__':
     p.add_argument('--all',     action='store_true', help='scan entire file')
     p.add_argument('--mins',    type=int, default=96, help='last N minutes (default 96)')
     p.add_argument('--session', type=int, default=0,  help='session to scan (0=latest, 1=previous, …)')
+    p.add_argument('--signals', action='store_true',  help='clean signal cards only (no per-minute ticker)')
     args = p.parse_args()
-    scan(mins_limit=None if args.all else args.mins, session_idx=args.session)
+    scan(mins_limit=None if args.all else args.mins,
+         session_idx=args.session,
+         signals_only=args.signals)
