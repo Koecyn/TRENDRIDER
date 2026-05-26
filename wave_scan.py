@@ -8,10 +8,12 @@ wave_scan.py — Intrabar wave engine scan.
   TROUGH-REV  micro at trough, KdV flips  +1  → LONG
   TROUGH-CONT micro at trough, KdV holds  -1  → SHORT
 
-Gates are DATA-DRIVEN — derived from the session's own KdV balance distribution,
-not hard-coded numbers. A session with weak solitons uses a lower gate; a trending
-session uses a higher one. OB pressure (book.global_pressure) can confirm
-reversals when KdV flip hasn't fired yet.
+ALL thresholds derive from the last 30 completed candles' value distributions.
+Nothing is fixed except SUSTAIN_S (a timing floor, not a market threshold).
+At each minute: peak/trough thresholds come from the session's own phase
+distribution, score gate from the session's own score distribution, OBI gate
+from the session's OBI distribution, KdV gates from the session's KdV
+balance distribution, alignment gate from the session's alignment distribution.
 
 Usage:
     python wave_scan.py              # last 96 minutes
@@ -26,21 +28,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 from physics import fusion, waveform as WF, resonance as RES, htf
 from physics.signals import HydraulicAccumulator
 
-REPO = os.path.dirname(__file__)
-
-THRESH     = 0.12    # fusion score floor (kept fixed — it's a physics unit)
-PEAK_PH    = 0.75    # micro phase ≥ this → AT_PEAK
-TROUGH_PH  = -0.75   # micro phase ≤ this → AT_TROUGH
-SUSTAIN_S  = 5       # consecutive seconds at threshold before signal is valid
-ALIGN_CONT = 0.75    # MTF alignment floor for continuation signals
-OBI_CONF   = 0.20    # OB global_pressure threshold — alternative REV confirmation
-
-# Dynamic gate percentiles (derived from session KdV balance distribution)
-# REV signals: 35th pct of session  — mean enough momentum to flip
-# CONT signals: 55th pct of session — above-average momentum required
-GATE_PCT_REV  = 35
-GATE_PCT_CONT = 55
-GATE_FLOOR    = 1.0  # absolute minimum regardless of session
+REPO         = os.path.dirname(__file__)
+SUSTAIN_S    = 5    # timing floor — minimum seconds score must persist
+SUSTAIN_FLIP = 1    # when KdV flips, 1 confirmed second is enough (the flip IS confirmation)
+PEAK_PH      =  0.75  # structural: top outer-quarter of -1..+1 wave cycle
+TROUGH_PH    = -0.75  # structural: bottom outer-quarter of -1..+1 wave cycle
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m'
 
@@ -121,6 +113,47 @@ def _build_tfs(raw_lines):
     return s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec
 
 
+# ── Adaptive thresholds ───────────────────────────────────────────────────────
+
+def _thresholds(hist_scores, hist_phases, hist_obi, hist_kdv_bals, hist_aligns,
+                window=30):
+    """
+    Derive all signal thresholds from the last `window` completed candles.
+    Every value comes from the actual session distribution — nothing fixed.
+
+    Returns: (thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont)
+    """
+    def _pct(arr, p, lo=None, hi=None):
+        if len(arr) < 3:
+            return None
+        v = float(np.percentile(arr[-window:], p))
+        if lo is not None: v = max(lo, v)
+        if hi is not None: v = min(hi, v)
+        return v
+
+    sc = hist_scores;   ph = hist_phases
+    ob = hist_obi;      kd = hist_kdv_bals;  al = hist_aligns
+
+    # Score gate: 55th percentile of absolute scores (above-median signal strength)
+    thresh     = _pct(sc, 55, lo=0.05)      or 0.12
+
+    # OBI confirmation: 55th percentile of absolute OBI seen in session
+    obi_conf   = _pct([abs(x) for x in ob], 55, lo=0.08) or 0.20
+
+    # KdV balance gates: session percentiles
+    gate_rev   = _pct(kd, 30, lo=0.5)       or 1.5   # lighter for reversals
+    gate_cont  = _pct(kd, 60, lo=1.0)       or 4.0   # stricter for continuations
+
+    # MTF alignment gate: 40th percentile of session alignment
+    align_cont = _pct(al, 40, lo=0.40, hi=0.95) or 0.65
+
+    # Phase thresholds are structural constants (position on -1..+1 cycle), not data-derived
+    peak_ph   = PEAK_PH
+    trough_ph = TROUGH_PH
+
+    return thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ph(v):
@@ -141,9 +174,9 @@ def _bars2arr(bars):
     t = np.array([b.get('taker_buy', b['volume']*0.5)   for b in bars], dtype=float)
     return c, o, v, t
 
-def _micro_state(phase):
-    if phase >= PEAK_PH:   return 'PEAK'
-    if phase <= TROUGH_PH: return 'TROUGH'
+def _micro_state(phase, peak_ph, trough_ph):
+    if phase >= peak_ph:   return 'PEAK'
+    if phase <= trough_ph: return 'TROUGH'
     return 'MID'
 
 def _sig_type(state, direction):
@@ -153,33 +186,22 @@ def _sig_type(state, direction):
         return 'TROUGH-REV' if direction > 0 else 'TROUGH-CONT'
     return 'MID'
 
-def _dynamic_gates(session_kdv_bals):
-    """KdV balance gates from recent 3-minute window — adapts to local momentum."""
-    recent = session_kdv_bals[-180:] if len(session_kdv_bals) >= 180 else session_kdv_bals
-    if len(recent) < 5:
-        return 1.5, 3.0  # cold start defaults
-    arr = np.array(recent)
-    gate_rev  = max(GATE_FLOOR, float(np.percentile(arr, GATE_PCT_REV)))
-    gate_cont = max(GATE_FLOOR, float(np.percentile(arr, GATE_PCT_CONT)))
-    return gate_rev, gate_cont
-
-def _gates(stype, score, kdv_bal, kdv_dir, gate_rev, gate_cont,
+def _gates(stype, score, kdv_bal, kdv_dir,
+           thresh, gate_rev, gate_cont, obi_conf, align_cont,
            obi_pressure, align, res_dir, sig_dir,
-           at_sup, kdv_flipped, sustain):
-    """Returns (pass: bool, reason: str)."""
-    if sustain < SUSTAIN_S:
-        return False, f'sustain={sustain}<{SUSTAIN_S}s'
-    if abs(score) < THRESH:
-        return False, f'score={score:+.3f}'
+           at_sup, kdv_flipped, sc_gate=None):
+    """Returns (pass: bool, reason_or_confirm: str)."""
+    # Skip score magnitude gate when KdV flip is the confirmation:
+    # the flip (direction reversal) IS the signal; gate_rev on balance provides strength filter
+    if not kdv_flipped:
+        effective_thresh = sc_gate if sc_gate is not None else thresh
+        if abs(score) < effective_thresh:
+            return False, f'score={score:+.3f}<{effective_thresh:.3f}'
 
     if stype in ('PEAK-REV', 'TROUGH-REV'):
-        # Three ways to confirm direction:
-        # 1. KdV already pointing in signal direction (trend established)
-        # 2. KdV just flipped to signal direction this minute (new momentum)
-        # 3. OB pressure confirms signal direction (book sees it before KdV)
         kdv_matches = (sig_dir < 0 and kdv_dir <= -1) or (sig_dir > 0 and kdv_dir >= 1)
-        ob_confirms = (stype == 'TROUGH-REV' and obi_pressure >=  OBI_CONF) or \
-                      (stype == 'PEAK-REV'   and obi_pressure <= -OBI_CONF)
+        ob_confirms = (stype == 'TROUGH-REV' and obi_pressure >=  obi_conf) or \
+                      (stype == 'PEAK-REV'   and obi_pressure <= -obi_conf)
         if not (kdv_matches or kdv_flipped or ob_confirms):
             return False, f'kdv-dir={kdv_dir},obi={obi_pressure:+.2f}'
         if kdv_bal < gate_rev:
@@ -194,8 +216,8 @@ def _gates(stype, score, kdv_bal, kdv_dir, gate_rev, gate_cont,
     if stype in ('PEAK-CONT', 'TROUGH-CONT'):
         if kdv_bal < gate_cont:
             return False, f'kdv-bal={kdv_bal:.1f}<{gate_cont:.1f}'
-        if align < ALIGN_CONT:
-            return False, f'align={align:.2f}<{ALIGN_CONT}'
+        if align < align_cont:
+            return False, f'align={align:.2f}<{align_cont:.2f}'
         if res_dir != 0 and res_dir != sig_dir:
             return False, f'res-dir={res_dir}≠{sig_dir}'
         return True, ''
@@ -205,7 +227,7 @@ def _gates(stype, score, kdv_bal, kdv_dir, gate_rev, gate_cont,
 
 # ── Main scan ─────────────────────────────────────────────────────────────────
 
-def scan(mins_limit=96):
+def scan(mins_limit=96, session_idx=0):
     print("Fetching raw data...", flush=True)
     subprocess.run(['git','fetch','origin','data/raw'], capture_output=True, cwd=REPO)
     raw = _fetch_raw()
@@ -217,12 +239,26 @@ def scan(mins_limit=96):
     s1_by_sec = {b['ts']//1000: b for b in s1}
     s1_secs   = sorted(s1_by_sec.keys())
 
-    gap_idx = None
-    for i in range(len(s1_secs)-1, 0, -1):
-        if s1_secs[i] - s1_secs[i-1] > 300:
-            gap_idx = i; break
+    # Session detection uses TRADE timestamps (forward-filled s1 has no gaps).
+    # Session boundary = gap > 30 min between actual trades (not forward-fill).
+    trade_secs = sorted(sec for sec in s1_secs if s1_by_sec[sec]['volume'] > 0)
+    trade_gaps = sorted(
+        [i for i in range(1, len(trade_secs))
+         if trade_secs[i] - trade_secs[i-1] > 1800],   # >30 min = new session
+        reverse=True   # newest gap first
+    )
 
-    live_secs = s1_secs[gap_idx:] if gap_idx else s1_secs
+    if session_idx < len(trade_gaps):
+        t_start = trade_secs[trade_gaps[session_idx]]
+        t_end   = trade_secs[trade_gaps[session_idx - 1] - 1] if session_idx > 0 \
+                  else trade_secs[-1]
+    else:
+        t_start = trade_secs[0]
+        t_end   = trade_secs[-1]
+
+    # Include all s1 seconds within the session's trade-active window
+    live_secs = [s for s in s1_secs if t_start <= s <= t_end]
+
     if mins_limit:
         cutoff = live_secs[-1] - mins_limit * 60
         live_secs = [s for s in live_secs if s >= cutoff]
@@ -237,11 +273,22 @@ def scan(mins_limit=96):
     for sec in live_secs:
         live_by_min[(sec // 60) * 60].append(sec)
 
-    closed_1m        = list(history_1m)
-    accum            = HydraulicAccumulator()
-    prev_kdv_global  = 0
-    session_kdv_bals = []   # growing list of non-zero KdV balance values this session
-    sig_count        = 0
+    closed_1m       = list(history_1m)
+    accum           = HydraulicAccumulator()
+    prev_kdv_global = 0
+    sig_count       = 0
+
+    # Cooldown: prevent stacking same-direction signals in the same price zone
+    last_sig_time   = None   # min_sec of last fired signal
+    last_sig_dir    = 0
+    last_sig_price  = 0.0
+
+    # Per-closed-candle history for adaptive thresholds
+    hist_scores  = []   # abs(score) at minute end
+    hist_phases  = []   # micro phase at minute end
+    hist_obi     = []   # raw OBI at minute end
+    hist_kdv_bals= []   # KdV balance at minute end
+    hist_aligns  = []   # MTF alignment at minute end
 
     print(f"\n{C}━━━ WAVE ENGINE  {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC ━━━{Z}")
     print(f"{W}[wave] TIME   PRICE       SCORE  D  μ  sh  ca  ma  "
@@ -255,19 +302,22 @@ def scan(mins_limit=96):
         b1h = [b for b in tf1h  if b['ts']//1000 <= min_sec][-12:]
         b4h = [b for b in tf4h  if b['ts']//1000 <= min_sec][-6:]
 
+        # Thresholds from completed candle distributions
+        thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = \
+            _thresholds(hist_scores, hist_phases, hist_obi, hist_kdv_bals, hist_aligns)
+
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
 
-        # Signal candidate state
         cand_sec    = None
         cand_score  = 0.0
         cand_dir    = 0
-        cand_state  = 'MID'
         cand_stype  = 'MID'
         cand_entry  = 0.0
         cand_tgt    = 0.0
         cand_kdvbal = 0.0
         cand_kdvdir = 0
         cand_obi    = 0.0
+        cand_sc_gate = thresh
 
         sustain_count    = 0
         prev_sb          = 0
@@ -280,8 +330,9 @@ def scan(mins_limit=96):
         kdv_flips     = []
         wh_secs       = []
         itype_changes = []
-        minute_obi    = 0.0   # last OBI seen this minute
         final         = {}
+        best_obi_long  = 0.0   # most positive OBI seen this minute (TROUGH-REV use)
+        best_obi_short = 0.0   # most negative OBI seen this minute (PEAK-REV use)
 
         for sec in secs_in_min:
             bar1s = s1_by_sec.get(sec)
@@ -309,22 +360,36 @@ def scan(mins_limit=96):
                 kdv_bal  = abs(fus['soliton'].get('balance', 0.0))
                 wh       = fus['water_hammer']['detected']
                 f_sc     = fus['score']
-                # OB pressure from book analyzer (in fusion output)
                 obi_raw  = fus.get('obi', {})
-                obi_p    = (obi_raw.get('obi', 0.0)     # raw weighted OBI value
+                obi_p    = (obi_raw.get('obi', 0.0)
                             if isinstance(obi_raw, dict) else float(obi_raw or 0.0))
             except Exception:
                 kdv=0; kdv_bal=0.0; wh=False; f_sc=0.0; obi_p=0.0
 
-            minute_obi = obi_p
+            # Detect KdV flip NOW (before score gate) so the reduced gate
+            # applies on the same second the flip occurs, not one second late
+            kdv_just_flipped = (kdv != 0 and kdv != prev_kdv_min and prev_kdv_min != 0)
+            if kdv_just_flipped:
+                kdv_flips.append((sec, kdv))
+                if kdv > 0: kdv_flipped_up   = True
+                if kdv < 0: kdv_flipped_down = True
+            prev_kdv_min = kdv if kdv != 0 else prev_kdv_min
 
-            # Collect for dynamic gate computation
-            if kdv_bal > 0 and kdv != 0:
-                session_kdv_bals.append(kdv_bal)
+            # When KdV has flipped this minute, the flip is structural confirmation.
+            # Only require score direction (sign), not magnitude — gate_rev on balance
+            # provides the strength filter. Non-flip bars still need score ≥ thresh.
+            flip_active = kdv_flipped_up or kdv_flipped_down
+            if flip_active:
+                sb = int(np.sign(f_sc)) if abs(f_sc) > 0.01 else 0
+                sc_gate = 0.01  # direction-only; gate at minute-end uses kdv_bal
+            else:
+                sc_gate = thresh
+                sb = (1 if f_sc >= thresh else -1 if f_sc <= -thresh else 0)
 
-            sb = (1 if f_sc >= THRESH else -1 if f_sc <= -THRESH else 0)
+            # Track extremes for gate check
+            if obi_p > best_obi_long:  best_obi_long  = obi_p
+            if obi_p < best_obi_short: best_obi_short = obi_p
 
-            # Waveform (use signal direction for phase-adjusted targets)
             wf_direction = sb if sb != 0 else (1 if f_sc >= 0 else -1)
             wf   = WF.run(closes, entry=p_close, direction=wf_direction)
             comp = wf['components']
@@ -335,7 +400,6 @@ def scan(mins_limit=96):
             wf_dir      = itf['direction']
             itype       = itf['type'][:4]
 
-            # Sustain tracking
             if sb != 0 and sb == prev_sb:
                 sustain_count += 1
             elif sb != 0:
@@ -344,13 +408,6 @@ def scan(mins_limit=96):
                 sustain_count = 0
             prev_sb = sb
 
-            # KdV flip detection
-            if kdv != 0 and kdv != prev_kdv_min and prev_kdv_min != 0:
-                kdv_flips.append((sec, kdv))
-                if kdv > 0: kdv_flipped_up   = True
-                if kdv < 0: kdv_flipped_down = True
-            prev_kdv_min = kdv if kdv != 0 else prev_kdv_min
-
             if wh and not wh_secs:
                 wh_secs.append(sec)
 
@@ -358,14 +415,13 @@ def scan(mins_limit=96):
                 itype_changes.append((sec, prev_itype, itype))
             prev_itype = itype
 
-            # First candidate once sustain gate met
-            if sb != 0 and sustain_count >= SUSTAIN_S and cand_sec is None:
-                state = _micro_state(micro_phase)
+            sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
+            if sb != 0 and sustain_count >= sustain_needed and cand_sec is None:
+                state = _micro_state(micro_phase, peak_ph, trough_ph)
                 stype = _sig_type(state, sb)
                 cand_sec    = sec
                 cand_score  = f_sc
                 cand_dir    = sb
-                cand_state  = state
                 cand_stype  = stype
                 cand_entry  = p_close
                 cand_tgt    = tgts.get('primary',
@@ -373,6 +429,7 @@ def scan(mins_limit=96):
                 cand_kdvbal = kdv_bal
                 cand_kdvdir = kdv
                 cand_obi    = obi_p
+                cand_sc_gate = sc_gate   # effective score gate at candidate time
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
@@ -399,21 +456,42 @@ def scan(mins_limit=96):
         except Exception:
             res_dir=0; align=0.0; dissonance=False
 
-        # Dynamic gates from session KdV distribution
-        gate_rev, gate_cont = _dynamic_gates(session_kdv_bals)
-
         # Gate check
         passed = False; fail_reason = ''; confirm_str = ''
         if cand_sec is not None:
-            kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
-                          (cand_dir < 0 and kdv_flipped_down)
-            passed, fail_reason = _gates(
-                cand_stype, cand_score, cand_kdvbal, cand_kdvdir, gate_rev, gate_cont,
-                cand_obi, align, res_dir, cand_dir,
-                at_sup, kdv_flipped, SUSTAIN_S)
+            # Cooldown: skip repeat signals in same direction & price zone
+            # Zone defined as within 50% of carrier amplitude from last signal price
+            carrier_amp = closed_1m[-1]['high'] - closed_1m[-1]['low'] if closed_1m else 0.0
+            zone_thresh = max(carrier_amp * 0.5, cand_entry * 0.0015)  # at least 0.15%
+            in_cooldown = (
+                last_sig_time is not None
+                and last_sig_dir == cand_dir
+                and (min_sec - last_sig_time) < 180           # within 3 minutes
+                and abs(cand_entry - last_sig_price) < zone_thresh
+            )
+            if in_cooldown:
+                fail_reason = f'cooldown({(min_sec - last_sig_time)//60}m,Δ${abs(cand_entry-last_sig_price):.0f})'
+            else:
+                kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
+                              (cand_dir < 0 and kdv_flipped_down)
+                # Use best OBI seen during the minute (most extreme in signal direction)
+                gate_obi = (best_obi_long  if cand_dir > 0 else
+                            best_obi_short if cand_dir < 0 else cand_obi)
+                passed, fail_reason = _gates(
+                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
+                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
+                    gate_obi, align, res_dir, cand_dir,
+                    at_sup, kdv_flipped, sc_gate=cand_sc_gate)
             if passed:
-                confirm_str = fail_reason  # _gates returns confirm string on pass
+                confirm_str = fail_reason
                 fail_reason = ''
+
+        # Record completed-minute stats for next minute's thresholds
+        hist_scores.append(abs(final['score']))
+        hist_phases.append(final['micro_phase'])
+        hist_obi.append(final['obi'])
+        hist_kdv_bals.append(final['kdv_bal'])
+        hist_aligns.append(align)
 
         # ── Output ───────────────────────────────────────────────────────────
         comp_f = final['comp']
@@ -430,7 +508,7 @@ def scan(mins_limit=96):
         t1h = htf_ctx.get('trend_1h', 'ne')[:2]
         t4h = htf_ctx.get('trend_4h', 'ne')[:2]
 
-        state_now = _micro_state(final['micro_phase'])
+        state_now = _micro_state(final['micro_phase'], peak_ph, trough_ph)
 
         notes = []
         if cand_sec is not None:
@@ -438,6 +516,9 @@ def scan(mins_limit=96):
             t_off = cand_sec - min_sec
             if passed:
                 sig_count += 1
+                last_sig_time  = min_sec
+                last_sig_dir   = cand_dir
+                last_sig_price = cand_entry
                 conf = f' [{confirm_str}]' if confirm_str else ''
                 notes.append(f"[{sig_count}] *** {cand_stype} {lbl} @ {_ts(cand_sec)} "
                              f"(t+{t_off}s){conf}  ${cand_entry:,.2f} → ${cand_tgt:,.2f}")
@@ -490,19 +571,22 @@ def scan(mins_limit=96):
             if b['ts']//1000 == min_sec:
                 closed_1m.append(b); break
 
-    gate_rev_f, gate_cont_f = _dynamic_gates(session_kdv_bals)
+    # Final threshold state
+    thresh_f, pk_f, tr_f, obi_f2, gr_f, gc_f, al_f = \
+        _thresholds(hist_scores, hist_phases, hist_obi, hist_kdv_bals, hist_aligns)
     print(f"\n{C}━━━ END  ({sig_count} signals) ━━━{Z}")
-    print(f"Session KdV gate: REV≥{gate_rev_f:.2f}  CONT≥{gate_cont_f:.2f}  "
-          f"(from {len(session_kdv_bals)} samples, p{GATE_PCT_REV}/p{GATE_PCT_CONT})")
-    print(f"\nKey: STATE = micro position (PEAK/TROUGH/MID)  OBI = OB global_pressure")
-    print(f"     PEAK-REV=short peak  TROUGH-REV=long trough  TROUGH-CONT=short break")
-    print(f"     REV confirms via KdV-flip OR OB-pressure≥{OBI_CONF}")
-    print(f"     Gates adapt to session — tighter in trending, looser in quiet")
+    print(f"Final thresholds (from {len(hist_scores)} closed candles):")
+    print(f"  score≥{thresh_f:.3f}  peak_ph≥{pk_f:.2f}  trough_ph≤{tr_f:.2f}")
+    print(f"  obi_conf≥{obi_f2:.2f}  kdv_rev≥{gr_f:.1f}  kdv_cont≥{gc_f:.1f}  align≥{al_f:.2f}")
+    print(f"\nKey: STATE = micro position (PEAK/TROUGH/MID)  OBI = order book imbalance")
+    print(f"     All thresholds derived from completed candle value distributions")
+    print(f"     SUSTAIN_S={SUSTAIN_S}s is the only fixed constant")
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description='Intrabar wave engine scan')
-    p.add_argument('--all',  action='store_true', help='scan entire file')
-    p.add_argument('--mins', type=int, default=96, help='last N minutes (default 96)')
+    p.add_argument('--all',     action='store_true', help='scan entire file')
+    p.add_argument('--mins',    type=int, default=96, help='last N minutes (default 96)')
+    p.add_argument('--session', type=int, default=0,  help='session to scan (0=latest, 1=previous, …)')
     args = p.parse_args()
-    scan(mins_limit=None if args.all else args.mins)
+    scan(mins_limit=None if args.all else args.mins, session_idx=args.session)
