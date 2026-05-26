@@ -154,6 +154,331 @@ def _thresholds(hist_scores, hist_phases, hist_obi, hist_kdv_bals, hist_aligns,
     return thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont
 
 
+# ── OB metric helpers (used by KnifeDecayBuffer) ──────────────────────────────
+
+def _ob_obi5(bids, asks):
+    bv = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
+    return (bv-av)/(bv+av) if bv+av else 0.0
+
+def _ob_conc(bids, asks, mid, w=25):
+    bv = sum(q for p,q in bids if abs(p-mid)<=w)
+    av = sum(q for p,q in asks if abs(p-mid)<=w)
+    return (bv-av)/(bv+av) if bv+av else 0.0
+
+def _ob_spr(bids, asks):
+    return asks[0][0]-bids[0][0] if bids and asks else 99.0
+
+
+# ── KnifeDecayBuffer ──────────────────────────────────────────────────────────
+
+class KnifeDecayBuffer:
+    """
+    Falling-knife momentum-decay detector.
+
+    Detects cascade exhaustion by tracking successive swing lows:
+      - Each new low reached with LESS downward velocity  → knife losing energy
+      - Each bounce between lows reaches HIGHER             → buyers pushing harder
+      - OBI stays MORE positive at each successive low      → book absorbing
+      - Spread TIGHTENS across the pattern                  → MMs stepping in
+
+    Phase transitions are price-level driven (not velocity thresholds):
+      FLAT    → FALLING  when price drops MIN_DROP  from rolling peak
+      FALLING → BOUNCE   when price rises MIN_BOUNCE from swing trough
+      BOUNCE  → FALLING  when price drops MIN_DROP  from bounce peak
+
+    OB floor-lock layer (runs continuously, independent of phase):
+      CONC > 0 after being negative   →  bids just reloaded near price
+      SPR < 1.0 sustained             →  spread locked (anchor forming)
+      Combined: FLOOR_LOCK = entry signal
+
+    States:
+      NEUTRAL (0) — no pattern
+      KNIFE   (1) — falling, watching for lows
+      DEC?    (2) — 2 lows, velocity decaying
+      DECAY   (3) — 3+ lows, confirmed decay + bounce expansion
+      FLR?    (4) — DECAY + OB beginning to confirm
+      FLOOR   (5) — all signals aligned: high-confidence TROUGH-REV
+    """
+    NEUTRAL=0; KNIFE=1; DWATCH=2; DCONF=3; FWATCH=4; FLOCK=5
+    LABELS  = {0:'NEUT', 1:'KNIFE', 2:'DEC?', 3:'DECAY', 4:'FLR?', 5:'FLOOR'}
+    _SCHAR  = [' ',' ','D','D','F','F']
+    _CCHAR  = ['-','-','?','!','?','!']
+
+    MIN_DROP    = 12.0   # $ drop from peak  → enter FALLING
+    MIN_BOUNCE  = 6.0    # $ rise from trough → confirm swing low
+    VEL_WIN_MS  = 5000   # ms rolling window for velocity at swing lows
+    MAX_LOWS    = 5      # keep this many recent swing lows
+    TIMEOUT_S   = 1200   # seconds quiet → reset pattern
+    _FLOW_WIN_MS = 30_000  # ms rolling window for bid/ask net flow
+
+    def __init__(self):
+        self._reset()
+
+    # ── internal ────────────────────────────────────────────────────────────
+
+    def _reset(self):
+        self.state          = self.NEUTRAL
+        self.phase          = 'FLAT'    # FLAT | FALLING | BOUNCE
+        self.peak           = None      # rolling price high
+        self.trough         = None      # current swing-low candidate
+        self.bounce_pk      = None      # rolling high during current bounce
+        self._low_snap      = None      # (ts_ms, px, vel, obi, conc, spr) at trough
+        self.lows           = []        # confirmed swing lows
+        self.px_buf         = []        # [(ts_ms, price)] rolling, for velocity
+        self.conc_pos       = False     # CONC currently positive
+        self.conc_flip      = False     # CONC just flipped positive this snapshot
+        self.spr_cnt        = 0         # consecutive SPR<1 snapshots
+        self.last_ts        = None
+        self._prev_bids_map = None      # {price: qty} from previous D snapshot
+        self._prev_asks_map = None
+        self._flow_buf      = []        # [(ts_ms, bid_net_delta, ask_net_delta)]
+
+    def _vel(self):
+        """$/s over VEL_WIN_MS rolling window. Negative = falling."""
+        if len(self.px_buf) < 2: return 0.0
+        t1  = self.px_buf[-1][0]
+        win = [(t,p) for t,p in self.px_buf if t >= t1 - self.VEL_WIN_MS]
+        if len(win) < 2: return 0.0
+        dt  = (win[-1][0] - win[0][0]) / 1000.0
+        return (win[-1][1] - win[0][1]) / dt if dt > 0.1 else 0.0
+
+    def _update_flows(self, ts_ms, bids, asks):
+        """Track bid/ask net delta between consecutive OB snapshots."""
+        cur_b = {p: q for p, q in bids}
+        cur_a = {p: q for p, q in asks}
+        if self._prev_bids_map is not None:
+            bid_delta = sum(cur_b.get(p,0) - self._prev_bids_map.get(p,0)
+                            for p in set(cur_b) | set(self._prev_bids_map))
+            ask_delta = sum(cur_a.get(p,0) - self._prev_asks_map.get(p,0)
+                            for p in set(cur_a) | set(self._prev_asks_map))
+            self._flow_buf.append((ts_ms, bid_delta, ask_delta))
+            cutoff = ts_ms - self._FLOW_WIN_MS
+            self._flow_buf = [(t,b,a) for t,b,a in self._flow_buf if t >= cutoff]
+        self._prev_bids_map = cur_b
+        self._prev_asks_map = cur_a
+
+    def _flow_rates(self):
+        """(bid_net_BTC/s, ask_net_BTC/s) over _FLOW_WIN_MS rolling window.
+        Positive bid = buyers accumulating. Negative ask = sellers pulling."""
+        if len(self._flow_buf) < 3: return 0.0, 0.0
+        span = (self._flow_buf[-1][0] - self._flow_buf[0][0]) / 1000.0
+        if span < 2.0: return 0.0, 0.0
+        return (sum(b for _,b,_ in self._flow_buf) / span,
+                sum(a for _,_,a in self._flow_buf) / span)
+
+    def _register_low(self):
+        """Commit current trough candidate as a confirmed swing low."""
+        if self._low_snap is None: return
+        ts_ms, px, vel, obi, conc, spr = self._low_snap
+        bid_r, ask_r = self._flow_rates()
+        self.lows.append(dict(ts=ts_ms, px=px, vel=vel,
+                              obi=obi, conc=conc, spr=spr, bounce_hi=None,
+                              bid_flow=bid_r, ask_flow=ask_r))
+        if len(self.lows) > self.MAX_LOWS: self.lows.pop(0)
+        self._low_snap = None
+
+    def _set_bounce_hi(self, price):
+        """Track bounce high in the most recent swing low."""
+        if self.lows:
+            prev = self.lows[-1]['bounce_hi']
+            if prev is None or price > prev:
+                self.lows[-1]['bounce_hi'] = price
+
+    def _decay_score(self):
+        """0→1: strength of momentum-decay pattern across confirmed lows."""
+        ls = self.lows
+        if len(ls) < 2: return 0.0
+
+        v = [abs(l['vel']) for l in ls]
+        vel = sum(v[i] < v[i-1] for i in range(1, len(v))) / max(1, len(v)-1)
+
+        b = [l['bounce_hi'] - l['px']
+             for l in ls[:-1] if l.get('bounce_hi') is not None]
+        bou = (sum(b[i] > b[i-1] for i in range(1, len(b)))
+               / max(1, len(b)-1)) if len(b) >= 2 else 0.5
+
+        o = [l['obi'] for l in ls]
+        obi = sum(o[i] > o[i-1] for i in range(1, len(o))) / max(1, len(o)-1)
+
+        s = [l['spr'] for l in ls]
+        sps = sum(s[i] < s[i-1] for i in range(1, len(s))) / max(1, len(s)-1)
+
+        return vel*0.40 + bou*0.25 + obi*0.25 + sps*0.10
+
+    def _flow_walking_score(self):
+        """0→1: sellers pulling + buyers accumulating on re-test of prior low."""
+        bid_r, ask_r = self._flow_rates()
+        sc = 0.0
+        # Bid net positive: buyers accumulating (not just bouncing off the level)
+        if bid_r > 0.00020: sc += 0.10
+        if bid_r > 0.00050: sc += 0.05
+        # Ask net negative: sellers cancelling faster than they're adding
+        if ask_r < -0.00020: sc += 0.10
+        if ask_r < -0.00050: sc += 0.05
+        # Both together: coordinated rotation — the primary signal
+        if bid_r > 0.00010 and ask_r < -0.00010: sc += 0.10
+        # Compare to flows at last confirmed swing low (re-test improvement)
+        if len(self.lows) >= 1:
+            ref = self.lows[-1]
+            if bid_r > ref.get('bid_flow', 0): sc += 0.05   # buyers more aggressive
+            if ask_r < ref.get('ask_flow', 0): sc += 0.05   # sellers more withdrawn
+        return min(1.0, sc)
+
+    def _floor_score(self, conc, spr):
+        """0→1: OB confirmation that a floor is forming at current price."""
+        sc = 0.0
+        if conc > 0.05:         sc += 0.15
+        if conc > 0.30:         sc += 0.10
+        if self.conc_flip:      sc += 0.20   # bids just reloaded
+        if spr < 2.0:           sc += 0.10
+        if spr < 0.5:           sc += 0.10
+        if self.spr_cnt >= 3:   sc += 0.10
+        if self.spr_cnt >= 8:   sc += 0.05
+        # Flow walking: sellers exiting + buyers accumulating (visible as OB noise)
+        sc += self._flow_walking_score() * 0.30
+        return min(1.0, sc)
+
+    # ── public ──────────────────────────────────────────────────────────────
+
+    def update(self, ts_ms, price, bids, asks):
+        """
+        Process one sub-second OB snapshot.
+        Returns (state_int, decay_score, floor_score, label_str).
+        """
+        mid = (bids[0][0]+asks[0][0])/2.0 if bids and asks else price
+        obi = _ob_obi5(bids, asks)
+        cnc = _ob_conc(bids, asks, mid)
+        spr = _ob_spr(bids, asks)
+
+        # Timeout reset (before updating state)
+        if self.last_ts and (ts_ms - self.last_ts) > self.TIMEOUT_S * 1000:
+            self._reset()
+        self.last_ts = ts_ms
+
+        # Rolling price buffer (for velocity)
+        self.px_buf.append((ts_ms, price))
+        if len(self.px_buf) > 600: self.px_buf = self.px_buf[-300:]
+        vel = self._vel()
+
+        # Bid/ask net flow deltas (from consecutive OB snapshots)
+        self._update_flows(ts_ms, bids, asks)
+
+        # SPR tracking
+        if spr < 1.0: self.spr_cnt += 1
+        else:         self.spr_cnt = max(0, self.spr_cnt - 2)
+
+        # CONC flip detection (negative → positive)
+        was_pos        = self.conc_pos
+        self.conc_pos  = cnc > 0
+        self.conc_flip = (not was_pos) and self.conc_pos
+
+        # ── Phase / swing-low machine ────────────────────────────────────
+
+        if self.phase == 'FLAT':
+            if self.peak is None or price > self.peak:
+                self.peak = price
+            if self.peak - price >= self.MIN_DROP:
+                self.phase     = 'FALLING'
+                self.trough    = price
+                self._low_snap = (ts_ms, price, vel, obi, cnc, spr)
+
+        elif self.phase == 'FALLING':
+            if price < self.trough:
+                self.trough    = price
+                self._low_snap = (ts_ms, price, vel, obi, cnc, spr)
+            if price - self.trough >= self.MIN_BOUNCE:
+                # Bounce confirmed: register the trough as a swing low
+                self._register_low()
+                self.phase     = 'BOUNCE'
+                self.bounce_pk = price
+                self._set_bounce_hi(price)
+
+        elif self.phase == 'BOUNCE':
+            if self.bounce_pk is None or price > self.bounce_pk:
+                self.bounce_pk = price
+            self._set_bounce_hi(price)
+            # New down leg: drop MIN_DROP from bounce peak
+            if self.bounce_pk - price >= self.MIN_DROP:
+                self.phase     = 'FALLING'
+                self.peak      = self.bounce_pk   # reset reference high
+                self.trough    = price
+                self._low_snap = (ts_ms, price, vel, obi, cnc, spr)
+                self.bounce_pk = None
+
+        # ── State machine ────────────────────────────────────────────────
+
+        ds  = self._decay_score()
+        fos = self._floor_score(cnc, spr)
+        n   = len(self.lows)
+
+        if self.phase == 'FLAT' and n == 0:
+            new_st = self.NEUTRAL
+        elif n == 0:
+            new_st = self.KNIFE
+        elif n == 1:
+            new_st = self.KNIFE
+        elif n >= 3 and ds >= 0.55:
+            new_st = self.DCONF
+        elif n >= 2 and ds >= 0.35:
+            new_st = self.DWATCH
+        else:
+            new_st = self.KNIFE
+
+        # Upgrade to floor states when OB confirms
+        if new_st >= self.DWATCH:
+            if   fos >= 0.65: new_st = self.FLOCK
+            elif fos >= 0.30: new_st = self.FWATCH
+
+        self.state = new_st
+        return self.state, ds, fos, self.LABELS[self.state]
+
+    @classmethod
+    def compact(cls, state, ds, fos):
+        """4-char display string: state-char + conf-char + decay-digit + floor-digit."""
+        if state == cls.NEUTRAL: return 'N---'
+        sc = cls._SCHAR[state]; cc = cls._CCHAR[state]
+        return f"{sc}{cc}{min(9,int(ds*10))}{min(9,int(fos*10))}"
+
+
+def _build_decay_states(raw_lines, t_start_s, t_end_s):
+    """
+    Pre-pass: run KnifeDecayBuffer over the full raw OB stream.
+    Returns {unix_sec: (state_int, decay_score, floor_score, label)} for every
+    second in [t_start_s, t_end_s].  Pre-buffers 120s before t_start_s for warmup.
+    """
+    buf      = KnifeDecayBuffer()
+    states   = {}
+    last_px  = None
+    pre      = t_start_s - 120
+
+    recs = []
+    for ln in raw_lines:
+        if not ln: continue
+        try: r = json.loads(ln)
+        except Exception: continue
+        if r[0] not in ('T', 'D'): continue
+        if r[1] // 1000 < pre or r[1] // 1000 > t_end_s: continue
+        recs.append(r)
+    recs.sort(key=lambda r: r[1])
+
+    for r in recs:
+        ts_ms = r[1]
+        if r[0] == 'T':
+            last_px = r[2] / 100
+        elif r[0] == 'D':
+            bids = [(p/100, q/10000) for p,q in r[2][:20]]
+            asks = [(p/100, q/10000) for p,q in r[3][:20]]
+            mid  = (bids[0][0]+asks[0][0])/2.0 if bids and asks else last_px
+            if mid is None: continue
+            px   = last_px if last_px is not None else mid
+            st, ds, fos, lbl = buf.update(ts_ms, px, bids, asks)
+            sec = ts_ms // 1000
+            if t_start_s <= sec <= t_end_s:
+                states[sec] = (st, ds, fos, lbl)
+
+    return states
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ph(v):
@@ -306,6 +631,10 @@ def scan(mins_limit=96, session_idx=0):
     print(f"Live session: {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC  "
           f"({len(live_secs)}s,  {len(history_1m)} history bars)")
 
+    print("Computing knife-decay states...", flush=True)
+    knife_states = _build_decay_states(raw, live_secs[0], live_secs[-1])
+    print(f"  {len(knife_states)} decay snapshots")
+
     live_by_min = collections.defaultdict(list)
     for sec in live_secs:
         live_by_min[(sec // 60) * 60].append(sec)
@@ -342,7 +671,7 @@ def scan(mins_limit=96, session_idx=0):
 
     print(f"\n{C}━━━ WAVE ENGINE  {_ts(live_secs[0])} → {_ts(live_secs[-1])} UTC ━━━{Z}")
     print(f"{W}[wave] TIME   PRICE       SCORE  D  μ  sh  ca  ma  "
-          f"1m 5m 15 1h 4h  KdV  OBI   mSC    mPH  itype  STATE   NOTES{Z}\n")
+          f"1m 5m 15 1h 4h  KdV  OBI   mSC    mPH  itype  STATE  DECAY  NOTES{Z}\n")
 
     for min_sec in sorted(live_by_min.keys()):
         secs_in_min = sorted(live_by_min[min_sec])
@@ -368,6 +697,7 @@ def scan(mins_limit=96, session_idx=0):
         cand_kdvdir = 0
         cand_obi    = 0.0
         cand_sc_gate = thresh
+        cand_dec_state = 0   # decay state at the moment the candidate formed
 
         sustain_count    = 0
         prev_sb          = 0
@@ -383,6 +713,9 @@ def scan(mins_limit=96, session_idx=0):
         final         = {}
         best_obi_long  = 0.0   # most positive OBI seen this minute (TROUGH-REV use)
         best_obi_short = 0.0   # most negative OBI seen this minute (PEAK-REV use)
+
+        # Per-minute decay tracking: use highest state seen during the minute
+        min_dk_state = 0; min_dk_ds = 0.0; min_dk_fos = 0.0; min_dk_lbl = 'NEUT'
 
         for sec in secs_in_min:
             bar1s = s1_by_sec.get(sec)
@@ -401,6 +734,12 @@ def scan(mins_limit=96, session_idx=0):
 
             closes, opens_a, volumes, taker_buy = _bars2arr(window)
             bids, asks = ob_by_sec.get(sec, ([], []))
+
+            # ── Knife-decay state lookup ──────────────────────────────────────
+            dk = knife_states.get(sec, (0, 0.0, 0.0, 'NEUT'))
+            if dk[0] > min_dk_state:
+                min_dk_state = dk[0]; min_dk_ds = dk[1]
+                min_dk_fos   = dk[2]; min_dk_lbl = dk[3]
 
             # ── Micro layer: 1s rolling window physics ───────────────────────
             micro_window.append(bar1s)
@@ -499,8 +838,9 @@ def scan(mins_limit=96, session_idx=0):
                                 p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
                 cand_kdvbal = kdv_bal
                 cand_kdvdir = kdv
-                cand_obi    = obi_p
-                cand_sc_gate = sc_gate   # effective score gate at candidate time
+                cand_obi       = obi_p
+                cand_sc_gate   = sc_gate        # effective score gate at candidate time
+                cand_dec_state = min_dk_state   # decay state at signal formation
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
@@ -557,6 +897,23 @@ def scan(mins_limit=96, session_idx=0):
             if passed:
                 confirm_str = fail_reason
                 fail_reason = ''
+
+            # ── Knife-decay gate integration ──────────────────────────────
+            # (1) FLOOR_LOCK overrides the not-at-support block for TROUGH-REV:
+            #     the decay pattern IS the structural support evidence.
+            if (not passed
+                    and fail_reason == 'not-at-support'
+                    and cand_stype  == 'TROUGH-REV'
+                    and cand_dec_state >= KnifeDecayBuffer.FLOCK):
+                passed      = True
+                confirm_str = 'knife-floor'
+                fail_reason = ''
+
+            # (2) Annotate passed TROUGH-REV signals with decay confidence.
+            if passed and cand_stype == 'TROUGH-REV':
+                if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
+                elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
+                elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
 
         # Record completed-minute stats for next minute's thresholds
         hist_scores.append(abs(final['score']))
@@ -635,12 +992,17 @@ def scan(mins_limit=96, session_idx=0):
         mkdv_f = final.get('micro_kdv', 0)
         msc_str = f"{msc_f:>+6.3f}" if msc_f != 0.0 else "  ---  "
         mph_str = _ph(mph_f)
+        dec_str = KnifeDecayBuffer.compact(min_dk_state, min_dk_ds, min_dk_fos)
+        # Colour decay column: FLOOR = green, DECAY = cyan, KNIFE = yellow, else dim
+        dec_col = (G if min_dk_state >= KnifeDecayBuffer.FLOCK  else
+                   C if min_dk_state >= KnifeDecayBuffer.DWATCH else
+                   Y if min_dk_state >= KnifeDecayBuffer.KNIFE  else Z)
         print(f"{col}[wave] {_tm(min_sec)}  ${price:>9,.2f}  {score:>+7.4f} {_ds(wf_dir)}  "
               f"{_ph(mi.get('phase',0)):>2} {_ph(sh_.get('phase',0)):>2} "
               f"{_ph(ca.get('phase',0)):>2} {_ph(ma.get('phase',0)):>2}  "
               f"{t1m} {t5m} {t15} {t1h} {t4h}  "
               f"{kdv_str}  {obi_str}  {msc_str}  {mph_str}  {itype:4}  "
-              f"{state_col}{state_now:6}{col}  {note_str}{Z}")
+              f"{state_col}{state_now:6}{col}  {dec_col}{dec_str}{col}  {note_str}{Z}")
 
         if kdv != 0: prev_kdv_global = kdv
 
