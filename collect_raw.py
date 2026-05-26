@@ -256,6 +256,13 @@ async def stream():
 
 
 if __name__ == '__main__':
+    # Backfill any gap since last session before opening the WebSocket
+    try:
+        import pull_candles
+        pull_candles.backfill()
+    except Exception as e:
+        print(f"[raw] candle backfill error (non-fatal): {e}", flush=True)
+
     threading.Thread(target=_push_loop, daemon=True).start()
     loop = asyncio.new_event_loop()
     task = loop.create_task(stream())
