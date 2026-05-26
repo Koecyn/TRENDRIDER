@@ -48,6 +48,24 @@ def _fetch_raw():
     return gzip.decompress(r.stdout).decode().strip().split('\n')
 
 
+def _fetch_candles_1m():
+    """Load backfilled 1m candles from data/raw branch. Returns list of dicts."""
+    r = subprocess.run(
+        ['git','show','origin/data/raw:data/raw/BTCUSDT_1m.json.gz'],
+        capture_output=True, cwd=REPO)
+    if not r.stdout:
+        return []
+    try:
+        klines = json.loads(gzip.decompress(r.stdout).decode())
+        # [open_time_ms, open, high, low, close, volume, taker_buy_vol]
+        return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
+                 'low': float(k[3]), 'close': float(k[4]),
+                 'volume': float(k[5]), 'taker_buy': float(k[6])}
+                for k in klines]
+    except Exception:
+        return []
+
+
 def _build_tfs(raw_lines):
     trade_by_sec = collections.defaultdict(list)
     ob_by_sec    = {}
@@ -110,6 +128,27 @@ def _build_tfs(raw_lines):
     tf15m = _agg(s1, 900_000)
     tf1h  = _agg(s1, 3_600_000)
     tf4h  = _agg(s1, 14_400_000)
+
+    # Merge backfilled 1m candles into gaps (raw tick data always wins)
+    raw_1m_ts = {b['ts'] for b in tf1m}
+    candles   = _fetch_candles_1m()
+    filled    = 0
+    for c in candles:
+        bucket = (c['ts'] // 60_000) * 60_000
+        if bucket not in raw_1m_ts:
+            tf1m.append({'ts': bucket, 'open': c['open'], 'high': c['high'],
+                         'low': c['low'], 'close': c['close'],
+                         'volume': c['volume'], 'taker_buy': c['taker_buy']})
+            filled += 1
+    if filled:
+        tf1m.sort(key=lambda b: b['ts'])
+        print(f"  +{filled} candle bars merged into gaps")
+        # Re-aggregate higher timeframes with the filled 1m bars
+        tf5m  = _agg(tf1m, 300_000)
+        tf15m = _agg(tf1m, 900_000)
+        tf1h  = _agg(tf1m, 3_600_000)
+        tf4h  = _agg(tf1m, 14_400_000)
+
     return s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec
 
 
