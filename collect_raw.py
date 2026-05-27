@@ -97,7 +97,8 @@ def _git_push_worker():
                 blob = r.stdout.strip()
                 if not blob: continue
                 parent_r = _run('git', 'rev-parse', f'origin/{DATA_BRANCH}')
-                parent   = parent_r.stdout.strip()
+                raw = parent_r.stdout.strip()
+                parent = raw if (len(raw) == 40 and raw.isalnum()) else ''
                 if parent:
                     _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env_gc)
                 _run('git', 'update-index', '--add',
@@ -131,7 +132,8 @@ def _push_signals(txt: str, summary: dict) -> bool:
     with _git_lock:
         env = {**os.environ, 'GIT_INDEX_FILE': str(SIG_IDX), 'GIT_NO_AUTO_GC': '1'}
         parent_r = _run('git', 'rev-parse', f'origin/{SIG_BRANCH}')
-        parent   = parent_r.stdout.strip()
+        raw = parent_r.stdout.strip()
+        parent = raw if (len(raw) == 40 and raw.isalnum()) else ''
         if parent:
             _run('git', 'read-tree', f'origin/{SIG_BRANCH}', env=env)
         tree_paths = {
