@@ -154,9 +154,7 @@ def run_scan():
 
 def _startup_backfill():
     """Ask whether to pull missing candle history from exchange before scanning."""
-    import os as _os
-    _td = _os.environ.get('TMPDIR','') or str(Path.home()/'.cache')
-    local_1m = Path(_td) / 'trendrider' / 'BTCUSDT_1m.json.gz'
+    local_1m = Path.home() / '.trendrider' / 'BTCUSDT_1m.json.gz'
     hint = "(no local history)" if not local_1m.exists() else "(update available)"
     try:
         ans = input(f"{C}Backfill candle history from exchange? {hint} [Y/n]: {Z}").strip().lower()

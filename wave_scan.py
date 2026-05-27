@@ -39,15 +39,7 @@ G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-import os as _os, pathlib as _pl
-def _find_tmp():
-    for p in [_os.environ.get('TMPDIR',''), str(_pl.Path.home()/'.cache'), '/tmp']:
-        if not p: continue
-        d = _pl.Path(p) / 'trendrider'
-        try: d.mkdir(parents=True, exist_ok=True); return str(d)
-        except OSError: continue
-    return '/tmp/trendrider'
-_TMP = _find_tmp()
+_TMP = str(__import__('pathlib').Path.home() / '.trendrider')  # pipeline data dir
 
 
 def _fetch_raw():

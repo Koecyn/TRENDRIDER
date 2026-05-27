@@ -221,14 +221,7 @@ def backfill_local(verbose=True):
     def log(m):
         if verbose: print(f"[candles] {m}", flush=True)
 
-    def _find_tmp():
-        for p in [os.environ.get('TMPDIR',''), str(Path.home()/'.cache'), '/tmp']:
-            if not p: continue
-            d = Path(p) / 'trendrider'
-            try: d.mkdir(parents=True, exist_ok=True); return d
-            except OSError: continue
-        return Path('/tmp/trendrider')
-    tmp_dir = _find_tmp()
+    tmp_dir = Path.home() / '.trendrider'
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     now_ms = int(time.time() * 1000)
