@@ -93,9 +93,11 @@ def _git_push_worker():
             TMP_IDX.unlink(missing_ok=True)
             if not tree: continue
 
+            env_no_gc = {k: v for k, v in env_gc.items()
+                         if k != 'GIT_INDEX_FILE'}   # commit-tree doesn't use index
             cmd = ['git', 'commit-tree', tree, '-m', f'raw {int(time.time())}']
             if parent: cmd += ['-p', parent]
-            r = _run(*cmd)
+            r = _run(*cmd, env=env_no_gc)
             commit = r.stdout.strip()
             if not commit: continue
 
