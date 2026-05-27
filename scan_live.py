@@ -74,6 +74,8 @@ def _git_push_files(paths: list) -> bool:
         return False
 
     r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{DATA_BRANCH}')
+    if r.returncode != 0:
+        log(f'push stderr: {r.stderr.strip()[:200]}', R)
     return r.returncode == 0
 
 
