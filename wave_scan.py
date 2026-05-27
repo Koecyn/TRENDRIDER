@@ -39,9 +39,15 @@ G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
+_TMP = '/tmp/trendrider'   # tmpfs — collector writes here; cleared on reboot
+
+
 def _fetch_raw():
-    """Load raw tick data. Reads local file if collector is running; else fetches from git."""
-    local = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_LIVE.jsonl.gz')
+    """Load raw tick data.
+    Priority: /tmp/trendrider/ (collector deque snapshot) → git show (remote).
+    /tmp/ is tmpfs (RAM) — no flash writes, no Android backup.
+    """
+    local = os.path.join(_TMP, 'BTCUSDT_LIVE.jsonl.gz')
     if os.path.exists(local):
         with gzip.open(local, 'rt') as f:
             return f.read().strip().split('\n')
@@ -49,13 +55,14 @@ def _fetch_raw():
         ['git','show','origin/data/raw:data/raw/BTCUSDT_LIVE.jsonl.gz'],
         capture_output=True, cwd=REPO)
     if not r.stdout:
-        print("ERROR: no data on origin/data/raw"); sys.exit(1)
+        print("ERROR: no data — start collector or ensure origin/data/raw exists")
+        sys.exit(1)
     return gzip.decompress(r.stdout).decode().strip().split('\n')
 
 
-def _fetch_candles_1m():
-    """Load backfilled 1m candles. Reads local file if available, else fetches from git."""
-    local = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_1m.json.gz')
+def _load_candles(fname):
+    """Load a candle file: /tmp/trendrider/<fname> first, then git."""
+    local = os.path.join(_TMP, fname)
     if os.path.exists(local):
         try:
             with gzip.open(local, 'rb') as f:
@@ -67,7 +74,7 @@ def _fetch_candles_1m():
         except Exception:
             return []
     r = subprocess.run(
-        ['git','show','origin/data/raw:data/raw/BTCUSDT_1m.json.gz'],
+        ['git','show', f'origin/data/raw:data/raw/{fname}'],
         capture_output=True, cwd=REPO)
     if not r.stdout:
         return []
@@ -79,34 +86,16 @@ def _fetch_candles_1m():
                 for k in klines]
     except Exception:
         return []
+
+
+def _fetch_candles_1m():
+    """Load backfilled 1m candles."""
+    return _load_candles('BTCUSDT_1m.json.gz')
 
 
 def _fetch_candles_1h():
-    """Load backfilled 1h candles. Reads local file if available, else fetches from git."""
-    local = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_1h.json.gz')
-    if os.path.exists(local):
-        try:
-            with gzip.open(local, 'rb') as f:
-                klines = json.loads(f.read().decode())
-            return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
-                     'low': float(k[3]), 'close': float(k[4]),
-                     'volume': float(k[5]), 'taker_buy': float(k[6])}
-                    for k in klines]
-        except Exception:
-            return []
-    r = subprocess.run(
-        ['git','show','origin/data/raw:data/raw/BTCUSDT_1h.json.gz'],
-        capture_output=True, cwd=REPO)
-    if not r.stdout:
-        return []
-    try:
-        klines = json.loads(gzip.decompress(r.stdout).decode())
-        return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
-                 'low': float(k[3]), 'close': float(k[4]),
-                 'volume': float(k[5]), 'taker_buy': float(k[6])}
-                for k in klines]
-    except Exception:
-        return []
+    """Load backfilled 1h candles."""
+    return _load_candles('BTCUSDT_1h.json.gz')
 
 
 def _build_tfs(raw_lines):
@@ -692,9 +681,12 @@ def _preseed(session_tf1m, ob_by_sec):
 
 def scan(mins_limit=96, session_idx=0, signals_only=False):
     if not signals_only: print("Fetching raw data...", flush=True)
-    # Only git-fetch if the local data file doesn't exist (collector not running locally)
-    local_raw = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_LIVE.jsonl.gz')
-    if not os.path.exists(local_raw):
+    # If the collector's tmpfs snapshot exists, read directly — no git fetch needed.
+    # git fetch origin data/raw is ONLY for the remote-only case (no local collector).
+    # IMPORTANT: never fetch data/raw on the phone — that would make historical
+    # blobs reachable in .git/objects and cause permanent local storage bloat.
+    tmpfs_raw = os.path.join(_TMP, 'BTCUSDT_LIVE.jsonl.gz')
+    if not os.path.exists(tmpfs_raw):
         subprocess.run(['git','fetch','origin','data/raw'], capture_output=True, cwd=REPO)
     raw = _fetch_raw()
     if not signals_only: print(f"Raw lines: {len(raw)}")

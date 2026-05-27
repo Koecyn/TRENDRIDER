@@ -182,11 +182,9 @@ def main(interval=SCAN_INTERVAL):
         utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
         try:
-            # Only git-fetch raw data if collector isn't writing it locally
-            local_raw = RAW_DIR / 'BTCUSDT_LIVE.jsonl.gz'
-            if not local_raw.exists():
-                _run('git', 'fetch', 'origin', DATA_BRANCH)
-
+            # wave_scan reads from /tmp/trendrider/ (tmpfs) when collector is live.
+            # NEVER fetch data/raw on the phone — that imports all historical blobs
+            # into .git/objects/ and causes permanent local storage bloat.
             log(f"running wave_scan…  ({utc} UTC)", C)
             raw_out, clean_out = run_scan()
 

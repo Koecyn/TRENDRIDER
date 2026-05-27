@@ -208,24 +208,27 @@ def backfill(verbose=True):
 
 def backfill_local(verbose=True):
     """
-    Fetch 1m + 1h candles from exchange and save as LOCAL files (no git).
-    Called at scan startup when the user chooses to fill in timeframe history.
-    Saves to:
-      data/raw/BTCUSDT_1m.json.gz
-      data/raw/BTCUSDT_1h.json.gz
+    Fetch 1m + 1h candles from Binance.US and save to /tmp/trendrider/ (tmpfs).
+    Never writes to the repo data/raw/ or to .git.
+    Android doesn't back up /tmp/ — cleared on reboot, RAM only.
+
+    Gap-aware: fetches exactly what's missing.
+      20-min gap  →  ~20  × 1m bars  (fast)
+      20-day gap  →  ~28 800 × 1m bars, paginated automatically in 1 000-bar chunks
+
     Returns (n_1m, n_1h) new bars fetched.
     """
     def log(m):
         if verbose: print(f"[candles] {m}", flush=True)
 
-    raw_dir = REPO / "data" / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path('/tmp/trendrider')
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     now_ms = int(time.time() * 1000)
     end_ms = now_ms - 60_000   # exclude the live minute
 
     def _load_local(fname):
-        p = raw_dir / fname
+        p = tmp_dir / fname
         if p.exists():
             try:
                 with gzip.open(p, "rt") as f:
@@ -235,7 +238,7 @@ def backfill_local(verbose=True):
         return []
 
     def _save_local(fname, data):
-        p = raw_dir / fname
+        p = tmp_dir / fname
         with gzip.open(p, "wt") as f:
             json.dump(data, f)
 
@@ -244,17 +247,19 @@ def backfill_local(verbose=True):
         for k in new: merged[k[0]] = k
         return sorted(merged.values(), key=lambda k: k[0])
 
-    # Determine 1m start: last existing bar + 1 minute, else last 1000 minutes
+    # Determine 1m start.
+    # If local file exists: fetch from last bar forward (exact gap).
+    # If no local file: default 7 days (enough historical context for the engine).
+    # _fetch_klines paginates in 1 000-bar chunks → handles any size gap.
     existing_1m = _load_local(FNAME_1M)
     start_1m = (existing_1m[-1][0] + 60_000 if existing_1m
-                else end_ms - 1000 * 60_000)
+                else end_ms - 7 * 24 * 60 * 60_000)   # 7 days default
 
-    # Determine 1h start: last existing bar + 1 hour, else last 200 hours
+    # Determine 1h start.
     existing_1h = _load_local("BTCUSDT_1h.json.gz")
     start_1h = (existing_1h[-1][0] + 3_600_000 if existing_1h
-                else end_ms - 200 * 3_600_000)
-    # Round 1h start down to hour boundary
-    start_1h = (start_1h // 3_600_000) * 3_600_000
+                else end_ms - 90 * 24 * 3_600_000)     # 90 days default
+    start_1h = (start_1h // 3_600_000) * 3_600_000     # round to hour boundary
 
     gap_min = max(0, int((end_ms - start_1m) / 60_000))
     gap_hr  = max(0, int((end_ms - start_1h) / 3_600_000))
@@ -263,7 +268,8 @@ def backfill_local(verbose=True):
         log("candle data is current — nothing to fetch")
         return 0, 0
 
-    log(f"fetching up to {gap_min} x 1m  +  {gap_hr} x 1h from Binance.US ...")
+    log(f"fetching {gap_min} x 1m  +  {gap_hr} x 1h from Binance.US "
+        f"(paginated in {MAX_BARS}-bar chunks) ...")
 
     bars_1m = _fetch_klines("1m", start_1m, end_ms) if gap_min > 0 else []
     bars_1h = _fetch_klines("1h", start_1h, end_ms) if gap_hr  > 0 else []
@@ -274,7 +280,8 @@ def backfill_local(verbose=True):
     _save_local(FNAME_1M,              combined_1m)
     _save_local("BTCUSDT_1h.json.gz",  combined_1h)
 
-    log(f"saved  1m: {len(bars_1m)} new (total {len(combined_1m)})  "
+    log(f"saved → /tmp/trendrider/  "
+        f"1m: {len(bars_1m)} new (total {len(combined_1m)})  "
         f"|  1h: {len(bars_1h)} new (total {len(combined_1h)})")
     return len(bars_1m), len(bars_1h)
 
