@@ -37,7 +37,6 @@ WINDOW_LINES   = 15_000   # bounded deque — ~125 min at 2 records/sec
 PUSH_S         = 2        # write snapshot every N seconds
 GC_EVERY       = 60
 LOG_MEM_EVERY  = 300
-GC_PRUNE_EVERY = 150      # git prune every N cycles to sweep loose objects
 
 _raw_deque  = collections.deque(maxlen=WINDOW_LINES)
 _deque_lock = threading.Lock()
@@ -53,29 +52,43 @@ def _run(*a, env=None):
 
 # ── Git push thread — reads from queue, never blocks the write loop ───────────
 
+def _del_obj(sha):
+    """Delete a loose git object by SHA — no-op if already packed or missing."""
+    if sha and len(sha) >= 4:
+        (REPO / '.git' / 'objects' / sha[:2] / sha[2:]).unlink(missing_ok=True)
+
+
 def _git_push_worker():
-    """Dedicated thread: drains _push_queue and pushes to GitHub."""
-    prune_cycle = 0
+    """Dedicated thread: drains _push_queue and pushes to GitHub.
+
+    Each push cycle creates exactly 3 loose objects (blob, tree, commit).
+    We delete them immediately after a successful push so the phone's
+    .git/objects/ never accumulates data — zero net growth per cycle.
+    GIT_NO_AUTO_GC=1 prevents git from packing the objects before we can
+    delete them.
+    """
     while True:
         gz_path = _push_queue.get()   # blocks until a snapshot is queued
         if gz_path is None:
             break
-        prune_cycle += 1
+        blob = tree = commit = ''
         try:
+            env_gc = {**os.environ, 'GIT_NO_AUTO_GC': '1',
+                      'GIT_INDEX_FILE': str(TMP_IDX)}
+
             r = _run('git', 'hash-object', '-w', str(gz_path))
             blob = r.stdout.strip()
             if not blob: continue
 
-            env = {**os.environ, 'GIT_INDEX_FILE': str(TMP_IDX)}
             parent_r = _run('git', 'rev-parse', f'origin/{DATA_BRANCH}')
             parent   = parent_r.stdout.strip()
             if parent:
-                _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env)
+                _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env_gc)
 
             _run('git', 'update-index', '--add',
-                 '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env)
+                 '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env_gc)
 
-            r = _run('git', 'write-tree', env=env)
+            r = _run('git', 'write-tree', env=env_gc)
             tree = r.stdout.strip()
             TMP_IDX.unlink(missing_ok=True)
             if not tree: continue
@@ -86,13 +99,19 @@ def _git_push_worker():
             commit = r.stdout.strip()
             if not commit: continue
 
-            _run('git', 'push', 'origin', f'{commit}:refs/heads/{DATA_BRANCH}')
+            push_r = _run('git', 'push', 'origin',
+                          f'{commit}:refs/heads/{DATA_BRANCH}')
 
-            if prune_cycle % GC_PRUNE_EVERY == 0:
-                _run('git', 'prune', '--expire=now')
+            # ── surgical cleanup — delete the 3 loose objects we just created ──
+            # Done whether push succeeded or failed: these objects are orphans
+            # once the remote ref is updated (or if push failed, useless anyway).
+            for sha in (blob, tree, commit):
+                _del_obj(sha)
 
         except Exception as e:
             log(f'git push error: {e}', R)
+            for sha in (blob, tree, commit):
+                _del_obj(sha)
 
 
 # ── Write loop — snapshot deque to disk, queue git push ──────────────────────
