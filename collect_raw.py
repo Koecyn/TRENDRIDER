@@ -130,43 +130,42 @@ def _push_signals(txt: str, summary: dict) -> bool:
     SIGNALS_TXT.write_text(txt or '(no signals yet)\n', encoding='utf-8')
     SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
     with _git_lock:
-        env = {**os.environ, 'GIT_INDEX_FILE': str(SIG_IDX), 'GIT_NO_AUTO_GC': '1'}
-        parent_r = _run('git', 'rev-parse', f'origin/{SIG_BRANCH}')
-        raw = parent_r.stdout.strip()
-        parent = raw if (len(raw) == 40 and raw.isalnum()) else ''
-        if parent:
-            _run('git', 'read-tree', f'origin/{SIG_BRANCH}', env=env)
-        tree_paths = {
-            SIGNALS_TXT:  'data/signals/BTCUSDT_SIGNALS.txt',
-            SIGNALS_JSON: 'data/signals/BTCUSDT_SIGNALS.json',
-        }
-        for p in (SIGNALS_TXT, SIGNALS_JSON):
-            r = _run('git', 'hash-object', '-w', str(p))
-            blob = r.stdout.strip()
-            if not blob:
-                log(f'sig: hash-object failed: {r.stderr.strip()[:120]}', R)
-                SIG_IDX.unlink(missing_ok=True)
+        try:
+            env = {**os.environ, 'GIT_INDEX_FILE': str(SIG_IDX), 'GIT_NO_AUTO_GC': '1'}
+            SIG_IDX.unlink(missing_ok=True)
+            tree_paths = {
+                SIGNALS_TXT:  'data/signals/BTCUSDT_SIGNALS.txt',
+                SIGNALS_JSON: 'data/signals/BTCUSDT_SIGNALS.json',
+            }
+            for p in (SIGNALS_TXT, SIGNALS_JSON):
+                r = _run('git', 'hash-object', '-w', str(p))
+                blob = r.stdout.strip()
+                if not blob:
+                    log(f'sig: hash-object failed: {r.stderr.strip()[:120]}', R)
+                    return False
+                _run('git', 'update-index', '--add',
+                     '--cacheinfo', f'100644,{blob},{tree_paths[p]}', env=env)
+            r = _run('git', 'write-tree', env=env)
+            tree = r.stdout.strip()
+            SIG_IDX.unlink(missing_ok=True)
+            if not tree:
+                log(f'sig: write-tree failed: {r.stderr.strip()[:120]}', R)
                 return False
-            _run('git', 'update-index', '--add',
-                 '--cacheinfo', f'100644,{blob},{tree_paths[p]}', env=env)
-        r = _run('git', 'write-tree', env=env)
-        tree = r.stdout.strip()
-        SIG_IDX.unlink(missing_ok=True)
-        if not tree:
-            log(f'sig: write-tree failed: {r.stderr.strip()[:120]}', R)
+            r = _run('git', 'commit-tree', tree, '-m', f'signals {int(time.time())}')
+            commit = r.stdout.strip()
+            if not commit:
+                log(f'sig: commit-tree failed: {r.stderr.strip()[:120]}', R)
+                return False
+            r = _run('git', 'push', '--force', 'origin',
+                     f'{commit}:refs/heads/{SIG_BRANCH}')
+            if r.returncode != 0:
+                log(f'sig: push failed: {r.stderr.strip()[:200]}', R)
+            return r.returncode == 0
+        except Exception:
+            import traceback
+            log(f'sig: exception: {traceback.format_exc()[:200]}', R)
+            SIG_IDX.unlink(missing_ok=True)
             return False
-        cmd = ['git', 'commit-tree', tree, '-m', f'signals {int(time.time())}']
-        if parent:
-            cmd += ['-p', parent]
-        r = _run(*cmd)
-        commit = r.stdout.strip()
-        if not commit:
-            log(f'sig: commit-tree failed: {r.stderr.strip()[:120]}', R)
-            return False
-        r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{SIG_BRANCH}')
-        if r.returncode != 0:
-            log(f'sig: push failed: {r.stderr.strip()[:200]}', R)
-        return r.returncode == 0
 
 
 # ── Scan loop — triggered by on_trade, reads deque directly ───────────────────
