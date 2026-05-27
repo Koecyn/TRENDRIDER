@@ -399,10 +399,15 @@ class KnifeDecayBuffer:
 
     def _floor_score(self, conc, spr):
         """0→1: OB confirmation that a floor is forming at current price."""
+        vel = self._vel()
         sc = 0.0
         if conc > 0.05:         sc += 0.15
         if conc > 0.30:         sc += 0.10
-        if self.conc_flip:      sc += 0.20   # bids just reloaded
+        # conc_flip = bids just reloaded.  Suppress during active free-falls
+        # (market makers transiently reloading into a drop is NOT a floor signal;
+        # the +0.20 boost would push fos above FLOCK threshold mid-fall).
+        # Gate: only count it when velocity isn't a fast downward move.
+        if self.conc_flip and vel > -1.0: sc += 0.20
         if spr < 2.0:           sc += 0.10
         if spr < 0.5:           sc += 0.10
         if self.spr_cnt >= 3:   sc += 0.10
@@ -917,7 +922,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 cand_kdvdir = kdv
                 cand_obi       = obi_p
                 cand_sc_gate   = sc_gate        # effective score gate at candidate time
-                cand_dec_state = min_dk_state   # decay state at signal formation
+                cand_dec_state = knife_states.get(sec, (0,0.0,0.0,'NEUT'))[0]  # state at exact candidate second
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
@@ -974,6 +979,20 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             if passed:
                 confirm_str = fail_reason
                 fail_reason = ''
+
+            # ── Stale-OBI gate ────────────────────────────────────────────
+            # If the best OBI this minute was captured BEFORE a fast fall,
+            # it can leak into OBI/KdV confirmation when the current book is flat.
+            # Block when: OBI decayed >0.5 AND KdV balance is below absolute floor (5.0).
+            # Gate: kdv_bal < 5.0 means momentum is weak regardless of session calibration.
+            # Use absolute floor (not gate_rev multiple) to avoid blocking late-session
+            # high-balance signals like 01:21 (kdv_bal=8.1 → passes, +$145 target).
+            if passed and cand_stype == 'TROUGH-REV' and cand_dir > 0:
+                obi_decay = best_obi_long - cand_obi
+                if obi_decay > 0.5 and cand_kdvbal < 5.0:
+                    passed      = False
+                    fail_reason = (f'stale-obi(decay={obi_decay:.2f})'
+                                   f'+weak-kdv(bal={cand_kdvbal:.1f})')
 
             # ── Knife-decay gate integration ──────────────────────────────
             # (1) FLOOR_LOCK overrides the not-at-support block for TROUGH-REV:
