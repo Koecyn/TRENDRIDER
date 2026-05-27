@@ -1324,7 +1324,8 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict):
 
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
-                     signals_only: bool = True) -> list:
+                     signals_only: bool = True,
+                     raw_lines: list = None) -> list:
     """
     Incremental scan — fast live scanner.
 
@@ -1332,8 +1333,10 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
     per candle, not per second), then runs tick-by-tick for the last _LIVE_MINS.
     Subsequent calls: only processes new seconds since last call (~60 ticks).
     Returns list of new signal dicts emitted this call.
+
+    raw_lines: if provided, use directly instead of reading from disk.
     """
-    raw = _fetch_raw()
+    raw = raw_lines if raw_lines is not None else _fetch_raw()
 
     if not state.last_sec:
         # First call: full build to get candles and timeframes

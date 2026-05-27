@@ -13,9 +13,10 @@ Trade line : ["T", ts_ms, price_cents, qty_units, side]
 Depth line : ["D", ts_ms, [[p_c,q_u],...bids], [[p_c,q_u],...asks]]
 """
 
-import asyncio, collections, gc, gzip, json, os, queue, resource
+import asyncio, collections, gc, gzip, io, json, os, queue, re, resource
 import signal, subprocess, sys, threading, time
 from pathlib import Path
+from datetime import datetime, timezone
 
 try:
     import aiohttp
@@ -37,10 +38,20 @@ WINDOW_LINES   = 15_000   # bounded deque — ~125 min at 2 records/sec
 PUSH_S         = 2        # write snapshot every N seconds
 GC_EVERY       = 60
 LOG_MEM_EVERY  = 300
+SIG_PUSH_S     = 60       # push signals to git at most once per minute
 
-_raw_deque  = collections.deque(maxlen=WINDOW_LINES)
-_deque_lock = threading.Lock()
-_push_queue = queue.Queue(maxsize=1)   # non-blocking git push pipeline
+SIGNALS_DIR  = DATA_DIR / 'signals'
+SIGNALS_TXT  = SIGNALS_DIR / 'BTCUSDT_SIGNALS.txt'
+SIGNALS_JSON = SIGNALS_DIR / 'BTCUSDT_SIGNALS.json'
+SIG_BRANCH   = 'data/signals'
+SIG_IDX      = REPO / '.git' / 'scan_push.idx'
+ANSI         = re.compile(r'\x1b\[[0-9;]*m')
+
+_raw_deque    = collections.deque(maxlen=WINDOW_LINES)
+_deque_lock   = threading.Lock()
+_push_queue   = queue.Queue(maxsize=1)   # non-blocking git push pipeline
+_scan_trigger = threading.Event()        # set by on_trade on each new second
+_last_trade_sec = 0
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'
 def log(m, c=Z): print(f'{c}[raw] {m}{Z}', flush=True)
@@ -116,6 +127,106 @@ def _git_push_worker():
                 _del_obj(sha)
 
 
+# ── Signal push ───────────────────────────────────────────────────────────────
+
+def _push_signals(txt: str, summary: dict) -> bool:
+    SIGNALS_DIR.mkdir(parents=True, exist_ok=True)
+    SIGNALS_TXT.write_text(txt or '(no signals yet)\n', encoding='utf-8')
+    SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
+    env = {**os.environ, 'GIT_INDEX_FILE': str(SIG_IDX), 'GIT_NO_AUTO_GC': '1'}
+    parent_r = _run('git', 'rev-parse', f'origin/{SIG_BRANCH}')
+    parent   = parent_r.stdout.strip()
+    if parent:
+        _run('git', 'read-tree', f'origin/{SIG_BRANCH}', env=env)
+    tree_paths = {
+        SIGNALS_TXT:  'data/signals/BTCUSDT_SIGNALS.txt',
+        SIGNALS_JSON: 'data/signals/BTCUSDT_SIGNALS.json',
+    }
+    for p in (SIGNALS_TXT, SIGNALS_JSON):
+        r = _run('git', 'hash-object', '-w', str(p))
+        blob = r.stdout.strip()
+        if not blob:
+            SIG_IDX.unlink(missing_ok=True)
+            return False
+        _run('git', 'update-index', '--add',
+             '--cacheinfo', f'100644,{blob},{tree_paths[p]}', env=env)
+    r = _run('git', 'write-tree', env=env)
+    tree = r.stdout.strip()
+    SIG_IDX.unlink(missing_ok=True)
+    if not tree:
+        return False
+    cmd = ['git', 'commit-tree', tree, '-m', f'signals {int(time.time())}']
+    if parent:
+        cmd += ['-p', parent]
+    r = _run(*cmd)
+    commit = r.stdout.strip()
+    if not commit:
+        return False
+    r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{SIG_BRANCH}')
+    if r.returncode != 0:
+        log(f'sig push stderr: {r.stderr.strip()[:200]}', R)
+    return r.returncode == 0
+
+
+# ── Scan loop — triggered by on_trade, reads deque directly ───────────────────
+
+def _scan_loop():
+    sys.path.insert(0, str(REPO))
+    import wave_scan as _ws
+
+    state          = _ws.ScanState()
+    last_push_time = 0.0
+    last_txt       = ''
+
+    log('scanner: seeding from history…', Y)
+    with _deque_lock:
+        snapshot = list(_raw_deque)
+    buf = io.StringIO()
+    old, sys.stdout = sys.stdout, buf
+    try:
+        _ws.scan_incremental(state, raw_lines=snapshot, signals_only=True)
+    finally:
+        sys.stdout = old
+    log(f'scanner: ready | {state.sig_count} historical signals', G)
+
+    while True:
+        _scan_trigger.wait()
+        _scan_trigger.clear()
+
+        with _deque_lock:
+            snapshot = list(_raw_deque)
+
+        buf = io.StringIO()
+        old, sys.stdout = sys.stdout, buf
+        try:
+            new_sigs = _ws.scan_incremental(state, raw_lines=snapshot,
+                                             signals_only=True)
+        finally:
+            sys.stdout = old
+
+        out = ANSI.sub('', buf.getvalue())
+        if out:
+            last_txt = out
+
+        if new_sigs:
+            last = state.signals[-1]
+            d    = 'LONG' if last['dir'] > 0 else 'SHORT'
+            log(f"SIGNAL +{len(new_sigs)} → {state.sig_count} total | "
+                f"{d} {last['time']} ${last['price']:,.2f}", G)
+
+        now = time.time()
+        if new_sigs or (now - last_push_time >= SIG_PUSH_S):
+            summary = {
+                'signal_count': state.sig_count,
+                'signals':      state.signals,
+                'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'new_this_run': len(new_sigs),
+            }
+            if not _push_signals(last_txt, summary):
+                log('sig push failed', R)
+            last_push_time = time.time()
+
+
 # ── Write loop — snapshot deque to disk, queue git push ──────────────────────
 
 def _push_loop():
@@ -173,11 +284,17 @@ def _check_update():
 
 async def stream():
     def on_trade(d):
+        global _last_trade_sec
+        ts_ms = int(d['T'])
+        ts_s  = ts_ms // 1000
         with _deque_lock:
             _raw_deque.append(json.dumps(
-                ['T', int(d['T']), int(float(d['p'])*100),
+                ['T', ts_ms, int(float(d['p'])*100),
                  int(float(d['q'])*10000), 0 if d.get('m') else 1],
                 separators=(',',':')))
+        if ts_s > _last_trade_sec:
+            _last_trade_sec = ts_s
+            _scan_trigger.set()   # new second → wake scanner
 
     def on_depth(d):
         ts  = int(time.time()*1000)
@@ -228,6 +345,7 @@ if __name__ == '__main__':
 
     threading.Thread(target=_push_loop,       daemon=True).start()
     threading.Thread(target=_git_push_worker, daemon=True).start()
+    threading.Thread(target=_scan_loop,       daemon=True).start()
 
     loop = asyncio.new_event_loop()
     task = loop.create_task(stream())
