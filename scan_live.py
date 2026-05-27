@@ -22,7 +22,7 @@ REPO         = Path(__file__).resolve().parent
 RAW_DIR      = REPO / "data" / "raw"
 SIGNALS_TXT  = RAW_DIR / "BTCUSDT_SIGNALS.txt"
 SIGNALS_JSON = RAW_DIR / "BTCUSDT_SIGNALS.json"
-DATA_BRANCH  = "data/raw"
+DATA_BRANCH  = "data/signals"
 TMP_IDX      = REPO / ".git" / "scan_push.idx"
 
 SCAN_INTERVAL = 300   # seconds between scans (5 minutes default)
@@ -40,67 +40,41 @@ def _run(*a, env=None):
                           cwd=str(REPO), env=env)
 
 
-def _refresh_parent() -> str:
-    """Get the current data/raw tip via ls-remote (no object download)."""
-    r = _run('git', 'ls-remote', 'origin', f'refs/heads/{DATA_BRANCH}')
-    if r.returncode == 0 and r.stdout.strip():
-        sha = r.stdout.strip().split()[0]
-        _run('git', 'update-ref', f'refs/remotes/origin/{DATA_BRANCH}', sha)
-        return sha
-    return _run('git', 'rev-parse', f'origin/{DATA_BRANCH}').stdout.strip()
-
-
 def _git_push_files(paths: list) -> bool:
-    """Push multiple files to DATA_BRANCH atomically using git plumbing.
+    """Push signal files to data/signals branch atomically."""
+    env = {**os.environ, 'GIT_INDEX_FILE': str(TMP_IDX), 'GIT_NO_AUTO_GC': '1'}
 
-    Retries up to 4 times on non-fast-forward failures (race with raw pusher).
-    Uses ls-remote to refresh the parent ref without downloading objects.
-    """
-    # Build blobs once — they don't change between retries
-    blobs = []
+    parent_r = _run('git', 'rev-parse', f'origin/{DATA_BRANCH}')
+    parent   = parent_r.stdout.strip()
+    if parent:
+        _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env)
+
     for p in paths:
         r = _run('git', 'hash-object', '-w', str(p))
         blob = r.stdout.strip()
         if not blob:
+            TMP_IDX.unlink(missing_ok=True)
             return False
-        blobs.append((blob, str(p.relative_to(REPO))))
+        rel = str(p.relative_to(REPO))
+        _run('git', 'update-index', '--add',
+             '--cacheinfo', f'100644,{blob},{rel}', env=env)
 
-    for attempt in range(5):
-        env = {**os.environ, 'GIT_INDEX_FILE': str(TMP_IDX),
-               'GIT_NO_AUTO_GC': '1'}
+    r = _run('git', 'write-tree', env=env)
+    tree = r.stdout.strip()
+    TMP_IDX.unlink(missing_ok=True)
+    if not tree:
+        return False
 
-        parent = _run('git', 'rev-parse',
-                      f'origin/{DATA_BRANCH}').stdout.strip()
-        if parent:
-            _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env)
+    cmd = ['git', 'commit-tree', tree, '-m', f'signals {int(time.time())}']
+    if parent:
+        cmd += ['-p', parent]
+    r = _run(*cmd)
+    commit = r.stdout.strip()
+    if not commit:
+        return False
 
-        for blob, rel in blobs:
-            _run('git', 'update-index', '--add',
-                 '--cacheinfo', f'100644,{blob},{rel}', env=env)
-
-        r = _run('git', 'write-tree', env=env)
-        tree = r.stdout.strip()
-        TMP_IDX.unlink(missing_ok=True)
-        if not tree:
-            return False
-
-        cmd = ['git', 'commit-tree', tree, '-m', f'signals {int(time.time())}']
-        if parent:
-            cmd += ['-p', parent]
-        r = _run(*cmd)
-        commit = r.stdout.strip()
-        if not commit:
-            return False
-
-        r = _run('git', 'push', 'origin',
-                 f'{commit}:refs/heads/{DATA_BRANCH}')
-        if r.returncode == 0:
-            return True
-
-        # Non-fast-forward — raw pusher moved the tip. Refresh and retry.
-        _refresh_parent()
-
-    return False
+    r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{DATA_BRANCH}')
+    return r.returncode == 0
 
 
 # ── signal parser ─────────────────────────────────────────────────────────────
