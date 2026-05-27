@@ -25,7 +25,7 @@ SIGNALS_JSON = RAW_DIR / "BTCUSDT_SIGNALS.json"
 DATA_BRANCH  = "data/signals"
 TMP_IDX      = REPO / ".git" / "scan_push.idx"
 
-SCAN_INTERVAL = 300   # seconds between scans (5 minutes default)
+SCAN_INTERVAL = 60    # seconds between scans (once per 1m bar)
 
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
@@ -218,6 +218,6 @@ def main(interval=SCAN_INTERVAL):
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--interval', type=int, default=SCAN_INTERVAL,
-                   help='seconds between scans (default 300)')
+                   help='seconds between scans (default 60)')
     args = p.parse_args()
     main(interval=args.interval)
