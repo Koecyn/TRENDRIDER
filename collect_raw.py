@@ -48,7 +48,7 @@ except ImportError:
     print("ERROR: pip install aiohttp"); sys.exit(1)
 
 REPO      = Path(__file__).resolve().parent
-TMP_DIR   = Path('/tmp/trendrider')            # tmpfs — RAM only
+TMP_DIR   = Path(os.environ.get('TMPDIR', '/tmp')) / 'trendrider'  # $TMPDIR on Termux
 GZ_FILE   = TMP_DIR / 'BTCUSDT_LIVE.jsonl.gz' # wave_scan reads this
 DATA_BRANCH   = "data/raw"
 GIT_TREE_PATH = "data/raw/BTCUSDT_LIVE.jsonl.gz"  # path inside git tree

@@ -39,7 +39,8 @@ G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-_TMP = '/tmp/trendrider'   # tmpfs — collector writes here; cleared on reboot
+import os as _os
+_TMP = str(_os.path.join(_os.environ.get('TMPDIR', '/tmp'), 'trendrider'))  # $TMPDIR on Termux
 
 
 def _fetch_raw():

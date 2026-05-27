@@ -154,7 +154,8 @@ def run_scan():
 
 def _startup_backfill():
     """Ask whether to pull missing candle history from exchange before scanning."""
-    local_1m = RAW_DIR / 'BTCUSDT_1m.json.gz'
+    import os as _os
+    local_1m = Path(_os.environ.get('TMPDIR', '/tmp')) / 'trendrider' / 'BTCUSDT_1m.json.gz'
     hint = "(no local history)" if not local_1m.exists() else "(update available)"
     try:
         ans = input(f"{C}Backfill candle history from exchange? {hint} [Y/n]: {Z}").strip().lower()
@@ -182,7 +183,7 @@ def main(interval=SCAN_INTERVAL):
         utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
         try:
-            # wave_scan reads from /tmp/trendrider/ (tmpfs) when collector is live.
+            # wave_scan reads from $TMPDIR/trendrider/ when collector is live.
             # NEVER fetch data/raw on the phone — that imports all historical blobs
             # into .git/objects/ and causes permanent local storage bloat.
             log(f"running wave_scan…  ({utc} UTC)", C)

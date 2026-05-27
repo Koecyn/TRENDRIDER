@@ -221,7 +221,7 @@ def backfill_local(verbose=True):
     def log(m):
         if verbose: print(f"[candles] {m}", flush=True)
 
-    tmp_dir = Path('/tmp/trendrider')
+    tmp_dir = Path(os.environ.get('TMPDIR', '/tmp')) / 'trendrider'
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     now_ms = int(time.time() * 1000)
