@@ -706,7 +706,11 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         reverse=True   # newest gap first
     )
 
-    if session_idx < len(trade_gaps):
+    if not trade_gaps:
+        # No session gaps — treat all data as one continuous session
+        t_start = trade_secs[0]
+        t_end   = trade_secs[-1]
+    elif session_idx < len(trade_gaps):
         t_start = trade_secs[trade_gaps[session_idx]]
         t_end   = trade_secs[trade_gaps[session_idx - 1] - 1] if session_idx > 0 \
                   else trade_secs[-1]
