@@ -14,7 +14,7 @@ Usage:
     python scan_live.py --interval 300   # custom interval in seconds (default 300)
 """
 
-import argparse, gzip, json, os, re, subprocess, sys, time
+import argparse, gzip, io, json, os, re, subprocess, sys, time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -25,7 +25,8 @@ SIGNALS_JSON = RAW_DIR / "BTCUSDT_SIGNALS.json"
 DATA_BRANCH  = "data/signals"
 TMP_IDX      = REPO / ".git" / "scan_push.idx"
 
-SCAN_INTERVAL = 60    # seconds between scans (once per 1m bar)
+SCAN_INTERVAL = 2     # seconds between scans — matches tick arrival cadence
+PUSH_INTERVAL = 60    # push to git at most once per minute
 
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
@@ -142,16 +143,6 @@ def parse_signals(text):
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 
-def run_scan():
-    """Run wave_scan and return (raw_output, clean_text)."""
-    r = subprocess.run(
-        [sys.executable, 'wave_scan.py', '--session', '0', '--signals'],
-        capture_output=True, text=True, cwd=str(REPO), timeout=120)
-    raw = r.stdout + r.stderr
-    clean = ANSI.sub('', raw)
-    return raw, clean
-
-
 def _startup_backfill():
     """Ask whether to pull missing candle history from exchange before scanning."""
     local_1m = Path.home() / '.trendrider' / 'BTCUSDT_1m.json.gz'
@@ -175,43 +166,68 @@ def main(interval=SCAN_INTERVAL):
 
     _startup_backfill()
 
-    log(f"Starting — scan every {interval}s", C)
+    # Import wave_scan in-process so state persists between scans.
+    # First scan processes full history; each subsequent scan processes
+    # only new seconds — ~60 physics calls instead of ~5,760.
+    sys.path.insert(0, str(REPO))
+    import wave_scan as _ws
+
+    state = _ws.ScanState()
+    log(f"Starting — scan every {interval}s, push every {PUSH_INTERVAL}s", C)
+
+    last_push_time = 0.0
+    last_clean_out = ''
 
     while True:
-        t0 = time.time()
+        t0  = time.time()
         utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
         try:
-            # wave_scan reads from $TMPDIR/trendrider/ when collector is live.
-            # NEVER fetch data/raw on the phone — that imports all historical blobs
-            # into .git/objects/ and causes permanent local storage bloat.
-            log(f"running wave_scan…  ({utc} UTC)", C)
-            raw_out, clean_out = run_scan()
+            buf = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = buf
+            try:
+                new_sigs = _ws.scan_incremental(state, signals_only=True)
+            finally:
+                sys.stdout = old_stdout
+            raw_out   = buf.getvalue()
+            clean_out = ANSI.sub('', raw_out)
 
-            # Parse structured summary
-            summary = parse_signals(raw_out)
-            n = summary['signal_count']
+            n    = state.sig_count
+            last = state.signals[-1] if state.signals else None
 
-            # Write plain text (ANSI stripped, human-readable)
-            SIGNALS_TXT.write_text(clean_out, encoding='utf-8')
+            if clean_out:
+                last_clean_out = clean_out
 
-            # Write JSON summary
-            SIGNALS_JSON.write_text(
-                json.dumps(summary, indent=2), encoding='utf-8')
+            # Log only when new signals arrive
+            if new_sigs:
+                last_str = (f"{'LONG' if last['dir']>0 else 'SHORT'} "
+                            f"{last['time']} ${last['price']:,.2f}"
+                            if last else 'none')
+                log(f"NEW +{len(new_sigs)} → {n} total | last={last_str}", G)
 
-            # Push both files to data/raw branch
-            ok = _git_push_files([SIGNALS_TXT, SIGNALS_JSON])
-            status = f"{G}pushed{Z}" if ok else f"{R}push failed{Z}"
-
-            last = summary['signals'][-1] if summary['signals'] else None
-            last_str = (f"{last['dir']} {last['time']} ${last['price']:,.2f}"
-                        if last else 'none')
-            log(f"{n} signals | last={last_str} | {status}", G if ok else R)
+            # Push to git on new signal or on periodic timer
+            now = time.time()
+            if new_sigs or (now - last_push_time >= PUSH_INTERVAL):
+                SIGNALS_TXT.write_text(last_clean_out or '(no signals yet)\n',
+                                       encoding='utf-8')
+                summary = {
+                    'signal_count': n,
+                    'signals':      state.signals,
+                    'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    'new_this_run': len(new_sigs),
+                }
+                SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
+                ok = _git_push_files([SIGNALS_TXT, SIGNALS_JSON])
+                last_push_time = time.time()
+                if not ok:
+                    log(f'push failed', R)
 
         except Exception as e:
+            import traceback
             log(f"ERROR: {e}", R)
+            traceback.print_exc()
 
-        # Sleep for remainder of interval
         elapsed = time.time() - t0
         wait    = max(0, interval - elapsed)
         time.sleep(wait)

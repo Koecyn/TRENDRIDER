@@ -98,6 +98,66 @@ def _fetch_candles_1h():
     return _load_candles('BTCUSDT_1h.json.gz')
 
 
+def _quick_ts(ln: str) -> int:
+    """Extract timestamp from raw JSON line without full json.loads — fast path."""
+    try:
+        # Lines are: ["T",ts,...] or ["D",ts,...]
+        # Find the second comma (after record type) and grab the number
+        i = ln.index(',', 2) + 1
+        j = ln.index(',', i)
+        return int(ln[i:j])
+    except Exception:
+        return 0
+
+
+def _extend_s1(s1_by_sec: dict, ob_by_sec: dict, raw_lines: list):
+    """
+    Parse new raw lines and extend s1_by_sec / ob_by_sec in place.
+    Called on subsequent incremental scan passes — no full rebuild needed.
+    """
+    trade_by_sec = collections.defaultdict(list)
+    for ln in raw_lines:
+        if not ln: continue
+        try:
+            rec = json.loads(ln)
+        except Exception:
+            continue
+        if rec[0] == 'T':
+            sec = rec[1] // 1000
+            trade_by_sec[sec].append((rec[2]/100, rec[3]/10000, rec[4]))
+        elif rec[0] == 'D':
+            sec = rec[1] // 1000
+            ob_by_sec[sec] = ([(p/100, q/10000) for p,q in rec[2][:5]],
+                              [(p/100, q/10000) for p,q in rec[3][:5]])
+
+    last_close = None
+    last_ob    = None
+    if s1_by_sec:
+        last_key   = max(s1_by_sec.keys())
+        last_close = s1_by_sec[last_key]['close']
+        last_ob    = s1_by_sec[last_key]['ob']
+
+    all_new = sorted(set(list(trade_by_sec.keys()) + list(ob_by_sec.keys())))
+    for sec in all_new:
+        if sec in s1_by_sec:
+            continue
+        trades = trade_by_sec.get(sec, [])
+        if trades:
+            prices = [t[0] for t in trades]
+            vols   = [t[1] for t in trades]
+            tb     = sum(t[1] for t in trades if t[2] == 1)
+            o,h,l,c = prices[0], max(prices), min(prices), prices[-1]
+            vol = sum(vols); last_close = c
+        else:
+            if last_close is None: continue
+            o=h=l=c=last_close; vol=0.0; tb=0.0
+        if sec in ob_by_sec:
+            last_ob = ob_by_sec[sec]
+        s1_by_sec[sec] = {'ts': sec*1000, 'open':o, 'high':h, 'low':l,
+                          'close':c, 'volume':vol, 'taker_buy':tb,
+                          'ob': last_ob or ([], [])}
+
+
 def _build_tfs(raw_lines):
     trade_by_sec = collections.defaultdict(list)
     ob_by_sec    = {}
@@ -1180,6 +1240,383 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         print(f"\nKey: STATE = micro position (PEAK/TROUGH/MID)  OBI = order book imbalance")
         print(f"     All thresholds derived from completed candle value distributions")
         print(f"     SUSTAIN_S={SUSTAIN_S}s is the only fixed constant")
+
+
+# ── Incremental scan state ────────────────────────────────────────────────────
+
+class ScanState:
+    """Persists between incremental scan calls — holds session context."""
+    __slots__ = ('closed_1m', 'accum', 'micro_accum', 'micro_window',
+                 'hist_scores', 'hist_phases', 'hist_obi', 'hist_kdv_bals',
+                 'hist_aligns', 'prev_kdv_global', 'last_sig_time',
+                 'last_sig_dir', 'last_sig_price', 'sig_count',
+                 'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
+                 's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals')
+
+    def __init__(self):
+        from physics.signals import HydraulicAccumulator
+        self.closed_1m        = []
+        self.accum            = HydraulicAccumulator()
+        self.micro_accum      = HydraulicAccumulator()
+        self.micro_window     = []
+        self.hist_scores      = []
+        self.hist_phases      = []
+        self.hist_obi         = []
+        self.hist_kdv_bals    = []
+        self.hist_aligns      = []
+        self.prev_kdv_global  = 0
+        self.last_sig_time    = None
+        self.last_sig_dir     = 0
+        self.last_sig_price   = 0.0
+        self.sig_count        = 0
+        self.last_sec         = 0
+        self.tf1m = self.tf5m = self.tf15m = self.tf1h = self.tf4h = []
+        self.s1_by_sec        = {}
+        self.ob_by_sec        = {}
+        self.knife_buf        = KnifeDecayBuffer()
+        self.signals          = []   # list of signal dicts emitted so far
+
+
+_LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
+
+
+def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict):
+    """
+    Pre-populate state from closed 1m bars using vectorized rolling physics.
+    One numpy pass over the last 250 candles instead of 200 fusion.run() calls.
+    """
+    from physics.signals import rolling_physics, rolling_score
+    if len(tf1m) < 2:
+        return
+    state.closed_1m = list(tf1m[:-1])
+    seed_bars = state.closed_1m[-250:]
+    if len(seed_bars) < 15:
+        return
+
+    c, o, v, t = _bars2arr(seed_bars)
+    prices = (c + o) / 2.0
+
+    # Vectorized: all rolling indicators in one numpy pass
+    ph = rolling_physics(prices, c, o, v, t)
+
+    # OBI per bar from cached OB snapshots
+    obi_arr = np.zeros(len(seed_bars))
+    for i, b in enumerate(seed_bars):
+        bids, asks = ob_by_sec.get(b['ts'] // 1000, ([], []))
+        if bids and asks:
+            bv = sum(q for _, q in bids[:5])
+            av = sum(q for _, q in asks[:5])
+            obi_arr[i] = (bv - av) / (bv + av) if (bv + av) else 0.0
+
+    score_arr = rolling_score(ph, obi_arr, t, v)
+
+    # Populate threshold histories from bar 20 onward (window warmup)
+    for i in range(20, len(seed_bars)):
+        sc = score_arr[i]
+        if np.isnan(sc):
+            continue
+        kd = ph['kdv_bal'][i]
+        state.hist_scores.append(float(abs(sc)))
+        state.hist_phases.append(0.0)          # micro phase seeded at 0; live data refines
+        state.hist_obi.append(float(obi_arr[i]))
+        state.hist_kdv_bals.append(0.0 if np.isnan(kd) else float(abs(kd)))
+        state.hist_aligns.append(0.5)
+
+
+def scan_incremental(state: ScanState, from_sec: int = 0,
+                     signals_only: bool = True) -> list:
+    """
+    Incremental scan — fast live scanner.
+
+    First call: seeds closed_1m + thresholds from 1m candles (one fusion call
+    per candle, not per second), then runs tick-by-tick for the last _LIVE_MINS.
+    Subsequent calls: only processes new seconds since last call (~60 ticks).
+    Returns list of new signal dicts emitted this call.
+    """
+    raw = _fetch_raw()
+
+    if not state.last_sec:
+        # First call: full build to get candles and timeframes
+        s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(raw)
+        state.tf1m  = tf1m;  state.tf5m  = tf5m
+        state.tf15m = tf15m; state.tf1h  = tf1h
+        state.tf4h  = tf4h;  state.ob_by_sec = ob_by_sec
+        _seed_state_from_candles(state, tf1m, ob_by_sec)
+        s1_by_sec = {b['ts']//1000: b for b in s1}
+        state.s1_by_sec = s1_by_sec
+        trade_secs = sorted(s for s in s1_by_sec if s1_by_sec[s]['volume'] > 0)
+        if not trade_secs:
+            return []
+        t_end    = trade_secs[-1]
+        start_at = t_end - _LIVE_MINS * 60
+    else:
+        # Subsequent calls: only parse lines newer than last processed second
+        cutoff_ms = state.last_sec * 1000
+        new_raw   = [ln for ln in raw if ln
+                     and (ln[2] == 'T' or ln[2] == 'D')
+                     and _quick_ts(ln) > cutoff_ms]
+        if not new_raw:
+            return []
+        # Append new 1s bars to existing s1_by_sec
+        s1_by_sec = state.s1_by_sec
+        ob_by_sec = state.ob_by_sec
+        _extend_s1(s1_by_sec, ob_by_sec, new_raw)
+        start_at  = state.last_sec + 1
+
+    s1_secs  = sorted(s1_by_sec.keys())
+    if not s1_secs:
+        return []
+    new_secs = [s for s in s1_secs if s >= start_at]
+    if not new_secs:
+        return []
+    tf1m  = state.tf1m;  tf5m  = state.tf5m
+    tf15m = state.tf15m; tf1h  = state.tf1h; tf4h = state.tf4h
+
+    # Group new seconds by minute
+    by_min = collections.defaultdict(list)
+    for s in new_secs:
+        by_min[(s // 60) * 60].append(s)
+
+    new_signals = []
+
+    for min_sec in sorted(by_min.keys()):
+        secs_in_min = sorted(by_min[min_sec])
+
+        b5  = [b for b in tf5m  if b['ts']//1000 <= min_sec][-30:]
+        b15 = [b for b in tf15m if b['ts']//1000 <= min_sec][-20:]
+        b1h = [b for b in tf1h  if b['ts']//1000 <= min_sec][-12:]
+        b4h = [b for b in tf4h  if b['ts']//1000 <= min_sec][-6:]
+
+        thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = \
+            _thresholds(state.hist_scores, state.hist_phases, state.hist_obi,
+                        state.hist_kdv_bals, state.hist_aligns)
+
+        p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
+        cand_sec=None; cand_score=0.0; cand_dir=0
+        cand_stype='MID'; cand_entry=0.0; cand_tgt=0.0
+        cand_kdvbal=0.0; cand_kdvdir=0; cand_obi=0.0
+        cand_sc_gate=thresh; cand_dec_state=0
+        sustain_count=0; prev_sb=0
+        prev_kdv_min=state.prev_kdv_global
+        kdv_flipped_up=False; kdv_flipped_down=False
+        final={}
+        best_obi_long=0.0; best_obi_short=0.0
+        min_dk_state=0; min_dk_ds=0.0; min_dk_fos=0.0; min_dk_lbl='NEUT'
+
+        for sec in secs_in_min:
+            bar1s = s1_by_sec.get(sec)
+            if bar1s is None: continue
+
+            p_opens.append(bar1s['open'])
+            p_closes.append(bar1s['close'])
+            p_vols.append(bar1s['volume'])
+            p_tb.append(bar1s.get('taker_buy', bar1s['volume']*0.5))
+
+            p_close = p_closes[-1]
+            partial = {'open':p_opens[0],'high':max(p_closes),'low':min(p_closes),
+                       'close':p_close,'volume':sum(p_vols),'taker_buy':sum(p_tb)}
+            window = state.closed_1m[-200:] + [partial]
+            if len(window) < 15: continue
+
+            closes_a, opens_a, volumes_a, taker_buy_a = _bars2arr(window)
+            bids, asks = ob_by_sec.get(sec, ([], []))
+
+            # Knife-decay via stateful buffer
+            ts_ms = sec * 1000
+            last_px = p_close
+            dk_st, dk_ds, dk_fos, dk_lbl = state.knife_buf.update(
+                ts_ms, last_px, bids, asks)
+            if dk_st > min_dk_state:
+                min_dk_state=dk_st; min_dk_ds=dk_ds
+                min_dk_fos=dk_fos; min_dk_lbl=dk_lbl
+
+            # Micro layer
+            state.micro_window.append(bar1s)
+            if len(state.micro_window) > 120:
+                state.micro_window = state.micro_window[-120:]
+            micro_sc=0.0; micro_ph=0.0; micro_kdv=0
+            if len(state.micro_window) >= 15:
+                mc = np.array([b['close']  for b in state.micro_window], dtype=float)
+                mo = np.array([b['open']   for b in state.micro_window], dtype=float)
+                mv = np.array([b['volume'] for b in state.micro_window], dtype=float)
+                mt = np.array([b.get('taker_buy', b['volume']*0.5)
+                               for b in state.micro_window], dtype=float)
+                try:
+                    mp   = (mc + mo) / 2.0
+                    mfus = fusion.run(mp, mo, mc, mv, mt, state.micro_accum, [], [])
+                    micro_sc  = mfus['score']
+                    micro_kdv = mfus['soliton']['direction']
+                    mwf = WF.run(mc, entry=mc[-1],
+                                 direction=1 if micro_sc >= 0 else -1)
+                    micro_ph = mwf['components'].get('micro',{}).get('phase', 0.0)
+                except Exception:
+                    pass
+
+            try:
+                prices_a = (closes_a + opens_a) / 2.0
+                fus  = fusion.run(prices_a, opens_a, closes_a, volumes_a,
+                                  taker_buy_a, state.accum, bids, asks)
+                kdv      = fus['soliton']['direction']
+                kdv_bal  = abs(fus['soliton'].get('balance', 0.0))
+                wh       = fus['water_hammer']['detected']
+                f_sc     = fus['score']
+                obi_raw  = fus.get('obi', {})
+                obi_p    = (obi_raw.get('obi', 0.0)
+                            if isinstance(obi_raw, dict) else float(obi_raw or 0.0))
+            except Exception:
+                kdv=0; kdv_bal=0.0; wh=False; f_sc=0.0; obi_p=0.0
+
+            kdv_just_flipped = (kdv != 0 and kdv != prev_kdv_min and prev_kdv_min != 0)
+            if kdv_just_flipped:
+                if kdv > 0: kdv_flipped_up   = True
+                if kdv < 0: kdv_flipped_down = True
+            prev_kdv_min = kdv if kdv != 0 else prev_kdv_min
+
+            flip_active = kdv_flipped_up or kdv_flipped_down
+            if flip_active:
+                sb = int(np.sign(f_sc)) if abs(f_sc) > 0.01 else 0
+                sc_gate = 0.01
+            else:
+                sc_gate = thresh
+                sb = (1 if f_sc >= thresh else -1 if f_sc <= -thresh else 0)
+
+            if obi_p > best_obi_long:  best_obi_long  = obi_p
+            if obi_p < best_obi_short: best_obi_short = obi_p
+
+            wf_direction = sb if sb != 0 else (1 if f_sc >= 0 else -1)
+            try:
+                wf   = WF.run(closes_a, entry=p_close, direction=wf_direction)
+                comp = wf['components']
+                itf  = wf['interference']
+                tgts = wf.get('targets', {})
+                micro_phase = comp.get('micro', {}).get('phase', 0.0)
+            except Exception:
+                comp={}; itf={'direction':0,'type':'cons'}; tgts={}; micro_phase=0.0
+
+            if sb != 0 and sb == prev_sb:
+                sustain_count += 1
+            elif sb != 0:
+                sustain_count = 1
+            else:
+                sustain_count = 0
+            prev_sb = sb
+
+            sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
+            if sb != 0 and sustain_count >= sustain_needed and cand_sec is None:
+                state_ = _micro_state(micro_phase, peak_ph, trough_ph)
+                stype  = _sig_type(state_, sb)
+                cand_sec    = sec; cand_score  = f_sc; cand_dir = sb
+                cand_stype  = stype; cand_entry = p_close
+                cand_tgt    = tgts.get('primary',
+                                p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
+                cand_kdvbal = kdv_bal; cand_kdvdir = kdv
+                cand_obi    = obi_p;  cand_sc_gate = sc_gate
+                cand_dec_state = dk_st
+
+            final = {'sec':sec,'price':p_close,'score':f_sc,'kdv':kdv,
+                     'kdv_bal':kdv_bal,'obi':obi_p,'micro_phase':micro_phase,
+                     'micro_sc':micro_sc,'micro_ph':micro_ph,'micro_kdv':micro_kdv}
+
+        if not final:
+            for b in tf1m:
+                if b['ts']//1000 == min_sec:
+                    state.closed_1m.append(b); break
+            continue
+
+        # HTF + MTF
+        htf_ctx = htf.regime(final['price'], b1h, b4h, state.closed_1m[-30:], b5, b15)
+        at_sup  = htf_ctx.get('at_support', False)
+        try:
+            res_out    = RES.resonance(state.closed_1m[-30:], b5, b15, b1h, b4h)
+            res_dir    = res_out.get('direction', 0)
+            align      = res_out.get('alignment', 0.0)
+            dissonance = res_out.get('dissonance', False)
+        except Exception:
+            res_dir=0; align=0.0; dissonance=False
+
+        passed=False; fail_reason=''; confirm_str=''
+        if cand_sec is not None:
+            carrier_amp = state.closed_1m[-1]['high'] - state.closed_1m[-1]['low'] \
+                          if state.closed_1m else 0.0
+            zone_thresh = max(carrier_amp * 0.5, cand_entry * 0.0015)
+            in_cooldown = (state.last_sig_time is not None
+                           and state.last_sig_dir == cand_dir
+                           and (min_sec - state.last_sig_time) < 180
+                           and abs(cand_entry - state.last_sig_price) < zone_thresh)
+            if not in_cooldown:
+                kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
+                              (cand_dir < 0 and kdv_flipped_down)
+                gate_obi = (best_obi_long  if cand_dir > 0 else
+                            best_obi_short if cand_dir < 0 else cand_obi)
+                passed, fail_reason = _gates(
+                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
+                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
+                    gate_obi, align, res_dir, cand_dir,
+                    at_sup, kdv_flipped, sc_gate=cand_sc_gate)
+                if passed:
+                    confirm_str = fail_reason; fail_reason = ''
+
+            if passed and cand_stype == 'TROUGH-REV' and cand_dir > 0:
+                obi_decay = best_obi_long - cand_obi
+                if obi_decay > 0.5 and cand_kdvbal < 5.0:
+                    passed = False
+                    fail_reason = f'stale-obi(decay={obi_decay:.2f})'
+
+            if (not passed and fail_reason == 'not-at-support'
+                    and cand_stype == 'TROUGH-REV'
+                    and cand_dec_state >= KnifeDecayBuffer.FLOCK):
+                passed = True; confirm_str = 'knife-floor'; fail_reason = ''
+
+        state.hist_scores.append(abs(final['score']))
+        state.hist_phases.append(final['micro_phase'])
+        state.hist_obi.append(final['obi'])
+        state.hist_kdv_bals.append(final['kdv_bal'])
+        state.hist_aligns.append(align)
+
+        if passed:
+            state.sig_count     += 1
+            state.last_sig_time  = min_sec
+            state.last_sig_dir   = cand_dir
+            state.last_sig_price = cand_entry
+            if cand_dec_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
+            elif cand_dec_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
+            elif cand_dec_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
+            sig = {
+                'n':      state.sig_count,
+                'dir':    cand_dir,
+                'stype':  cand_stype,
+                'time':   _ts(cand_sec),
+                'price':  cand_entry,
+                'confirm':confirm_str,
+                'min_sec':min_sec,
+            }
+            state.signals.append(sig)
+            new_signals.append(sig)
+
+            if signals_only:
+                import re as _re
+                arrow = '▲' if cand_dir > 0 else '▼'
+                side  = 'LONG' if cand_dir > 0 else 'SHORT'
+                stype = 'TROUGH REVERSAL' if 'TROUGH' in cand_stype else 'PEAK REVERSAL'
+                c     = G if cand_dir > 0 else R
+                bar   = '━' * 50
+                print(f"\n{c}{bar}")
+                print(f"  {arrow}  {side}  ·  {stype:<20}  [{state.sig_count}]")
+                print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
+                print(f"     {confirm_str}")
+                print(f"{bar}{Z}\n")
+
+        kdv_f = final.get('kdv', 0)
+        if kdv_f != 0: state.prev_kdv_global = kdv_f
+
+        for b in tf1m:
+            if b['ts']//1000 == min_sec:
+                state.closed_1m.append(b); break
+
+    if new_secs:
+        state.last_sec = new_secs[-1]
+
+    return new_signals
 
 
 if __name__ == '__main__':
