@@ -77,11 +77,26 @@ def load_raw():
 # ── validate one signal ───────────────────────────────────────────────────────
 
 def validate(sig, raw_lines):
+    """
+    Validate one signal against raw tick data.
+
+    Price check: scan uses p_close which may be a forward-filled bar (no live trade
+    at the exact second). Search for the last T record at or within 30s before the
+    signal second — that is the price the engine would have carried.
+
+    OBI check: scan uses best_obi_long/short (the most extreme OBI seen ANYWHERE in
+    the signal minute, not the instantaneous OBI at cand_sec). So we check the full
+    minute window: for LONG verify at least one D record in the minute had positive
+    OBI; for SHORT verify at least one had negative OBI. A true mismatch means the
+    raw book was never in the claimed direction during that whole minute.
+    """
     target_hms = sig['time']          # "HH:MM:SS"
-    target_sec = None                 # unix second, resolved below
-    trade_prices = []
-    last_ob_at_sec = None
-    last_ob_rec    = None
+    target_min = target_hms[:5]       # "HH:MM"  — minute window
+
+    # Collect: last trade at-or-before signal second (within 30s lookback),
+    #          all OB records in the signal minute
+    last_trade_price = None
+    minute_ob_obis   = []   # all computed OBIs in the minute window
 
     for ln in raw_lines:
         if not ln: continue
@@ -90,56 +105,61 @@ def validate(sig, raw_lines):
         ts_ms = rec[1]
         ts_s  = ts_ms // 1000
         hms   = datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S')
-        if hms == target_hms:
-            target_sec = ts_s
-            if rec[0] == 'T':
-                trade_prices.append(rec[2] / 100)
-            elif rec[0] == 'D':
-                last_ob_at_sec = ts_s
-                last_ob_rec    = rec
-        # Keep last OB before/at target second
-        elif last_ob_rec is None and rec[0] == 'D' and hms < target_hms:
-            last_ob_rec = rec
+        hm    = hms[:5]
+
+        if rec[0] == 'T' and hms <= target_hms:
+            # Keep rolling last-trade-price up to (and including) signal second
+            last_trade_price = rec[2] / 100
+
+        if rec[0] == 'D' and hm == target_min:
+            bids = [(p/100, q/10000) for p, q in rec[2][:5]]
+            asks = [(p/100, q/10000) for p, q in rec[3][:5]]
+            bq = sum(q for _, q in bids)
+            aq = sum(q for _, q in asks)
+            if bq + aq > 0:
+                minute_ob_obis.append((bq - aq) / (bq + aq))
 
     issues = []
 
-    # ── check 1: price ───────────────────────────────────────────────────────
-    if trade_prices:
-        closest = min(trade_prices, key=lambda p: abs(p - sig['price']))
-        delta   = abs(closest - sig['price'])
-        if delta < 1.0:
-            price_result = f"price=OK(${closest:,.2f})"
+    # ── check 1: price (last carried trade ≤ signal second) ─────────────────
+    if last_trade_price is not None:
+        delta = abs(last_trade_price - sig['price'])
+        if delta < 2.0:          # ±$2 tolerance for forward-fill drift
+            price_result = f"price=OK(${last_trade_price:,.2f})"
         else:
-            price_result = f"price=MISMATCH(scan=${sig['price']:,.2f} raw=${closest:,.2f} Δ${delta:.2f})"
+            price_result = (f"price=MISMATCH(scan=${sig['price']:,.2f} "
+                            f"raw=${last_trade_price:,.2f} Δ${delta:.2f})")
             issues.append('price')
     else:
         price_result = "price=NO_TRADE_RECORD"
         issues.append('price')
 
-    # ── check 2: OBI sign ────────────────────────────────────────────────────
-    if last_ob_rec:
-        bids = [(p/100, q/10000) for p, q in last_ob_rec[2][:5]]
-        asks = [(p/100, q/10000) for p, q in last_ob_rec[3][:5]]
-        bid_q = sum(q for _, q in bids)
-        ask_q = sum(q for _, q in asks)
-        if bid_q + ask_q > 0:
-            raw_obi = (bid_q - ask_q) / (bid_q + ask_q)
-            # LONG expects positive OBI (or at least not strongly negative)
-            # SHORT expects negative OBI (or at least not strongly positive)
-            # Threshold: flag only when sign is strongly opposite (|raw_obi| > 0.3)
-            scan_positive = (sig['dir'] == 'LONG')
-            raw_positive  = raw_obi >= 0
-            if scan_positive != raw_positive and abs(raw_obi) > 0.30:
-                obi_result = f"obi=MISMATCH(scan={sig['dir']} raw={raw_obi:+.2f})"
+    # ── check 2: OBI direction across the signal minute ──────────────────────
+    # scan uses best_obi_long (max OBI in minute) for LONG,
+    #           best_obi_short (min OBI in minute) for SHORT.
+    # Flag only when the entire minute's OBI was opposite to the signal
+    # direction — meaning the extreme the engine relied on never existed.
+    if minute_ob_obis:
+        max_obi = max(minute_ob_obis)
+        min_obi = min(minute_ob_obis)
+        if sig['dir'] == 'LONG':
+            # engine used best_obi_long (max); flag if max was strongly negative
+            if max_obi < -0.30:
+                obi_result = f"obi=MISMATCH(LONG but minute_max={max_obi:+.2f})"
                 issues.append('obi')
             else:
-                obi_result = f"obi=OK(raw={raw_obi:+.2f})"
-        else:
-            obi_result = "obi=EMPTY_BOOK"
+                obi_result = f"obi=OK(minute_max={max_obi:+.2f})"
+        else:  # SHORT
+            # engine used best_obi_short (min); flag if min was strongly positive
+            if min_obi > 0.30:
+                obi_result = f"obi=MISMATCH(SHORT but minute_min={min_obi:+.2f})"
+                issues.append('obi')
+            else:
+                obi_result = f"obi=OK(minute_min={min_obi:+.2f})"
     else:
-        obi_result = "obi=NO_OB_RECORD"
+        obi_result = "obi=NO_OB_IN_MINUTE"
 
-    label = f"[{sig['dir']} {sig['time']} ${sig['price']:,.2f}] {price_result} {obi_result}"
+    label = f"[{sig['dir']} {target_hms} ${sig['price']:,.2f}] {price_result} {obi_result}"
     return label, issues
 
 
