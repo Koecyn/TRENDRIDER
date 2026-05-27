@@ -145,6 +145,7 @@ def _push_signals(txt: str, summary: dict) -> bool:
         r = _run('git', 'hash-object', '-w', str(p))
         blob = r.stdout.strip()
         if not blob:
+            log(f'sig: hash-object failed: {r.stderr.strip()[:120]}', R)
             SIG_IDX.unlink(missing_ok=True)
             return False
         _run('git', 'update-index', '--add',
@@ -153,6 +154,7 @@ def _push_signals(txt: str, summary: dict) -> bool:
     tree = r.stdout.strip()
     SIG_IDX.unlink(missing_ok=True)
     if not tree:
+        log(f'sig: write-tree failed: {r.stderr.strip()[:120]}', R)
         return False
     cmd = ['git', 'commit-tree', tree, '-m', f'signals {int(time.time())}']
     if parent:
@@ -160,10 +162,11 @@ def _push_signals(txt: str, summary: dict) -> bool:
     r = _run(*cmd)
     commit = r.stdout.strip()
     if not commit:
+        log(f'sig: commit-tree failed: {r.stderr.strip()[:120]}', R)
         return False
     r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{SIG_BRANCH}')
     if r.returncode != 0:
-        log(f'sig push stderr: {r.stderr.strip()[:200]}', R)
+        log(f'sig: push failed: {r.stderr.strip()[:200]}', R)
     return r.returncode == 0
 
 

@@ -177,7 +177,7 @@ def _build_tfs(raw_lines):
 
     all_secs = sorted(set(list(trade_by_sec.keys()) + list(ob_by_sec.keys())))
     if not all_secs:
-        print("ERROR: no data parsed"); sys.exit(1)
+        return [], [], [], [], [], [], {}
 
     s1 = []; last_close = None; last_ob = None
     for sec in range(all_secs[0], all_secs[-1]+1):
@@ -222,8 +222,9 @@ def _build_tfs(raw_lines):
     tf4h  = _agg(s1, 14_400_000)
 
     # Merge backfilled 1m candles into gaps (raw tick data always wins)
+    # Cap at last 600 bars — only need recent history for threshold seeding
     raw_1m_ts = {b['ts'] for b in tf1m}
-    candles   = _fetch_candles_1m()
+    candles   = _fetch_candles_1m()[-600:]
     filled    = 0
     for c in candles:
         bucket = (c['ts'] // 60_000) * 60_000
@@ -234,8 +235,8 @@ def _build_tfs(raw_lines):
             raw_1m_ts.add(bucket)
             filled += 1
 
-    # Also fill from 1h candles (for longer gaps not covered by 1m store)
-    candles_1h = _fetch_candles_1h()
+    # Also fill from 1h candles — last 168 bars (1 week) is sufficient
+    candles_1h = _fetch_candles_1h()[-168:]
     filled_h   = 0
     for c in candles_1h:
         h_bucket = (c['ts'] // 3_600_000) * 3_600_000
@@ -1341,6 +1342,8 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
     if not state.last_sec:
         # First call: full build to get candles and timeframes
         s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(raw)
+        if not s1:
+            return []
         state.tf1m  = tf1m;  state.tf5m  = tf5m
         state.tf15m = tf15m; state.tf1h  = tf1h
         state.tf4h  = tf4h;  state.ob_by_sec = ob_by_sec
