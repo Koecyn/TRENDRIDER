@@ -170,58 +170,60 @@ def _push_signals(txt: str, summary: dict) -> bool:
 # ── Scan loop — triggered by on_trade, reads deque directly ───────────────────
 
 def _scan_loop():
-    import traceback
-    sys.path.insert(0, str(REPO))
-    import wave_scan as _ws
-
-    state          = _ws.ScanState()
-    last_push_time = 0.0
-
-    # Wait for the deque to have data before seeding
-    log('scanner: waiting for first data…', Y)
-    while True:
-        _scan_trigger.wait(timeout=2.0)
-        with _deque_lock:
-            has_data = len(_raw_deque) > 0
-        if has_data:
-            break
-
-    log('scanner: seeding from history…', Y)
     try:
+        import traceback
+        sys.path.insert(0, str(REPO))
+        log('scanner: importing wave_scan…', Y)
+        import wave_scan as _ws
+        log('scanner: wave_scan loaded', Y)
+
+        state          = _ws.ScanState()
+        last_push_time = 0.0
+
+        # Wait for the deque to have data before seeding
+        log('scanner: waiting for first data…', Y)
+        while True:
+            _scan_trigger.wait(timeout=2.0)
+            with _deque_lock:
+                has_data = len(_raw_deque) > 0
+            if has_data:
+                break
+
+        log('scanner: seeding from history…', Y)
         with _deque_lock:
             snapshot = list(_raw_deque)
         _ws.scan_incremental(state, raw_lines=snapshot, signals_only=True)
         log(f'scanner: ready | {state.sig_count} historical signals', G)
+
+        while True:
+            try:
+                _scan_trigger.wait()
+                _scan_trigger.clear()
+
+                with _deque_lock:
+                    snapshot = list(_raw_deque)
+
+                new_sigs = _ws.scan_incremental(state, raw_lines=snapshot,
+                                                 signals_only=True)
+
+                now = time.time()
+                if new_sigs or (now - last_push_time >= SIG_PUSH_S):
+                    summary = {
+                        'signal_count': state.sig_count,
+                        'signals':      state.signals,
+                        'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        'new_this_run': len(new_sigs),
+                    }
+                    if not _push_signals('', summary):
+                        log('sig push failed', R)
+                    last_push_time = time.time()
+
+            except Exception:
+                log(f'scanner error:\n{traceback.format_exc()}', R)
+
     except Exception:
-        log(f'scanner seed error:\n{traceback.format_exc()}', R)
-        return
-
-    while True:
-        try:
-            _scan_trigger.wait()
-            _scan_trigger.clear()
-
-            with _deque_lock:
-                snapshot = list(_raw_deque)
-
-            # Prints signal cards directly to terminal as they arrive
-            new_sigs = _ws.scan_incremental(state, raw_lines=snapshot,
-                                             signals_only=True)
-
-            now = time.time()
-            if new_sigs or (now - last_push_time >= SIG_PUSH_S):
-                summary = {
-                    'signal_count': state.sig_count,
-                    'signals':      state.signals,
-                    'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-                    'new_this_run': len(new_sigs),
-                }
-                if not _push_signals('', summary):
-                    log('sig push failed', R)
-                last_push_time = time.time()
-
-        except Exception:
-            log(f'scanner error:\n{traceback.format_exc()}', R)
+        import traceback as _tb
+        log(f'scanner FATAL:\n{_tb.format_exc()}', R)
 
 
 # ── Write loop — snapshot deque to disk, queue git push ──────────────────────
