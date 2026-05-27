@@ -206,6 +206,88 @@ def backfill(verbose=True):
     return n1m
 
 
+def backfill_local(verbose=True):
+    """
+    Fetch 1m + 1h candles from exchange and save as LOCAL files (no git).
+    Called at scan startup when the user chooses to fill in timeframe history.
+    Saves to:
+      data/raw/BTCUSDT_1m.json.gz
+      data/raw/BTCUSDT_1h.json.gz
+    Returns (n_1m, n_1h) new bars fetched.
+    """
+    def log(m):
+        if verbose: print(f"[candles] {m}", flush=True)
+
+    raw_dir = REPO / "data" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    now_ms = int(time.time() * 1000)
+    end_ms = now_ms - 60_000   # exclude the live minute
+
+    def _load_local(fname):
+        p = raw_dir / fname
+        if p.exists():
+            try:
+                with gzip.open(p, "rt") as f:
+                    return json.loads(f.read())
+            except Exception:
+                pass
+        return []
+
+    def _save_local(fname, data):
+        p = raw_dir / fname
+        with gzip.open(p, "wt") as f:
+            json.dump(data, f)
+
+    def _merge(existing, new):
+        merged = {k[0]: k for k in existing}
+        for k in new: merged[k[0]] = k
+        return sorted(merged.values(), key=lambda k: k[0])
+
+    # Determine 1m start: last existing bar + 1 minute, else last 1000 minutes
+    existing_1m = _load_local(FNAME_1M)
+    start_1m = (existing_1m[-1][0] + 60_000 if existing_1m
+                else end_ms - 1000 * 60_000)
+
+    # Determine 1h start: last existing bar + 1 hour, else last 200 hours
+    existing_1h = _load_local("BTCUSDT_1h.json.gz")
+    start_1h = (existing_1h[-1][0] + 3_600_000 if existing_1h
+                else end_ms - 200 * 3_600_000)
+    # Round 1h start down to hour boundary
+    start_1h = (start_1h // 3_600_000) * 3_600_000
+
+    gap_min = max(0, int((end_ms - start_1m) / 60_000))
+    gap_hr  = max(0, int((end_ms - start_1h) / 3_600_000))
+
+    if gap_min == 0 and gap_hr == 0:
+        log("candle data is current — nothing to fetch")
+        return 0, 0
+
+    log(f"fetching up to {gap_min} x 1m  +  {gap_hr} x 1h from Binance.US ...")
+
+    bars_1m = _fetch_klines("1m", start_1m, end_ms) if gap_min > 0 else []
+    bars_1h = _fetch_klines("1h", start_1h, end_ms) if gap_hr  > 0 else []
+
+    combined_1m = _merge(existing_1m, bars_1m)
+    combined_1h = _merge(existing_1h, bars_1h)
+
+    _save_local(FNAME_1M,              combined_1m)
+    _save_local("BTCUSDT_1h.json.gz",  combined_1h)
+
+    log(f"saved  1m: {len(bars_1m)} new (total {len(combined_1m)})  "
+        f"|  1h: {len(bars_1h)} new (total {len(combined_1h)})")
+    return len(bars_1m), len(bars_1h)
+
+
 if __name__ == "__main__":
-    n = backfill()
-    print(f"Done — {n} bars fetched.")
+    import argparse as _ap
+    _p = _ap.ArgumentParser()
+    _p.add_argument("--local", action="store_true",
+                    help="save candles to local files (no git push)")
+    _a = _p.parse_args()
+    if _a.local:
+        n1m, n1h = backfill_local()
+        print(f"Done — {n1m} x 1m  {n1h} x 1h fetched.")
+    else:
+        n = backfill()
+        print(f"Done — {n} bars fetched.")

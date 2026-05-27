@@ -146,17 +146,42 @@ def _parse(text):
 def _validate(sig, raw_lines):
     target_hms = sig['time']
     target_min = target_hms[:5]
-    last_trade = None
     min_obis   = []
 
+    # Pass 1: resolve target unix second.
+    # Primary: T record at exact HH:MM:SS with closest price to sig['price'].
+    # Fallback: any record in the target minute → use last second of that minute.
+    # This avoids the midnight string-ordering bug ("00:xx" < "22:xx") and handles
+    # forward-filled bars where no T record exists at the exact cand_sec.
+    candidates  = []   # (unix_sec, trade_price)
+    minute_secs = []   # unix_sec for any record in target minute
+    for ln in raw_lines:
+        if not ln: continue
+        try: rec = json.loads(ln)
+        except: continue
+        ts_s  = rec[1] // 1000
+        hm_s  = datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S')
+        if rec[0] == 'T' and hm_s == target_hms:
+            candidates.append((ts_s, rec[2] / 100))
+        if hm_s[:5] == target_min:
+            minute_secs.append(ts_s)
+
+    if candidates:
+        target_sec = min(candidates, key=lambda x: abs(x[1] - sig['price']))[0]
+    elif minute_secs:
+        target_sec = max(minute_secs)   # upper bound of target minute
+    else:
+        target_sec = None
+
+    # Pass 2: last trade price at-or-before target_sec, and OBI readings in minute.
+    last_trade = None
     for ln in raw_lines:
         if not ln: continue
         try: rec = json.loads(ln)
         except: continue
         ts_s = rec[1] // 1000
-        hms  = datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S')
-        hm   = hms[:5]
-        if rec[0] == 'T' and hms <= target_hms:
+        hm   = datetime.utcfromtimestamp(ts_s).strftime('%H:%M')
+        if rec[0] == 'T' and target_sec is not None and ts_s <= target_sec:
             last_trade = rec[2] / 100
         if rec[0] == 'D' and hm == target_min:
             bids = [(p/100, q/10000) for p, q in rec[2][:5]]
@@ -175,16 +200,28 @@ def _validate(sig, raw_lines):
     else:
         issues.append('price')
 
+    # Skip OBI check for KdV-confirmed signals
+    confirm  = sig.get('confirm', '')
+    obi_conf = 'ob=' in confirm or ('kdv' not in confirm.lower())
+
     obi_r = "obi=NO_OB"
     if min_obis:
         mx, mn = max(min_obis), min(min_obis)
-        if sig['dir'] == 'LONG':
-            obi_r = f"obi=OK(max={mx:+.2f})" if mx >= -0.30 else \
-                    f"obi=MISMATCH(LONG,max={mx:+.2f})"
-        else:
-            obi_r = f"obi=OK(min={mn:+.2f})" if mn <= 0.30 else \
-                    f"obi=MISMATCH(SHORT,min={mn:+.2f})"
-        if 'MISMATCH' in obi_r: issues.append('obi')
+        if not obi_conf:
+            ext = mx if sig['dir']=='LONG' else mn
+            obi_r = f"obi=KdV-confirmed(raw_ext={ext:+.2f})"
+        elif sig['dir'] == 'LONG':
+            if mx >= -0.30:
+                obi_r = f"obi=OK(max={mx:+.2f})"
+            else:
+                obi_r = f"obi=MISMATCH(LONG,max={mx:+.2f})"
+                issues.append('obi')
+        else:   # SHORT
+            if mn <= 0.30:
+                obi_r = f"obi=OK(min={mn:+.2f})"
+            else:
+                obi_r = f"obi=MISMATCH(SHORT,min={mn:+.2f})"
+                issues.append('obi')
 
     return f"[{sig['dir']} {sig['time']} ${sig['price']:,.2f}] {price_r} {obi_r}", issues
 

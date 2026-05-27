@@ -40,6 +40,11 @@ G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 def _fetch_raw():
+    """Load raw tick data. Reads local file if collector is running; else fetches from git."""
+    local = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_LIVE.jsonl.gz')
+    if os.path.exists(local):
+        with gzip.open(local, 'rt') as f:
+            return f.read().strip().split('\n')
     r = subprocess.run(
         ['git','show','origin/data/raw:data/raw/BTCUSDT_LIVE.jsonl.gz'],
         capture_output=True, cwd=REPO)
@@ -49,7 +54,18 @@ def _fetch_raw():
 
 
 def _fetch_candles_1m():
-    """Load backfilled 1m candles from data/raw branch. Returns list of dicts."""
+    """Load backfilled 1m candles. Reads local file if available, else fetches from git."""
+    local = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_1m.json.gz')
+    if os.path.exists(local):
+        try:
+            with gzip.open(local, 'rb') as f:
+                klines = json.loads(f.read().decode())
+            return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
+                     'low': float(k[3]), 'close': float(k[4]),
+                     'volume': float(k[5]), 'taker_buy': float(k[6])}
+                    for k in klines]
+        except Exception:
+            return []
     r = subprocess.run(
         ['git','show','origin/data/raw:data/raw/BTCUSDT_1m.json.gz'],
         capture_output=True, cwd=REPO)
@@ -66,7 +82,18 @@ def _fetch_candles_1m():
 
 
 def _fetch_candles_1h():
-    """Load backfilled 1h candles from data/raw branch. Returns list of dicts."""
+    """Load backfilled 1h candles. Reads local file if available, else fetches from git."""
+    local = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_1h.json.gz')
+    if os.path.exists(local):
+        try:
+            with gzip.open(local, 'rb') as f:
+                klines = json.loads(f.read().decode())
+            return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
+                     'low': float(k[3]), 'close': float(k[4]),
+                     'volume': float(k[5]), 'taker_buy': float(k[6])}
+                    for k in klines]
+        except Exception:
+            return []
     r = subprocess.run(
         ['git','show','origin/data/raw:data/raw/BTCUSDT_1h.json.gz'],
         capture_output=True, cwd=REPO)
@@ -665,7 +692,10 @@ def _preseed(session_tf1m, ob_by_sec):
 
 def scan(mins_limit=96, session_idx=0, signals_only=False):
     if not signals_only: print("Fetching raw data...", flush=True)
-    subprocess.run(['git','fetch','origin','data/raw'], capture_output=True, cwd=REPO)
+    # Only git-fetch if the local data file doesn't exist (collector not running locally)
+    local_raw = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_LIVE.jsonl.gz')
+    if not os.path.exists(local_raw):
+        subprocess.run(['git','fetch','origin','data/raw'], capture_output=True, cwd=REPO)
     raw = _fetch_raw()
     if not signals_only: print(f"Raw lines: {len(raw)}")
 

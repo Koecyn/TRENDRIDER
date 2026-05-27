@@ -152,18 +152,40 @@ def run_scan():
     return raw, clean
 
 
+def _startup_backfill():
+    """Ask whether to pull missing candle history from exchange before scanning."""
+    local_1m = RAW_DIR / 'BTCUSDT_1m.json.gz'
+    hint = "(no local history)" if not local_1m.exists() else "(update available)"
+    try:
+        ans = input(f"{C}Backfill candle history from exchange? {hint} [Y/n]: {Z}").strip().lower()
+    except EOFError:
+        ans = 'n'
+    if ans in ('', 'y', 'yes'):
+        try:
+            import pull_candles
+            pull_candles.backfill_local(verbose=True)
+        except Exception as e:
+            log(f"backfill error: {e}", R)
+    else:
+        log("skipping backfill — running on live data only", Y)
+
+
 def main(interval=SCAN_INTERVAL):
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    log(f"Starting — scan every {interval}s, push to {DATA_BRANCH}", C)
+    _startup_backfill()
+
+    log(f"Starting — scan every {interval}s", C)
 
     while True:
         t0 = time.time()
         utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
         try:
-            # Fetch latest raw data first
-            _run('git', 'fetch', 'origin', DATA_BRANCH)
+            # Only git-fetch raw data if collector isn't writing it locally
+            local_raw = RAW_DIR / 'BTCUSDT_LIVE.jsonl.gz'
+            if not local_raw.exists():
+                _run('git', 'fetch', 'origin', DATA_BRANCH)
 
             log(f"running wave_scan…  ({utc} UTC)", C)
             raw_out, clean_out = run_scan()

@@ -107,20 +107,32 @@ def validate(sig, raw_lines):
     # whose trade price is closest to the signal's reported price.  This works
     # because the reported price is the engine's p_close at cand_sec — it will
     # be very close to an actual trade in the correct session.
-    candidates = []   # (unix_sec, trade_price)
+    # Pass 1: resolve target unix second.
+    # Primary: T record at exact HH:MM:SS with closest price to sig['price'].
+    # Fallback: any record in the target minute → use last second of that minute.
+    # This avoids the midnight string-ordering bug ("00:xx" < "22:xx") and handles
+    # forward-filled bars where no T record exists at the exact cand_sec.
+    candidates  = []   # (unix_sec, trade_price)
+    minute_secs = []   # unix_sec for any record in target minute
     for ln in raw_lines:
         if not ln: continue
         try: rec = json.loads(ln)
         except: continue
-        ts_s = rec[1] // 1000
-        if (rec[0] == 'T' and
-                datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S') == target_hms):
+        ts_s  = rec[1] // 1000
+        hm_s  = datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S')
+        if rec[0] == 'T' and hm_s == target_hms:
             candidates.append((ts_s, rec[2] / 100))
-    target_sec = (min(candidates, key=lambda x: abs(x[1] - sig['price']))[0]
-                  if candidates else None)
+        if hm_s[:5] == target_min:
+            minute_secs.append(ts_s)
 
-    # Collect: last trade at-or-before signal second (unix comparison),
-    #          all OB records in the signal minute
+    if candidates:
+        target_sec = min(candidates, key=lambda x: abs(x[1] - sig['price']))[0]
+    elif minute_secs:
+        target_sec = max(minute_secs)   # upper bound of target minute
+    else:
+        target_sec = None
+
+    # Pass 2: last trade price at-or-before target_sec, and OBI readings in minute.
     last_trade_price = None
     minute_ob_obis   = []   # all computed OBIs in the minute window
 
@@ -128,20 +140,11 @@ def validate(sig, raw_lines):
         if not ln: continue
         try: rec = json.loads(ln)
         except: continue
-        ts_ms = rec[1]
-        ts_s  = ts_ms // 1000
+        ts_s  = rec[1] // 1000
         hm    = datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M')
 
-        # Price: use unix comparison to avoid midnight string-order inversion
-        if rec[0] == 'T':
-            if target_sec is not None:
-                if ts_s <= target_sec:
-                    last_trade_price = rec[2] / 100
-            else:
-                # fallback: string compare (same-day sessions only)
-                hms = datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S')
-                if hms <= target_hms:
-                    last_trade_price = rec[2] / 100
+        if rec[0] == 'T' and target_sec is not None and ts_s <= target_sec:
+            last_trade_price = rec[2] / 100
 
         if rec[0] == 'D' and hm == target_min:
             bids = [(p/100, q/10000) for p, q in rec[2][:5]]
