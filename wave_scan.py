@@ -57,7 +57,23 @@ def _fetch_candles_1m():
         return []
     try:
         klines = json.loads(gzip.decompress(r.stdout).decode())
-        # [open_time_ms, open, high, low, close, volume, taker_buy_vol]
+        return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
+                 'low': float(k[3]), 'close': float(k[4]),
+                 'volume': float(k[5]), 'taker_buy': float(k[6])}
+                for k in klines]
+    except Exception:
+        return []
+
+
+def _fetch_candles_1h():
+    """Load backfilled 1h candles from data/raw branch. Returns list of dicts."""
+    r = subprocess.run(
+        ['git','show','origin/data/raw:data/raw/BTCUSDT_1h.json.gz'],
+        capture_output=True, cwd=REPO)
+    if not r.stdout:
+        return []
+    try:
+        klines = json.loads(gzip.decompress(r.stdout).decode())
         return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
                  'low': float(k[3]), 'close': float(k[4]),
                  'volume': float(k[5]), 'taker_buy': float(k[6])}
@@ -139,11 +155,29 @@ def _build_tfs(raw_lines):
             tf1m.append({'ts': bucket, 'open': c['open'], 'high': c['high'],
                          'low': c['low'], 'close': c['close'],
                          'volume': c['volume'], 'taker_buy': c['taker_buy']})
+            raw_1m_ts.add(bucket)
             filled += 1
-    if filled:
+
+    # Also fill from 1h candles (for longer gaps not covered by 1m store)
+    candles_1h = _fetch_candles_1h()
+    filled_h   = 0
+    for c in candles_1h:
+        h_bucket = (c['ts'] // 3_600_000) * 3_600_000
+        # inject one synthetic 1m bar per missing hour as a structural placeholder
+        for m in range(60):
+            bucket = h_bucket + m * 60_000
+            if bucket not in raw_1m_ts:
+                tf1m.append({'ts': bucket, 'open': c['open'], 'high': c['high'],
+                             'low': c['low'], 'close': c['close'],
+                             'volume': c['volume'] / 60,
+                             'taker_buy': c['taker_buy'] / 60})
+                raw_1m_ts.add(bucket)
+                filled_h += 1
+
+    total_filled = filled + filled_h
+    if total_filled:
         tf1m.sort(key=lambda b: b['ts'])
-        print(f"  +{filled} candle bars merged into gaps")
-        # Re-aggregate higher timeframes with the filled 1m bars
+        print(f"  +{filled} 1m candle bars  +{filled_h} from 1h candles merged into gaps")
         tf5m  = _agg(tf1m, 300_000)
         tf15m = _agg(tf1m, 900_000)
         tf1h  = _agg(tf1m, 3_600_000)

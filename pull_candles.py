@@ -67,16 +67,17 @@ def _existing_1m_end():
     return None
 
 
-def _fetch_klines(start_ms, end_ms):
-    """Fetch 1m klines from start_ms to end_ms (both inclusive)."""
+def _fetch_klines(interval, start_ms, end_ms):
+    """Fetch klines for given interval from start_ms to end_ms."""
+    step_ms = 3_600_000 if interval == "1h" else 60_000
     bars = []
     cursor = start_ms
     while cursor < end_ms:
-        limit = min(MAX_BARS, ((end_ms - cursor) // 60_000) + 1)
+        limit = min(MAX_BARS, ((end_ms - cursor) // step_ms) + 1)
         if limit <= 0:
             break
         url = (f"{BASE_URL}/api/v3/klines"
-               f"?symbol={SYMBOL}&interval=1m"
+               f"?symbol={SYMBOL}&interval={interval}"
                f"&startTime={cursor}&endTime={end_ms}&limit={limit}")
         with urllib.request.urlopen(url, timeout=15) as resp:
             chunk = json.loads(resp.read())
@@ -88,38 +89,38 @@ def _fetch_klines(start_ms, end_ms):
         last_open = chunk[-1][0]
         if last_open <= cursor:
             break
-        cursor = last_open + 60_000
+        cursor = last_open + step_ms
     return bars
 
 
-def _push_1m(klines):
-    """Append new bars to existing 1m file and push via git plumbing."""
-    # Load existing bars if any
-    existing = []
-    r = _run("git", "show", f"origin/{BRANCH}:{DATA_DIR}/{FNAME_1M}")
-    if r.returncode == 0 and r.stdout:
-        try:
-            existing = json.loads(
-                gzip.decompress(r.stdout.encode("latin-1")).decode()
-            )
-        except Exception:
-            existing = []
+def _push_candles(bars_1m, bars_1h):
+    """Push both 1m and 1h files to data/raw in a single commit."""
+    def _load_existing(fname):
+        r = _run("git", "show", f"origin/{BRANCH}:{DATA_DIR}/{fname}")
+        if r.returncode == 0 and r.stdout:
+            try:
+                return json.loads(gzip.decompress(r.stdout.encode("latin-1")).decode())
+            except Exception:
+                pass
+        return []
 
-    # Merge: deduplicate by open_time_ms, keep sorted
-    merged = {k[0]: k for k in existing}
-    for k in klines:
-        merged[k[0]] = k
-    combined = sorted(merged.values(), key=lambda k: k[0])
+    def _merge(existing, new):
+        merged = {k[0]: k for k in existing}
+        for k in new: merged[k[0]] = k
+        return sorted(merged.values(), key=lambda k: k[0])
 
-    gz = gzip.compress(json.dumps(combined).encode(), compresslevel=6)
+    combined_1m = _merge(_load_existing(FNAME_1M), bars_1m)
+    combined_1h = _merge(_load_existing("BTCUSDT_1h.json.gz"), bars_1h)
 
-    # git plumbing push
-    blob = subprocess.run(
-        ["git", "hash-object", "-w", "--stdin"],
-        input=gz, capture_output=True, cwd=str(REPO)
-    )
-    blob_sha = blob.stdout.decode().strip()
-    if not blob_sha:
+    def _blob(data):
+        gz = gzip.compress(json.dumps(data).encode(), compresslevel=6)
+        r = subprocess.run(["git","hash-object","-w","--stdin"],
+                           input=gz, capture_output=True, cwd=str(REPO))
+        return r.stdout.decode().strip(), gz
+
+    blob_1m, gz_1m = _blob(combined_1m)
+    blob_1h, gz_1h = _blob(combined_1h)
+    if not blob_1m or not blob_1h:
         raise RuntimeError("hash-object failed")
 
     tmp_idx = REPO / ".git" / "candle_push.idx"
@@ -127,53 +128,49 @@ def _push_1m(klines):
     parent_r = _run("git", "rev-parse", f"origin/{BRANCH}")
     parent = parent_r.stdout.strip()
     if parent:
-        subprocess.run(["git", "read-tree", f"origin/{BRANCH}"],
+        subprocess.run(["git","read-tree",f"origin/{BRANCH}"],
                        capture_output=True, cwd=str(REPO), env=env)
 
-    rel = f"{DATA_DIR}/{FNAME_1M}"
-    subprocess.run(["git", "update-index", "--add",
-                    "--cacheinfo", f"100644,{blob_sha},{rel}"],
-                   capture_output=True, cwd=str(REPO), env=env)
+    for fname, blob in [(FNAME_1M, blob_1m), ("BTCUSDT_1h.json.gz", blob_1h)]:
+        subprocess.run(["git","update-index","--add",
+                        "--cacheinfo", f"100644,{blob},{DATA_DIR}/{fname}"],
+                       capture_output=True, cwd=str(REPO), env=env)
 
-    tree_r = subprocess.run(["git", "write-tree"],
-                             capture_output=True, text=True,
-                             cwd=str(REPO), env=env)
+    tree_r = subprocess.run(["git","write-tree"], capture_output=True,
+                             text=True, cwd=str(REPO), env=env)
     tree = tree_r.stdout.strip()
     tmp_idx.unlink(missing_ok=True)
-    if not tree:
-        raise RuntimeError("write-tree failed")
+    if not tree: raise RuntimeError("write-tree failed")
 
-    msg = f"candles 1m {int(time.time())} bars={len(combined)}"
+    msg = (f"candles 1m={len(combined_1m)} 1h={len(combined_1h)} "
+           f"ts={int(time.time())}")
     commit_r = subprocess.run(
-        ["git", "commit-tree", tree, "-p", parent, "-m", msg],
-        capture_output=True, text=True, cwd=str(REPO)
-    )
+        ["git","commit-tree", tree, "-p", parent, "-m", msg],
+        capture_output=True, text=True, cwd=str(REPO))
     commit_sha = commit_r.stdout.strip()
-    if not commit_sha:
-        raise RuntimeError("commit-tree failed")
+    if not commit_sha: raise RuntimeError("commit-tree failed")
 
-    push_r = _run("git", "push", "origin",
-                  f"{commit_sha}:refs/heads/{BRANCH}")
+    push_r = _run("git","push","origin",f"{commit_sha}:refs/heads/{BRANCH}")
     if push_r.returncode != 0:
         raise RuntimeError(f"push failed: {push_r.stderr.strip()}")
 
-    return len(combined), len(klines)
+    return len(combined_1m), len(combined_1h), len(bars_1m), len(bars_1h)
 
 
 def backfill(verbose=True):
     """
     Main entry point. Call at collector startup.
-    Returns number of bars fetched (0 if skipped).
+    Fetches 1m AND 1h candles covering the gap since last raw data.
+    Returns number of new 1m bars fetched (0 if skipped).
     """
     def log(m):
         if verbose: print(f"[candles] {m}", flush=True)
 
-    subprocess.run(["git", "fetch", "origin", BRANCH],
+    subprocess.run(["git","fetch","origin", BRANCH],
                    capture_output=True, cwd=str(REPO))
 
     now_ms = int(time.time() * 1000)
 
-    # Determine gap start: later of (last raw ts) or (last 1m bar end)
     last_raw = _last_ts_in_live()
     last_1m  = _existing_1m_end()
 
@@ -181,10 +178,8 @@ def backfill(verbose=True):
         log("no existing data — skipping backfill")
         return 0
 
-    # Gap starts at the later of the two known endpoints
-    candidates = [t for t in [last_raw, last_1m] if t is not None]
+    candidates   = [t for t in [last_raw, last_1m] if t is not None]
     gap_start_ms = max(candidates)
-    # Round up to next full minute boundary
     gap_start_ms = ((gap_start_ms // 60_000) + 1) * 60_000
 
     gap_s = (now_ms - gap_start_ms) / 1000
@@ -192,17 +187,23 @@ def backfill(verbose=True):
         log(f"gap {gap_s:.0f}s < {MIN_GAP_S}s — nothing to backfill")
         return 0
 
-    gap_bars = int(gap_s / 60)
-    log(f"gap {gap_s/60:.1f}m ({gap_bars} bars) — fetching 1m candles ...")
+    gap_min = int(gap_s / 60)
+    gap_hr  = max(1, gap_min // 60)
+    log(f"gap {gap_s/3600:.2f}h — fetching {gap_min} x 1m  +  {gap_hr} x 1h ...")
 
-    klines = _fetch_klines(gap_start_ms, now_ms - 60_000)  # exclude live minute
-    if not klines:
+    end_ms  = now_ms - 60_000   # exclude the live minute
+    bars_1m = _fetch_klines("1m",  gap_start_ms, end_ms)
+    # 1h: round gap_start down to hour boundary
+    h_start = (gap_start_ms // 3_600_000) * 3_600_000
+    bars_1h = _fetch_klines("1h",  h_start, end_ms)
+
+    if not bars_1m and not bars_1h:
         log("no bars returned")
         return 0
 
-    total, new = _push_1m(klines)
-    log(f"pushed {new} new bars  (total stored: {total})")
-    return new
+    t1m, t1h, n1m, n1h = _push_candles(bars_1m, bars_1h)
+    log(f"pushed  1m: {n1m} new (total {t1m})  |  1h: {n1h} new (total {t1h})")
+    return n1m
 
 
 if __name__ == "__main__":
