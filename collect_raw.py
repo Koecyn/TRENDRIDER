@@ -252,6 +252,9 @@ def _push_loop():
             if cycle % GC_EVERY == 0:
                 gc.collect()
 
+            if cycle % 150 == 0:   # every 5 minutes — auto-restart on code update
+                _check_update()
+
             if cycle % LOG_MEM_EVERY == 0:
                 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 sz  = GZ_FILE.stat().st_size if GZ_FILE.exists() else 0
