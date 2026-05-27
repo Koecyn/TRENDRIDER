@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-scan_live.py — run wave_scan on a loop and push results to data/raw branch.
+scan_live.py — event-driven signal scanner.
 
-Runs wave_scan.py --session 0 --signals every SCAN_INTERVAL seconds.
-Strips ANSI, writes output to data/raw/BTCUSDT_SIGNALS.txt, pushes via
-git plumbing (same mechanism as collect_raw.py — never touches code branch).
-
-Also writes data/raw/BTCUSDT_SIGNALS.json with structured signal summary
-for programmatic consumers (e.g. validate_signals.py).
+Watches ~/.trendrider/BTCUSDT_LIVE.jsonl.gz for new writes from collect_raw.py.
+Fires scan_incremental the instant the file is updated — no fixed interval,
+no sleeping past the data. Pushes results to data/signals branch on new signal
+or every 60 seconds.
 
 Usage:
     python scan_live.py
-    python scan_live.py --interval 300   # custom interval in seconds (default 300)
 """
 
-import argparse, gzip, io, json, os, re, subprocess, sys, time
+import gzip, io, json, os, re, subprocess, sys, time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -24,9 +21,10 @@ SIGNALS_TXT  = RAW_DIR / "BTCUSDT_SIGNALS.txt"
 SIGNALS_JSON = RAW_DIR / "BTCUSDT_SIGNALS.json"
 DATA_BRANCH  = "data/signals"
 TMP_IDX      = REPO / ".git" / "scan_push.idx"
+LIVE_FILE    = Path.home() / '.trendrider' / 'BTCUSDT_LIVE.jsonl.gz'
 
-SCAN_INTERVAL = 2     # seconds between scans — matches tick arrival cadence
 PUSH_INTERVAL = 60    # push to git at most once per minute
+POLL_S        = 0.05  # mtime poll cadence — 50 ms
 
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
@@ -161,26 +159,34 @@ def _startup_backfill():
         log("skipping backfill — running on live data only", Y)
 
 
-def main(interval=SCAN_INTERVAL):
+def main():
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     _startup_backfill()
 
-    # Import wave_scan in-process so state persists between scans.
-    # First scan processes full history; each subsequent scan processes
-    # only new seconds — ~60 physics calls instead of ~5,760.
     sys.path.insert(0, str(REPO))
     import wave_scan as _ws
 
     state = _ws.ScanState()
-    log(f"Starting — scan every {interval}s, push every {PUSH_INTERVAL}s", C)
+    log(f"Starting — event-driven on {LIVE_FILE.name}", C)
 
     last_push_time = 0.0
     last_clean_out = ''
+    last_mtime     = 0.0
 
     while True:
-        t0  = time.time()
-        utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
+        # Wait for new data — fire the instant the file is touched
+        try:
+            mtime = LIVE_FILE.stat().st_mtime
+        except FileNotFoundError:
+            time.sleep(POLL_S)
+            continue
+
+        if mtime <= last_mtime:
+            time.sleep(POLL_S)
+            continue
+
+        last_mtime = mtime
 
         try:
             buf = io.StringIO()
@@ -199,14 +205,12 @@ def main(interval=SCAN_INTERVAL):
             if clean_out:
                 last_clean_out = clean_out
 
-            # Log only when new signals arrive
             if new_sigs:
                 last_str = (f"{'LONG' if last['dir']>0 else 'SHORT'} "
                             f"{last['time']} ${last['price']:,.2f}"
                             if last else 'none')
                 log(f"NEW +{len(new_sigs)} → {n} total | last={last_str}", G)
 
-            # Push to git on new signal or on periodic timer
             now = time.time()
             if new_sigs or (now - last_push_time >= PUSH_INTERVAL):
                 SIGNALS_TXT.write_text(last_clean_out or '(no signals yet)\n',
@@ -221,21 +225,13 @@ def main(interval=SCAN_INTERVAL):
                 ok = _git_push_files([SIGNALS_TXT, SIGNALS_JSON])
                 last_push_time = time.time()
                 if not ok:
-                    log(f'push failed', R)
+                    log('push failed', R)
 
         except Exception as e:
             import traceback
             log(f"ERROR: {e}", R)
             traceback.print_exc()
 
-        elapsed = time.time() - t0
-        wait    = max(0, interval - elapsed)
-        time.sleep(wait)
-
 
 if __name__ == '__main__':
-    p = argparse.ArgumentParser()
-    p.add_argument('--interval', type=int, default=SCAN_INTERVAL,
-                   help='seconds between scans (default 60)')
-    args = p.parse_args()
-    main(interval=args.interval)
+    main()
