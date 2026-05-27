@@ -99,7 +99,27 @@ def validate(sig, raw_lines):
     target_hms = sig['time']          # "HH:MM:SS"
     target_min = target_hms[:5]       # "HH:MM"  — minute window
 
-    # Collect: last trade at-or-before signal second (within 30s lookback),
+    # Resolve HH:MM:SS → unix second.
+    # Two pitfalls:
+    #   1. Session spans midnight: "00:xx" < "22:xx" in string order but is later.
+    #   2. Same HH:MM:SS appears on multiple days in a multi-day raw file.
+    # Fix: collect all T records matching the target HH:MM:SS, then pick the one
+    # whose trade price is closest to the signal's reported price.  This works
+    # because the reported price is the engine's p_close at cand_sec — it will
+    # be very close to an actual trade in the correct session.
+    candidates = []   # (unix_sec, trade_price)
+    for ln in raw_lines:
+        if not ln: continue
+        try: rec = json.loads(ln)
+        except: continue
+        ts_s = rec[1] // 1000
+        if (rec[0] == 'T' and
+                datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S') == target_hms):
+            candidates.append((ts_s, rec[2] / 100))
+    target_sec = (min(candidates, key=lambda x: abs(x[1] - sig['price']))[0]
+                  if candidates else None)
+
+    # Collect: last trade at-or-before signal second (unix comparison),
     #          all OB records in the signal minute
     last_trade_price = None
     minute_ob_obis   = []   # all computed OBIs in the minute window
@@ -110,12 +130,18 @@ def validate(sig, raw_lines):
         except: continue
         ts_ms = rec[1]
         ts_s  = ts_ms // 1000
-        hms   = datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S')
-        hm    = hms[:5]
+        hm    = datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M')
 
-        if rec[0] == 'T' and hms <= target_hms:
-            # Keep rolling last-trade-price up to (and including) signal second
-            last_trade_price = rec[2] / 100
+        # Price: use unix comparison to avoid midnight string-order inversion
+        if rec[0] == 'T':
+            if target_sec is not None:
+                if ts_s <= target_sec:
+                    last_trade_price = rec[2] / 100
+            else:
+                # fallback: string compare (same-day sessions only)
+                hms = datetime.datetime.utcfromtimestamp(ts_s).strftime('%H:%M:%S')
+                if hms <= target_hms:
+                    last_trade_price = rec[2] / 100
 
         if rec[0] == 'D' and hm == target_min:
             bids = [(p/100, q/10000) for p, q in rec[2][:5]]
@@ -143,25 +169,32 @@ def validate(sig, raw_lines):
     # ── check 2: OBI direction across the signal minute ──────────────────────
     # scan uses best_obi_long (max OBI in minute) for LONG,
     #           best_obi_short (min OBI in minute) for SHORT.
-    # Flag only when the entire minute's OBI was opposite to the signal
-    # direction — meaning the extreme the engine relied on never existed.
-    if minute_ob_obis:
+    # Skip OBI check for KdV-confirmed signals — the engine used KdV direction
+    # (not OBI) as confirmation; the raw book may legitimately be neutral/opposite.
+    confirm = sig.get('confirm', '')
+    obi_confirmed = 'ob=' in confirm or ('kdv' not in confirm.lower()
+                                          and 'flip' not in confirm.lower())
+
+    if minute_ob_obis and obi_confirmed:
         max_obi = max(minute_ob_obis)
         min_obi = min(minute_ob_obis)
         if sig['dir'] == 'LONG':
-            # engine used best_obi_long (max); flag if max was strongly negative
             if max_obi < -0.30:
                 obi_result = f"obi=MISMATCH(LONG but minute_max={max_obi:+.2f})"
                 issues.append('obi')
             else:
                 obi_result = f"obi=OK(minute_max={max_obi:+.2f})"
         else:  # SHORT
-            # engine used best_obi_short (min); flag if min was strongly positive
             if min_obi > 0.30:
                 obi_result = f"obi=MISMATCH(SHORT but minute_min={min_obi:+.2f})"
                 issues.append('obi')
             else:
                 obi_result = f"obi=OK(minute_min={min_obi:+.2f})"
+    elif minute_ob_obis:
+        # KdV-confirmed — report raw OBI for info but don't flag as mismatch
+        max_obi = max(minute_ob_obis); min_obi = min(minute_ob_obis)
+        ext = max_obi if sig['dir'] == 'LONG' else min_obi
+        obi_result = f"obi=KdV-confirmed(raw_ext={ext:+.2f})"
     else:
         obi_result = "obi=NO_OB_IN_MINUTE"
 

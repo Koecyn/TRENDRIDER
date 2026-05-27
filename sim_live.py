@@ -120,11 +120,19 @@ def _parse(text):
         m = re.search(r'(▲|▼)\s+(LONG|SHORT)\s+·\s+(TROUGH REVERSAL|PEAK REVERSAL)\s+\[(\d+)\]', line)
         if m:
             cur = {'n': int(m.group(4)), 'dir': m.group(2), 'stype': m.group(3),
-                   'time': '', 'price': 0.0}
+                   'time': '', 'price': 0.0, 'confirm': ''}
         m2 = re.search(r'(\d{2}:\d{2}:\d{2})\s+·\s+\$\s*([\d,]+\.?\d*)', line)
         if m2 and cur.get('dir'):
             cur['time']  = m2.group(1)
             cur['price'] = float(m2.group(2).replace(',', ''))
+        # Confirmation line (first content line after timestamp)
+        if cur.get('time') and not cur.get('confirm'):
+            stripped = line.strip()
+            if stripped and not stripped.startswith('1m') and not stripped.startswith('FLR'):
+                if 'OBI' in stripped:
+                    cur['confirm'] = f"ob={stripped.split()[1]}"
+                elif 'KdV' in stripped:
+                    cur['confirm'] = 'kdv'
         if cur.get('time') and cur.get('price') and line.strip() == '':
             sigs.append(dict(cur)); cur = {}
     if cur.get('time') and cur.get('price'):

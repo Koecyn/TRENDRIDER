@@ -107,11 +107,18 @@ def parse_signals(text):
         if m2 and cur.get('dir'):
             cur['time']  = m2.group(1)
             cur['price'] = float(m2.group(2).replace(',', ''))
-        # Reason line (OBI / KdV / Floor)
+        # Confirmation line (OBI / KdV / Floor) — first non-empty line after timestamp
         if cur.get('dir') and cur.get('time') and not cur.get('reason'):
             stripped = line.strip()
             if stripped and not stripped.startswith('1m') and not stripped.startswith('FLR'):
                 cur['reason'] = stripped
+                # Derive confirm key: 'ob=...' for OBI, 'kdv' for KdV-flip/match
+                if 'OBI' in stripped:
+                    cur['confirm'] = f"ob={stripped.split()[1]}"
+                elif 'KdV' in stripped:
+                    cur['confirm'] = 'kdv-flip' if 'flip' in stripped.lower() else 'kdv'
+                else:
+                    cur['confirm'] = stripped
         # Decay line
         m3 = re.search(r'(FLOOR|FLR\?|DECAY|DEC\?|KNIFE)\s+ds=([\d.]+)\s+fos=([\d.]+)', line)
         if m3 and cur.get('dir'):
