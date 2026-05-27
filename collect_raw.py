@@ -48,8 +48,26 @@ except ImportError:
     print("ERROR: pip install aiohttp"); sys.exit(1)
 
 REPO      = Path(__file__).resolve().parent
-TMP_DIR   = Path(os.environ.get('TMPDIR', '/tmp')) / 'trendrider'  # $TMPDIR on Termux
-GZ_FILE   = TMP_DIR / 'BTCUSDT_LIVE.jsonl.gz' # wave_scan reads this
+
+def _find_tmp() -> Path:
+    """Return a writable temp dir: $TMPDIR, then ~/.cache, then .tmp inside repo."""
+    for p in [
+        os.environ.get('TMPDIR', ''),                   # Termux sets this when it works
+        str(Path.home() / '.cache'),                    # always writable on Android/Linux
+        str(REPO / '.tmp'),                             # last resort: inside repo dir
+    ]:
+        if not p:
+            continue
+        d = Path(p) / 'trendrider'
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except OSError:
+            continue
+    raise RuntimeError("No writable temp directory found")
+
+TMP_DIR = _find_tmp()
+GZ_FILE = TMP_DIR / 'BTCUSDT_LIVE.jsonl.gz'  # wave_scan reads this
 DATA_BRANCH   = "data/raw"
 GIT_TREE_PATH = "data/raw/BTCUSDT_LIVE.jsonl.gz"  # path inside git tree
 TMP_IDX       = REPO / ".git" / "data_push.idx"
@@ -118,6 +136,7 @@ def _git_push_snapshot(gz_path: Path) -> bool:
 # ── Push loop ─────────────────────────────────────────────────────────────────
 
 def _push_loop():
+    log(f"data dir → {TMP_DIR}", G)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     cycle = 0
     while True:
