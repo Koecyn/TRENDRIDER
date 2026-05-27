@@ -50,10 +50,17 @@ _raw_deque    = collections.deque(maxlen=WINDOW_LINES)
 _deque_lock   = threading.Lock()
 _push_queue   = queue.Queue(maxsize=1)   # non-blocking git push pipeline
 _scan_trigger = threading.Event()        # set by on_trade on each new second
+_git_lock     = threading.Lock()         # serialize all git operations — one at a time
 _last_trade_sec = 0
+
+GIT_TIMEOUT = 25   # seconds before a git subprocess is killed
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'
 def log(m, c=Z): print(f'{c}[raw] {m}{Z}', flush=True)
+
+def _run(*a, env=None):
+    return subprocess.run(list(a), capture_output=True, text=True,
+                          cwd=str(REPO), env=env, timeout=GIT_TIMEOUT)
 
 def _run(*a, env=None):
     return subprocess.run(list(a), capture_output=True, text=True,
@@ -83,43 +90,32 @@ def _git_push_worker():
             break
         blob = tree = commit = ''
         try:
-            env_gc = {**os.environ, 'GIT_NO_AUTO_GC': '1',
-                      'GIT_INDEX_FILE': str(TMP_IDX)}
-
-            r = _run('git', 'hash-object', '-w', str(gz_path))
-            blob = r.stdout.strip()
-            if not blob: continue
-
-            parent_r = _run('git', 'rev-parse', f'origin/{DATA_BRANCH}')
-            parent   = parent_r.stdout.strip()
-            if parent:
-                _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env_gc)
-
-            _run('git', 'update-index', '--add',
-                 '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env_gc)
-
-            r = _run('git', 'write-tree', env=env_gc)
-            tree = r.stdout.strip()
-            TMP_IDX.unlink(missing_ok=True)
-            if not tree: continue
-
-            env_no_gc = {k: v for k, v in env_gc.items()
-                         if k != 'GIT_INDEX_FILE'}   # commit-tree doesn't use index
-            cmd = ['git', 'commit-tree', tree, '-m', f'raw {int(time.time())}']
-            if parent: cmd += ['-p', parent]
-            r = _run(*cmd, env=env_no_gc)
-            commit = r.stdout.strip()
-            if not commit: continue
-
-            push_r = _run('git', 'push', 'origin',
-                          f'{commit}:refs/heads/{DATA_BRANCH}')
-
-            # ── surgical cleanup — delete the 3 loose objects we just created ──
-            # Done whether push succeeded or failed: these objects are orphans
-            # once the remote ref is updated (or if push failed, useless anyway).
-            for sha in (blob, tree, commit):
-                _del_obj(sha)
-
+            with _git_lock:
+                env_gc = {**os.environ, 'GIT_NO_AUTO_GC': '1',
+                          'GIT_INDEX_FILE': str(TMP_IDX)}
+                r = _run('git', 'hash-object', '-w', str(gz_path))
+                blob = r.stdout.strip()
+                if not blob: continue
+                parent_r = _run('git', 'rev-parse', f'origin/{DATA_BRANCH}')
+                parent   = parent_r.stdout.strip()
+                if parent:
+                    _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env_gc)
+                _run('git', 'update-index', '--add',
+                     '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env_gc)
+                r = _run('git', 'write-tree', env=env_gc)
+                tree = r.stdout.strip()
+                TMP_IDX.unlink(missing_ok=True)
+                if not tree: continue
+                env_no_gc = {k: v for k, v in env_gc.items()
+                             if k != 'GIT_INDEX_FILE'}
+                cmd = ['git', 'commit-tree', tree, '-m', f'raw {int(time.time())}']
+                if parent: cmd += ['-p', parent]
+                r = _run(*cmd, env=env_no_gc)
+                commit = r.stdout.strip()
+                if not commit: continue
+                _run('git', 'push', 'origin', f'{commit}:refs/heads/{DATA_BRANCH}')
+                for sha in (blob, tree, commit):
+                    _del_obj(sha)
         except Exception as e:
             log(f'git push error: {e}', R)
             for sha in (blob, tree, commit):
@@ -132,42 +128,43 @@ def _push_signals(txt: str, summary: dict) -> bool:
     SIGNALS_DIR.mkdir(parents=True, exist_ok=True)
     SIGNALS_TXT.write_text(txt or '(no signals yet)\n', encoding='utf-8')
     SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
-    env = {**os.environ, 'GIT_INDEX_FILE': str(SIG_IDX), 'GIT_NO_AUTO_GC': '1'}
-    parent_r = _run('git', 'rev-parse', f'origin/{SIG_BRANCH}')
-    parent   = parent_r.stdout.strip()
-    if parent:
-        _run('git', 'read-tree', f'origin/{SIG_BRANCH}', env=env)
-    tree_paths = {
-        SIGNALS_TXT:  'data/signals/BTCUSDT_SIGNALS.txt',
-        SIGNALS_JSON: 'data/signals/BTCUSDT_SIGNALS.json',
-    }
-    for p in (SIGNALS_TXT, SIGNALS_JSON):
-        r = _run('git', 'hash-object', '-w', str(p))
-        blob = r.stdout.strip()
-        if not blob:
-            log(f'sig: hash-object failed: {r.stderr.strip()[:120]}', R)
-            SIG_IDX.unlink(missing_ok=True)
+    with _git_lock:
+        env = {**os.environ, 'GIT_INDEX_FILE': str(SIG_IDX), 'GIT_NO_AUTO_GC': '1'}
+        parent_r = _run('git', 'rev-parse', f'origin/{SIG_BRANCH}')
+        parent   = parent_r.stdout.strip()
+        if parent:
+            _run('git', 'read-tree', f'origin/{SIG_BRANCH}', env=env)
+        tree_paths = {
+            SIGNALS_TXT:  'data/signals/BTCUSDT_SIGNALS.txt',
+            SIGNALS_JSON: 'data/signals/BTCUSDT_SIGNALS.json',
+        }
+        for p in (SIGNALS_TXT, SIGNALS_JSON):
+            r = _run('git', 'hash-object', '-w', str(p))
+            blob = r.stdout.strip()
+            if not blob:
+                log(f'sig: hash-object failed: {r.stderr.strip()[:120]}', R)
+                SIG_IDX.unlink(missing_ok=True)
+                return False
+            _run('git', 'update-index', '--add',
+                 '--cacheinfo', f'100644,{blob},{tree_paths[p]}', env=env)
+        r = _run('git', 'write-tree', env=env)
+        tree = r.stdout.strip()
+        SIG_IDX.unlink(missing_ok=True)
+        if not tree:
+            log(f'sig: write-tree failed: {r.stderr.strip()[:120]}', R)
             return False
-        _run('git', 'update-index', '--add',
-             '--cacheinfo', f'100644,{blob},{tree_paths[p]}', env=env)
-    r = _run('git', 'write-tree', env=env)
-    tree = r.stdout.strip()
-    SIG_IDX.unlink(missing_ok=True)
-    if not tree:
-        log(f'sig: write-tree failed: {r.stderr.strip()[:120]}', R)
-        return False
-    cmd = ['git', 'commit-tree', tree, '-m', f'signals {int(time.time())}']
-    if parent:
-        cmd += ['-p', parent]
-    r = _run(*cmd)
-    commit = r.stdout.strip()
-    if not commit:
-        log(f'sig: commit-tree failed: {r.stderr.strip()[:120]}', R)
-        return False
-    r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{SIG_BRANCH}')
-    if r.returncode != 0:
-        log(f'sig: push failed: {r.stderr.strip()[:200]}', R)
-    return r.returncode == 0
+        cmd = ['git', 'commit-tree', tree, '-m', f'signals {int(time.time())}']
+        if parent:
+            cmd += ['-p', parent]
+        r = _run(*cmd)
+        commit = r.stdout.strip()
+        if not commit:
+            log(f'sig: commit-tree failed: {r.stderr.strip()[:120]}', R)
+            return False
+        r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{SIG_BRANCH}')
+        if r.returncode != 0:
+            log(f'sig: push failed: {r.stderr.strip()[:200]}', R)
+        return r.returncode == 0
 
 
 # ── Scan loop — triggered by on_trade, reads deque directly ───────────────────
@@ -273,13 +270,15 @@ def _check_update():
     try:
         branch = _run('git', 'rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
         if not branch or branch == 'HEAD': return
-        _run('git', 'fetch', 'origin', branch)
+        _run('git', 'fetch', '--depth', '1', 'origin', branch)
         local  = _run('git', 'rev-parse', 'HEAD').stdout.strip()
-        remote = _run('git', 'rev-parse', f'origin/{branch}').stdout.strip()
+        remote = _run('git', 'rev-parse', 'FETCH_HEAD').stdout.strip()
         if not remote or remote == local: return
         log('update detected — restarting...', Y)
-        r = _run('git', 'reset', '--hard', f'origin/{branch}')
-        if r.returncode != 0: return
+        r = _run('git', 'reset', '--hard', 'FETCH_HEAD')
+        if r.returncode != 0:
+            log(f'reset failed: {r.stderr.strip()[:120]}', R)
+            return
         os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
         log(f'update check error: {e}', R)
