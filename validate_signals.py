@@ -18,13 +18,19 @@ import gzip, json, subprocess, sys, re, datetime, os
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 
-# ── run wave scan ─────────────────────────────────────────────────────────────
+# ── read signals from pushed JSON (produced by scan_live.py) ─────────────────
 
-def run_scan():
+def load_signals_json():
+    """Read BTCUSDT_SIGNALS.json from data/raw branch (pushed by scan_live.py)."""
     r = subprocess.run(
-        ['python3', 'wave_scan.py', '--session', '0', '--signals'],
-        capture_output=True, text=True, cwd=REPO, timeout=120)
-    return r.stdout + r.stderr
+        ['git', 'show', 'origin/data/raw:data/raw/BTCUSDT_SIGNALS.json'],
+        capture_output=True, cwd=REPO)
+    if not r.stdout:
+        return None
+    try:
+        return json.loads(r.stdout.decode())
+    except Exception:
+        return None
 
 
 # ── parse signal cards from scan output ──────────────────────────────────────
@@ -168,11 +174,26 @@ def validate(sig, raw_lines):
 def main(prev_key=None):
     subprocess.run(['git', 'fetch', 'origin', 'data/raw'],
                    capture_output=True, cwd=REPO)
-
-    scan_out = run_scan()
-    signals  = parse_signals(scan_out)
-    n        = sig_count(scan_out)
     now_utc  = datetime.datetime.utcnow().strftime('%H:%M:%S')
+
+    # Prefer JSON pushed by scan_live.py (Termux); fall back to local scan
+    summary = load_signals_json()
+    if summary:
+        signals = [{'time':  s['time'],
+                    'price': s['price'],
+                    'dir':   s['dir'],
+                    'stype': s['stype'],
+                    'obi_str': ''}
+                   for s in summary.get('signals', [])]
+        n = summary.get('signal_count', len(signals))
+    else:
+        # fallback: run scan locally
+        scan_out = subprocess.run(
+            ['python3', 'wave_scan.py', '--session', '0', '--signals'],
+            capture_output=True, text=True, cwd=REPO, timeout=120)
+        text = scan_out.stdout + scan_out.stderr
+        signals = parse_signals(text)
+        n       = sig_count(text)
 
     if not signals:
         print(f"NO_DATA | {now_utc} UTC")
