@@ -849,6 +849,10 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     # Session detection uses TRADE timestamps (forward-filled s1 has no gaps).
     # Session boundary = gap > 30 min between actual trades (not forward-fill).
     trade_secs = sorted(sec for sec in s1_secs if s1_by_sec[sec]['volume'] > 0)
+    if not trade_secs:
+        if not signals_only:
+            print("No trades in raw data yet — waiting for first trade")
+        return
     trade_gaps = sorted(
         [i for i in range(1, len(trade_secs))
          if trade_secs[i] - trade_secs[i-1] > 1800],   # >30 min = new session
