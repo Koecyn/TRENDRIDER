@@ -141,9 +141,24 @@ def _extend_s1(s1_by_sec: dict, ob_by_sec: dict, raw_lines: list, seed_close=Non
 
     all_new = sorted(set(list(trade_by_sec.keys()) + list(ob_by_sec.keys())))
     for sec in all_new:
-        if sec in s1_by_sec:
-            continue
         trades = trade_by_sec.get(sec, [])
+        if sec in s1_by_sec:
+            # Accumulate any new trades that arrived after the bar was first created.
+            # This completes partial bars (first D record fires before all T records
+            # for that second have been collected).
+            existing = s1_by_sec[sec]
+            if trades:
+                prices = [t[0] for t in trades]
+                existing['high']     = max(existing['high'],   max(prices))
+                existing['low']      = min(existing['low'],    min(prices))
+                existing['close']    = prices[-1]
+                existing['volume']  += sum(t[1] for t in trades)
+                existing['taker_buy'] += sum(t[1] for t in trades if t[2] == 1)
+                last_close = existing['close']
+            if sec in ob_by_sec:
+                existing['ob'] = ob_by_sec[sec]
+                last_ob = ob_by_sec[sec]
+            continue
         if trades:
             prices = [t[0] for t in trades]
             vols   = [t[1] for t in trades]
@@ -1446,7 +1461,12 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
     s1_secs  = sorted(s1_by_sec.keys())
     if not s1_secs:
         return []
-    new_secs = [s for s in s1_secs if s >= start_at]
+    # Exclude the most-recent (in-progress) second — it hasn't closed yet.
+    # A second is confirmed only when a newer second has started, guaranteeing
+    # all its trades are accumulated. Phase machine runs on the full bar close,
+    # not a partial sub-second snapshot.
+    max_confirmed = s1_secs[-1] - 1 if len(s1_secs) > 1 else -1
+    new_secs = [s for s in s1_secs if s >= start_at and s <= max_confirmed]
     if not new_secs:
         return []
     tf1m  = state.tf1m;  tf5m  = state.tf5m
