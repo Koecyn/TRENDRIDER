@@ -1432,12 +1432,23 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         state.hist_kdv_bals.append(0.0 if np.isnan(kd) else float(abs(kd)))
         state.hist_aligns.append(0.5)
 
-    # Seed knife buffer from real raw tick stream (sub-second T/D records).
-    # Each depth snapshot is a genuine OB tick with real price + bid/ask data,
-    # so _vel() (5s rolling window) computes actual velocity correctly.
-    # This mirrors _build_decay_states exactly.
+    # Seed knife buffer in two passes:
+    # Pass 1 — candle closes (always): establishes swing-low structure and
+    #   phase history from up to 250 bars of price action.  Velocity will be
+    #   0 (bars are 60s apart, outside the 5s window) but peak/trough/bounce
+    #   state survives restarts instead of resetting to NEUTRAL every time.
+    # Pass 2 — raw T/D stream (when available): replays sub-second ticks on
+    #   top so _vel() has real data points and OB metrics are current.
+    #   buf.last_ts is cleared between passes to prevent the 20-min timeout
+    #   from wiping pass-1 state when there's a gap between candle history
+    #   and the live window.
     buf = state.knife_buf
-    last_px = None
+    for b in seed_bars:
+        ts_ms = b['ts']
+        close = float(b['close'])
+        bids, asks = ob_by_sec.get(ts_ms // 1000, ([], []))
+        buf.update(ts_ms, close, bids, asks)
+
     if raw_lines:
         recs = []
         for ln in raw_lines:
@@ -1447,26 +1458,20 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
             if r[0] not in ('T', 'D'): continue
             recs.append(r)
         recs.sort(key=lambda r: r[1])
-        for r in recs:
-            ts_ms = r[1]
-            if r[0] == 'T':
-                last_px = r[2] / 100
-            elif r[0] == 'D':
-                bids = [(p/100, q/10000) for p,q in r[2][:20]]
-                asks = [(p/100, q/10000) for p,q in r[3][:20]]
-                mid  = (bids[0][0]+asks[0][0])/2.0 if bids and asks else last_px
-                if mid is None: continue
-                px = last_px if last_px is not None else mid
-                buf.update(ts_ms, px, bids, asks)
-    else:
-        # Fallback when raw_lines not available: candle closes (1 min apart).
-        # _vel() will return 0 since ticks are outside its 5s window; phase
-        # and swing-low structure are still seeded correctly from price levels.
-        for b in seed_bars:
-            ts_ms = b['ts']
-            close = float(b['close'])
-            bids, asks = ob_by_sec.get(ts_ms // 1000, ([], []))
-            buf.update(ts_ms, close, bids, asks)
+        if recs:
+            buf.last_ts = None   # bridge candle→live gap; skip timeout reset
+            last_px = None
+            for r in recs:
+                ts_ms = r[1]
+                if r[0] == 'T':
+                    last_px = r[2] / 100
+                elif r[0] == 'D':
+                    bids = [(p/100, q/10000) for p,q in r[2][:20]]
+                    asks = [(p/100, q/10000) for p,q in r[3][:20]]
+                    mid  = (bids[0][0]+asks[0][0])/2.0 if bids and asks else last_px
+                    if mid is None: continue
+                    px = last_px if last_px is not None else mid
+                    buf.update(ts_ms, px, bids, asks)
 
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
