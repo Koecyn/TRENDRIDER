@@ -1572,13 +1572,25 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
     for k, i in enumerate(raw_low_idx):
         next_i    = raw_low_idx[k + 1] if k + 1 < len(raw_low_idx) else n_bars
         bounce_hi = max(closes[i:next_i]) if next_i > i + 1 else None
-        b2, a2    = ob_by_sec.get(ts_list[i] // 1000, ([], []))
-        obi       = 0.0
+
+        # Velocity from consecutive 1m closes ($/s)
+        vel = (closes[i] - closes[i - 1]) / 60.0 if i > 0 else 0.0
+
+        # OBI proxy from taker_buy volume (candle-derived)
+        bar_i = seed_bars[i]
+        vol_i = bar_i.get('volume', 0.0)
+        tb_i  = bar_i.get('taker_buy', vol_i * 0.5)
+        obi   = (2 * tb_i - vol_i) / vol_i if vol_i > 0 else _EPS
+
+        # Override with live OB snapshot if available for this second
+        b2, a2 = ob_by_sec.get(ts_list[i] // 1000, ([], []))
         if b2 and a2:
             bv = sum(q for _, q in b2[:5]); av = sum(q for _, q in a2[:5])
-            obi = (bv - av) / (bv + av) if bv + av else 0.0
-        injected.append(dict(ts=ts_list[i], px=closes[i], vel=0.0,
-                             obi=obi, conc=0.0, spr=0.0,
+            if bv + av:
+                obi = (bv - av) / (bv + av)
+
+        injected.append(dict(ts=ts_list[i], px=closes[i], vel=vel,
+                             obi=obi, conc=0.0, spr=_EPS,
                              bounce_hi=bounce_hi, bid_flow=0.0, ask_flow=0.0))
 
     buf.lows = injected[-buf.MAX_LOWS:]
