@@ -251,7 +251,7 @@ def _build_tfs(raw_lines):
     # Merge backfilled 1m candles into gaps (raw tick data always wins)
     # Cap at last 600 bars — only need recent history for threshold seeding
     raw_1m_ts = {b['ts'] for b in tf1m}
-    candles   = _fetch_candles_1m()[-600:]
+    candles   = _fetch_candles_1m()[-30:]
     filled    = 0
     for c in candles:
         bucket = (c['ts'] // 60_000) * 60_000
@@ -1514,7 +1514,7 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
     if len(tf1m) < 2:
         return
     state.closed_1m = list(tf1m[:-1])
-    seed_bars = state.closed_1m[-250:]
+    seed_bars = state.closed_1m[-30:]
     if len(seed_bars) < 30:
         return
 
@@ -1743,7 +1743,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             p_close = p_closes[-1]
             partial = {'open':p_opens[0],'high':max(p_closes),'low':min(p_closes),
                        'close':p_close,'volume':sum(p_vols),'taker_buy':sum(p_tb)}
-            window = state.closed_1m[-200:] + [partial]
+            window = state.closed_1m[-30:] + [partial]
             if len(window) < 10: continue
 
             closes_a, opens_a, volumes_a, taker_buy_a = _bars2arr(window)
