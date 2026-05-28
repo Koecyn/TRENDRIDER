@@ -357,10 +357,10 @@ class KnifeDecayBuffer:
     _SCHAR  = [' ',' ','D','D','F','F']
     _CCHAR  = ['-','-','?','!','?','!']
 
-    MIN_DROP_PCT   = 0.00035   # 0.035% of mid → FALLING trigger  (~$25 at $73k)
-    MIN_BOUNCE_PCT = 0.000175  # 0.0175% of mid → swing low confirm (~$13 at $73k)
-    SPR_TIGHT_PCT  = 0.000025  # 0.0025% of mid → "tight spread"   (~$1.8 at $73k)
-    SPR_VTIGHT_PCT = 0.000012  # 0.0012% of mid → "very tight"     (~$0.9 at $73k)
+    # Drop/bounce thresholds are derived dynamically from rolling price std
+    # and spread — see _vol_thresh().  These multipliers are the only tunables.
+    DROP_STD_K   = 1.5   # min_drop   = max(std * 1.5,  spread * 2)
+    BOUNCE_STD_K = 0.75  # min_bounce = max(std * 0.75, spread * 1)
     VEL_WIN_MS  = 5000   # ms rolling window for velocity at swing lows
     MAX_LOWS    = 5      # keep this many recent swing lows
     TIMEOUT_S   = 1200   # seconds quiet → reset pattern
@@ -382,11 +382,29 @@ class KnifeDecayBuffer:
         self.px_buf         = []        # [(ts_ms, price)] rolling, for velocity
         self.conc_pos       = False     # CONC currently positive
         self.conc_flip      = False     # CONC just flipped positive this snapshot
-        self.spr_cnt        = 0         # consecutive SPR<1 snapshots
+        self.spr_cnt        = 0         # consecutive ticks near min spread
+        self._spr_min       = None      # rolling minimum spread seen
         self.last_ts        = None
         self._prev_bids_map = None      # {price: qty} from previous D snapshot
         self._prev_asks_map = None
         self._flow_buf      = []        # [(ts_ms, bid_net_delta, ask_net_delta)]
+
+    def _vol_thresh(self, mid, spr):
+        """
+        Derive min_drop and min_bounce from actual market conditions.
+        Uses rolling 60s price std (noise level) and current spread (tick size).
+        Both scale automatically: tight quiet book → tiny thresholds;
+        volatile trending market → larger thresholds.
+        """
+        if len(self.px_buf) >= 5:
+            prices = np.array([p for _, p in self.px_buf[-60:]])
+            std = float(prices.std())
+        else:
+            std = 0.0
+        spr_eff    = max(spr, mid * 0.00001) if mid > 0 else 0.01
+        min_drop   = max(std * self.DROP_STD_K,   spr_eff * 2.0)
+        min_bounce = max(std * self.BOUNCE_STD_K, spr_eff * 1.0)
+        return min_drop, min_bounce
 
     def _vel(self):
         """$/s over VEL_WIN_MS rolling window. Negative = falling."""
@@ -486,15 +504,10 @@ class KnifeDecayBuffer:
         if conc > 0.05:         sc += 0.15
         if conc > 0.30:         sc += 0.10
         if self.conc_flip and vel > -1.0: sc += 0.20
-        # Spread tightness relative to price
-        if mid and mid > 0:
-            spr_tight  = mid * self.SPR_TIGHT_PCT
-            spr_vtight = mid * self.SPR_VTIGHT_PCT
-        else:
-            spr_tight  = self.SPR_TIGHT_PCT * 73000  # fallback ~$1.8
-            spr_vtight = self.SPR_VTIGHT_PCT * 73000
-        if spr < spr_tight:  sc += 0.10
-        if spr < spr_vtight: sc += 0.10
+        # Spread tightness relative to rolling minimum (not a fixed dollar gate)
+        spr_min = getattr(self, '_spr_min', spr)
+        if spr < spr_min * 1.10: sc += 0.10   # near tightest seen
+        if spr < spr_min * 1.03: sc += 0.10   # essentially at minimum
         if self.spr_cnt >= 3:   sc += 0.10
         if self.spr_cnt >= 8:   sc += 0.05
         sc += self._flow_walking_score() * 0.30
@@ -525,8 +538,9 @@ class KnifeDecayBuffer:
         # Bid/ask net flow deltas (from consecutive OB snapshots)
         self._update_flows(ts_ms, bids, asks)
 
-        # SPR tracking (relative to price)
-        spr_tight = mid * self.SPR_TIGHT_PCT
+        # SPR tracking: tight = below rolling min spread (book is locking up)
+        self._spr_min = min(getattr(self, '_spr_min', spr), spr)
+        spr_tight = self._spr_min * 1.2   # within 20% of tightest seen
         if spr < spr_tight: self.spr_cnt += 1
         else:               self.spr_cnt = max(0, self.spr_cnt - 2)
 
@@ -536,8 +550,7 @@ class KnifeDecayBuffer:
         self.conc_flip = (not was_pos) and self.conc_pos
 
         # ── Phase / swing-low machine ────────────────────────────────────
-        min_drop   = mid * self.MIN_DROP_PCT
-        min_bounce = mid * self.MIN_BOUNCE_PCT
+        min_drop, min_bounce = self._vol_thresh(mid, spr)
 
         if self.phase == 'FLAT':
             if self.peak is None or price > self.peak:
