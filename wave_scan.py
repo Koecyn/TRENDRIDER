@@ -1254,45 +1254,70 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             if passed:
                 from physics import config as C
                 MIN_P = C.MIN_PROFIT_USD
-                atr1,  r1,  pnl1  = _atr_ratio(closed_1m,    C.ATR_WINDOW)
-                atr5,  r5,  pnl5  = _atr_ratio(b5,            C.ATR_WINDOW)
-                atr15, r15, pnl15 = _atr_ratio(b15,           C.ATR_WINDOW)
+                atr1,  r1,  pnl1u  = _atr_ratio(closed_1m,  C.ATR_WINDOW)
+                atr5,  r5,  pnl5u  = _atr_ratio(b5,          C.ATR_WINDOW)
+                atr15, r15, pnl15u = _atr_ratio(b15,          C.ATR_WINDOW)
+
+                # Direction-aware pnl: longs need upward leg, shorts need downward
+                is_long  = cand_dir > 0
+                pnl1  = pnl1u              if is_long else max(atr1  * (1-r1),  _EPS)
+                pnl5  = pnl5u              if is_long else max(atr5  * (1-r5),  _EPS)
+                pnl15 = pnl15u             if is_long else max(atr15 * (1-r15), _EPS)
+                rat1  = r1                 if is_long else 1-r1
+                rat5  = r5                 if is_long else 1-r5
+                rat15 = r15                if is_long else 1-r15
+                d_sym = 'up' if is_long else 'dn'
 
                 sig_tf = None; atr_note = ''
                 if pnl1 >= MIN_P:
                     sig_tf   = '1m'
-                    atr_note = f'1m:${pnl1:.0f}(atr={atr1:.0f}×{r1:.2f})'
+                    atr_note = f'1m:${pnl1:.0f}({d_sym}={atr1:.0f}×{rat1:.2f})'
                 elif pnl5 >= MIN_P:
                     sc5  = res_out.get('tf_scores', {}).get('5m', 0.0)
                     t5m_ = htf_ctx.get('trend_5m', 'down')
-                    if t5m_ != 'down' or sc5 > -0.3:
+                    mom_ok = (t5m_ != 'down' or sc5 > -0.3) if is_long else \
+                             (t5m_ != 'up'   or sc5 < +0.3)
+                    if mom_ok:
                         sig_tf   = '5m'
-                        atr_note = (f'5m:${pnl5:.0f}(atr={atr5:.0f}×{r5:.2f})'
+                        atr_note = (f'5m:${pnl5:.0f}({d_sym}={atr5:.0f}×{rat5:.2f})'
                                     f'+1m-blocked(${pnl1:.0f}<${MIN_P:.0f})')
                     else:
                         passed      = False
-                        fail_reason = f'5m-momentum-down(sc={sc5:.2f},t={t5m_})'
+                        fail_reason = f'5m-momentum-wrong(sc={sc5:.2f},t={t5m_})'
                 elif pnl15 >= MIN_P:
                     t15_ = htf_ctx.get('trend_15m', 'down')
-                    if t15_ != 'down':
+                    tf_ok = (t15_ != 'down') if is_long else (t15_ != 'up')
+                    if tf_ok:
                         sig_tf   = '15m'
-                        atr_note = f'15m:${pnl15:.0f}(atr={atr15:.0f}×{r15:.2f})'
+                        atr_note = f'15m:${pnl15:.0f}({d_sym}={atr15:.0f}×{rat15:.2f})'
                     else:
                         passed      = False
-                        fail_reason = f'15m-trend-down,atr-pnl=${pnl15:.0f}'
+                        fail_reason = f'15m-trend-wrong,atr-pnl=${pnl15:.0f}'
                 else:
                     passed      = False
-                    fail_reason = (f'atr-pnl:1m=${pnl1:.0f}'
+                    fail_reason = (f'atr-pnl({d_sym}):1m=${pnl1:.0f}'
                                    f',5m=${pnl5:.0f},15m=${pnl15:.0f}<${MIN_P:.0f}')
 
             if passed:
-                # OB room: sell wall must be >= MIN_P above entry price
-                room, wall_dist, room_note = _ob_room_above(asks, cand_entry, MIN_P)
+                # OB room: for longs, sell wall above must be >= MIN_P away
+                #          for shorts, bid wall below must be >= MIN_P away
+                if cand_dir > 0:
+                    room, wall_dist, room_note = _ob_room_above(asks, cand_entry, MIN_P)
+                else:
+                    # check bid wall below (reverse: distance from price down to bid wall)
+                    if bids:
+                        bvols = [q for _,q in bids]; bavg = sum(bvols)/len(bvols)
+                        bwall = next((p for p,q in reversed(bids) if q >= bavg), bids[-1][0])
+                        wall_dist = cand_entry - bwall
+                        room      = wall_dist >= MIN_P
+                        room_note = f'bid-wall@{bwall:.0f}(-{wall_dist:.0f})'
+                    else:
+                        room = True; wall_dist = float('inf'); room_note = 'no-bids'
                 if not room:
                     passed      = False
                     fail_reason = f'no-room({room_note}<${MIN_P:.0f})'
                 else:
-                    confirm_str += f'+tf={sig_tf}+{atr_note}+room=+${wall_dist:.0f}'
+                    confirm_str += f'+tf={sig_tf}+{atr_note}+room=${wall_dist:.0f}'
 
         # Record completed-minute stats for next minute's thresholds
         hist_scores.append(abs(final['score']))
