@@ -52,6 +52,7 @@ _push_queue   = queue.Queue(maxsize=1)   # non-blocking git push pipeline
 _scan_trigger = threading.Event()        # set by on_trade/on_depth; scanner also wakes on timeout
 _git_lock     = threading.Lock()         # serialize all git operations — one at a time
 _last_trade_sec = 0
+_last_depth_sec = 0
 
 GIT_TIMEOUT = 25   # seconds before a git subprocess is killed
 
@@ -331,11 +332,16 @@ async def stream():
             _scan_trigger.set()   # new second → wake scanner
 
     def on_depth(d):
+        global _last_depth_sec
         ts  = int(time.time()*1000)
+        ts_s = ts // 1000
         bid = [[int(float(p)*100), int(float(q)*10000)] for p,q in d.get('bids',[])]
         ask = [[int(float(p)*100), int(float(q)*10000)] for p,q in d.get('asks',[])]
         with _deque_lock:
             _raw_deque.append(json.dumps(['D', ts, bid, ask], separators=(',',':')))
+        if ts_s > _last_depth_sec:
+            _last_depth_sec = ts_s
+            _scan_trigger.set()   # new second of OB data → wake scanner
 
     log('connecting...', G)
     backoff = 1
