@@ -1395,10 +1395,11 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         _seed_state_from_candles(state, tf1m, ob_by_sec, raw_lines=raw)
         s1_by_sec = {b['ts']//1000: b for b in s1}
         state.s1_by_sec = s1_by_sec
-        trade_secs = sorted(s for s in s1_by_sec if s1_by_sec[s]['volume'] > 0)
-        if not trade_secs:
+        all_secs  = sorted(s1_by_sec.keys())
+        if not all_secs:
             return []
-        t_end    = trade_secs[-1]
+        trade_secs = [s for s in all_secs if s1_by_sec[s]['volume'] > 0]
+        t_end    = trade_secs[-1] if trade_secs else all_secs[-1]
         start_at = t_end - _LIVE_MINS * 60
     else:
         # Subsequent calls: only parse lines newer than last processed second
