@@ -804,15 +804,19 @@ def _gates(stype, score, kdv_bal, kdv_dir,
         kdv_matches = (sig_dir < 0 and kdv_dir <= -1) or (sig_dir > 0 and kdv_dir >= 1)
         ob_confirms = (stype == 'TROUGH-REV' and obi_pressure >=  obi_conf) or \
                       (stype == 'PEAK-REV'   and obi_pressure <= -obi_conf)
-        if not (kdv_matches or kdv_flipped or ob_confirms):
+        # HTF structural support bypasses the micro-flow direction requirement:
+        # when HTF identifies price at a key level, structure IS the confirmation.
+        htf_confirms = (stype == 'TROUGH-REV' and at_sup)
+        if not (kdv_matches or kdv_flipped or ob_confirms or htf_confirms):
             return False, f'kdv-dir={kdv_dir},obi={obi_pressure:+.2f}'
         if kdv_bal < gate_rev:
             return False, f'kdv-bal={kdv_bal:.1f}<{gate_rev:.1f}'
         if stype == 'TROUGH-REV' and not at_sup:
             return False, 'not-at-support'
-        if kdv_flipped:   confirm = 'kdv-flip'
-        elif kdv_matches: confirm = f'kdv={kdv_dir:+d}'
-        else:             confirm = f'ob={obi_pressure:+.2f}'
+        if kdv_flipped:        confirm = 'kdv-flip'
+        elif kdv_matches:      confirm = f'kdv={kdv_dir:+d}'
+        elif htf_confirms:     confirm = 'htf-sup'
+        else:                  confirm = f'ob={obi_pressure:+.2f}'
         return True, confirm
 
     if stype in ('PEAK-CONT', 'TROUGH-CONT'):
