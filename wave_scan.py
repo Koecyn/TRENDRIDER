@@ -262,26 +262,9 @@ def _build_tfs(raw_lines):
             raw_1m_ts.add(bucket)
             filled += 1
 
-    # Also fill from 1h candles — last 12 bars (12 hours) is sufficient
-    candles_1h = _fetch_candles_1h()[-12:]
-    filled_h   = 0
-    for c in candles_1h:
-        h_bucket = (c['ts'] // 3_600_000) * 3_600_000
-        # inject one synthetic 1m bar per missing hour as a structural placeholder
-        for m in range(60):
-            bucket = h_bucket + m * 60_000
-            if bucket not in raw_1m_ts:
-                tf1m.append({'ts': bucket, 'open': c['open'], 'high': c['high'],
-                             'low': c['low'], 'close': c['close'],
-                             'volume': c['volume'] / 60,
-                             'taker_buy': c['taker_buy'] / 60})
-                raw_1m_ts.add(bucket)
-                filled_h += 1
-
-    total_filled = filled + filled_h
-    if total_filled:
+    if filled:
         tf1m.sort(key=lambda b: b['ts'])
-        print(f"  +{filled} 1m candle bars  +{filled_h} from 1h candles merged into gaps")
+        print(f"  +{filled} 1m candle bars merged")
         tf5m  = _agg(tf1m, 300_000)
         tf15m = _agg(tf1m, 900_000)
         tf1h  = _agg(tf1m, 3_600_000)
