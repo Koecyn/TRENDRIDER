@@ -1515,7 +1515,7 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         return
     state.closed_1m = list(tf1m[:-1])
     seed_bars = state.closed_1m[-250:]
-    if len(seed_bars) < 15:
+    if len(seed_bars) < 3:
         return
 
     c, o, v, t = _bars2arr(seed_bars)
@@ -1672,10 +1672,9 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             # use the incremental path instead of re-entering seed on every tick
             state.last_sec = tf1m[-1]['ts'] // 1000
             return []
-        # Session runs from the very first second of collected data, not bounded
-        # by trade count or a fixed lookback window.  OB-only seconds advance
-        # time with no price change; phase transitions only fire on trade closes.
-        start_at = all_secs[0]
+        # Only replay the last 120 seconds — state is seeded from candles.
+        # Replaying full raw history on restart causes >60s startup delay.
+        start_at = max(all_secs[0], all_secs[-1] - 119)
     else:
         # Subsequent calls: only parse lines newer than last processed second
         cutoff_ms = state.last_sec * 1000
@@ -1750,7 +1749,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             partial = {'open':p_opens[0],'high':max(p_closes),'low':min(p_closes),
                        'close':p_close,'volume':sum(p_vols),'taker_buy':sum(p_tb)}
             window = state.closed_1m[-200:] + [partial]
-            if len(window) < 15: continue
+            if len(window) < 3: continue
 
             closes_a, opens_a, volumes_a, taker_buy_a = _bars2arr(window)
             bids, asks = ob_by_sec.get(sec, ([], []))
