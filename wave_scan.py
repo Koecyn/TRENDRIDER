@@ -129,8 +129,8 @@ def _extend_s1(s1_by_sec: dict, ob_by_sec: dict, raw_lines: list, seed_close=Non
             trade_by_sec[sec].append((rec[2]/100, rec[3]/10000, rec[4]))
         elif rec[0] == 'D':
             sec = rec[1] // 1000
-            ob_by_sec[sec] = ([(p/100, q/10000) for p,q in rec[2][:5]],
-                              [(p/100, q/10000) for p,q in rec[3][:5]])
+            ob_by_sec[sec] = ([(p/100, q/10000) for p,q in rec[2][:20]],
+                              [(p/100, q/10000) for p,q in rec[3][:20]])
 
     last_close = seed_close   # candle close anchors price before first live trade
     last_ob    = None
@@ -189,8 +189,8 @@ def _build_tfs(raw_lines):
         elif rec[0] == 'D':
             _, ts, bids, asks = rec
             sec = ts // 1000
-            ob_by_sec[sec] = ([(p/100,q/10000) for p,q in bids[:5]],
-                              [(p/100,q/10000) for p,q in asks[:5]])
+            ob_by_sec[sec] = ([(p/100,q/10000) for p,q in bids[:20]],
+                              [(p/100,q/10000) for p,q in asks[:20]])
 
     all_secs = sorted(set(list(trade_by_sec.keys()) + list(ob_by_sec.keys())))
     if not all_secs:
@@ -335,6 +335,42 @@ def _ob_conc(bids, asks, mid, w=None):
 
 def _ob_spr(bids, asks):
     return asks[0][0]-bids[0][0] if bids and asks else 99.0
+
+def _ob_gravity(bids, asks, mid):
+    """
+    Locate the nearest significant bid/ask walls and volume-weighted
+    centres of gravity.  All return values are $ distances from mid.
+
+    Wall = first level (scanning outward from mid) whose volume meets or
+    exceeds the per-side average.  When no single level dominates (uniform
+    thin book), the wall falls back to the CoG so we never falsely report
+    a tight floor on a uniformly empty book.
+
+    bid_wall_dist large = air gap: the next sell order travels that far
+    before landing on real bids.  This bridges the gap between "OBI looks
+    positive" and "there is actually a floor here."
+    """
+    def _side(levels):
+        if not levels:
+            return float('inf'), float('inf')
+        vols  = [q for _, q in levels]
+        total = sum(vols)
+        if total == 0:
+            return float('inf'), float('inf')
+        avg = total / len(vols)
+        cog = sum(abs(p - mid) * q for p, q in levels) / total
+        wall = float('inf')
+        for price, qty in levels:     # sorted closest-to-mid first
+            if qty >= avg:
+                wall = abs(price - mid)
+                break
+        if wall == float('inf'):
+            wall = cog                # no dominant level → use centre of mass
+        return wall, cog
+
+    bid_wd,  bid_cog  = _side(bids)
+    ask_wd,  ask_cog  = _side(asks)
+    return bid_wd, ask_wd, bid_cog, ask_cog
 
 
 # ── KnifeDecayBuffer ──────────────────────────────────────────────────────────
@@ -512,7 +548,7 @@ class KnifeDecayBuffer:
             if ask_r < ref.get('ask_flow', 0): sc += 0.05   # sellers more withdrawn
         return min(1.0, sc)
 
-    def _floor_score(self, conc, spr, mid=None):
+    def _floor_score(self, conc, spr, mid=None, bids=None, asks=None):
         """0→1: OB confirmation that a floor is forming at current price."""
         vel = self._vel()
         sc = 0.0
@@ -526,7 +562,21 @@ class KnifeDecayBuffer:
         if self.spr_cnt >= 3:   sc += 0.10
         if self.spr_cnt >= 8:   sc += 0.05
         sc += self._flow_walking_score() * 0.30
-        return min(1.0, sc)
+        # Bid gravity: WHERE is the nearest real bid wall?
+        # Positive OBI means nothing if the wall is $40 below mid — any sell
+        # order just teleports through the air gap to where bids actually are.
+        if bids and asks and mid:
+            spr_eff = max(spr, mid * 0.00001) if mid > 0 else 0.01
+            bid_wd, ask_wd, bid_cog, _ = _ob_gravity(bids, asks, mid)
+            if   bid_wd < spr_eff * 5:   sc += 0.20   # wall right here
+            elif bid_wd < spr_eff * 15:  sc += 0.10   # wall nearby
+            elif bid_wd > spr_eff * 30:  sc -= 0.15   # air gap — penalise
+            # Bulk of bid liquidity close to mid
+            if   bid_cog < spr_eff * 10: sc += 0.08
+            elif bid_cog < spr_eff * 25: sc += 0.04
+            # Sellers retreated (ask wall far) → floor has room to hold
+            if ask_wd > spr_eff * 15:    sc += 0.05
+        return min(1.0, max(0.0, sc))
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -601,7 +651,7 @@ class KnifeDecayBuffer:
         # ── State machine ────────────────────────────────────────────────
 
         ds  = self._decay_score()
-        fos = self._floor_score(cnc, spr, mid=mid)
+        fos = self._floor_score(cnc, spr, mid=mid, bids=bids, asks=asks)
         n   = len(self.lows)
 
         if self.phase == 'FLAT' and n == 0:
