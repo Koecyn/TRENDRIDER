@@ -259,7 +259,7 @@ def backfill_local(verbose=True):
     #   local file  → last bar + 1 min
     #   remote file → last bar + 1 min  (uses cached git objects, no fetch)
     #   nothing     → last 96 min only (one session window, minimal)
-    MIN_BARS = 30
+    MIN_BARS = 31   # tf1m[:-1] strips last bar, need 31 to seed 30
     existing_1m = _load_local(FNAME_1M)
     if existing_1m:
         start_1m = existing_1m[-1][0] + 60_000
