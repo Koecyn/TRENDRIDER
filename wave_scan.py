@@ -1092,6 +1092,12 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 confirm_str = 'knife-floor'
                 fail_reason = ''
 
+            # (1b) Hard minimum: TROUGH-REV requires confirmed DECAY pattern.
+            #      OBI alone at KNIFE state fires premature longs into downtrends.
+            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < KnifeDecayBuffer.DCONF:
+                passed      = False
+                fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<DECAY'
+
             # (2) Annotate passed TROUGH-REV signals with decay confidence.
             if passed and cand_stype == 'TROUGH-REV':
                 if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
@@ -1583,6 +1589,10 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                     and cand_stype == 'TROUGH-REV'
                     and cand_dec_state >= KnifeDecayBuffer.FLOCK):
                 passed = True; confirm_str = 'knife-floor'; fail_reason = ''
+
+            # Hard minimum: TROUGH-REV requires confirmed DECAY pattern.
+            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < KnifeDecayBuffer.DCONF:
+                passed = False; fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<DECAY'
 
         state.hist_scores.append(abs(final['score']))
         state.hist_phases.append(final['micro_phase'])
