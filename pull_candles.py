@@ -263,13 +263,9 @@ def backfill_local(verbose=True):
     existing_1m = _load_local(FNAME_1M)
     if existing_1m:
         start_1m = existing_1m[-1][0] + 60_000
-        # Ensure combined result will have at least MIN_BARS
-        if len(existing_1m) < MIN_BARS:
-            start_1m = min(start_1m, end_ms - MIN_BARS * 60_000)
     else:
-        remote_end = _last_remote_1m()
-        start_1m   = (remote_end + 60_000 if remote_end
-                      else end_ms - MIN_BARS * 60_000)
+        # No local file — always pull MIN_BARS regardless of remote state
+        start_1m = end_ms - MIN_BARS * 60_000
 
     # Gap start for 1h: same logic
     existing_1h = _load_local("BTCUSDT_1h.json.gz")
