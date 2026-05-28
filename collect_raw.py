@@ -227,10 +227,17 @@ def _scan_loop():
                             br, ar = buf._flow_rates()
                             ds   = round(buf._decay_score(), 3)
                             fos  = round(buf._floor_score(conc, spr), 3)
+                            thr = _ws._thresholds(
+                                state.hist_scores, state.hist_phases,
+                                state.hist_obi, state.hist_kdv_bals,
+                                state.hist_aligns)
+                            thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = thr
                             live = {
                                 'at':        datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
                                 'price':     round(mid, 2),
+                                # ── live indicators ──────────────────────────
                                 'obi':       obi,
+                                'obi_need':  round(obi_conf, 3),
                                 'conc':      conc,
                                 'spr':       spr,
                                 'vel':       vel,
@@ -241,8 +248,14 @@ def _scan_loop():
                                 'decay_sc':  ds,
                                 'floor_sc':  fos,
                                 'score':     round(state.hist_scores[-1], 3) if state.hist_scores else None,
+                                'score_need': round(thresh, 3),
                                 'kdv_bal':   round(state.hist_kdv_bals[-1], 3) if state.hist_kdv_bals else None,
+                                'kdv_need_rev':  round(gate_rev, 3),
+                                'kdv_need_cont': round(gate_cont, 3),
                                 'micro_ph':  round(state.hist_phases[-1], 3) if state.hist_phases else None,
+                                'micro_ph_peak':   round(peak_ph, 3),
+                                'micro_ph_trough': round(trough_ph, 3),
+                                'align_need': round(align_cont, 3),
                             }
                     except Exception:
                         pass
