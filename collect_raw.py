@@ -209,11 +209,27 @@ def _scan_loop():
 
                 now = time.time()
                 if new_sigs or (now - last_push_time >= SIG_PUSH_S):
+                    live = {}
+                    try:
+                        if state.s1_by_sec:
+                            last_sec = max(state.s1_by_sec)
+                            bar = state.s1_by_sec[last_sec]
+                            bids, asks = bar['ob']
+                            bv = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
+                            obi = round((bv-av)/(bv+av), 3) if bv+av else 0.0
+                            live = {
+                                'price': round(bar['close'], 2),
+                                'obi':   obi,
+                                'at':    datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
+                            }
+                    except Exception:
+                        pass
                     summary = {
                         'signal_count': state.sig_count,
                         'signals':      state.signals,
                         'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                         'new_this_run': len(new_sigs),
+                        'live':         live,
                     }
                     if not _push_signals('', summary):
                         log('sig push failed', R)
