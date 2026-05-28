@@ -1287,10 +1287,13 @@ class ScanState:
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
 
 
-def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict):
+def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
+                             raw_lines=None):
     """
     Pre-populate state from closed 1m bars using vectorized rolling physics.
     One numpy pass over the last 250 candles instead of 200 fusion.run() calls.
+    knife_buf is seeded from the actual raw T/D stream (sub-second resolution)
+    so _vel() has real data points within its 5s window.
     """
     from physics.signals import rolling_physics, rolling_score
     if len(tf1m) < 2:
@@ -1329,16 +1332,41 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict):
         state.hist_kdv_bals.append(0.0 if np.isnan(kd) else float(abs(kd)))
         state.hist_aligns.append(0.5)
 
-    # Seed knife buffer phase from candle price structure so the scanner knows
-    # the current swing context (FLAT/FALLING/BOUNCE/lows) on the very first tick.
-    # OB data from candles is sparse — decay/floor scores stay 0 until live depth
-    # flows in, but phase and swing lows are price-only and seed correctly here.
+    # Seed knife buffer from real raw tick stream (sub-second T/D records).
+    # Each depth snapshot is a genuine OB tick with real price + bid/ask data,
+    # so _vel() (5s rolling window) computes actual velocity correctly.
+    # This mirrors _build_decay_states exactly.
     buf = state.knife_buf
-    for b in seed_bars:
-        ts_ms = b['ts']
-        close = float(b['close'])
-        bids, asks = ob_by_sec.get(ts_ms // 1000, ([], []))
-        buf.update(ts_ms, close, bids, asks)
+    last_px = None
+    if raw_lines:
+        recs = []
+        for ln in raw_lines:
+            if not ln: continue
+            try: r = json.loads(ln)
+            except Exception: continue
+            if r[0] not in ('T', 'D'): continue
+            recs.append(r)
+        recs.sort(key=lambda r: r[1])
+        for r in recs:
+            ts_ms = r[1]
+            if r[0] == 'T':
+                last_px = r[2] / 100
+            elif r[0] == 'D':
+                bids = [(p/100, q/10000) for p,q in r[2][:20]]
+                asks = [(p/100, q/10000) for p,q in r[3][:20]]
+                mid  = (bids[0][0]+asks[0][0])/2.0 if bids and asks else last_px
+                if mid is None: continue
+                px = last_px if last_px is not None else mid
+                buf.update(ts_ms, px, bids, asks)
+    else:
+        # Fallback when raw_lines not available: candle closes (1 min apart).
+        # _vel() will return 0 since ticks are outside its 5s window; phase
+        # and swing-low structure are still seeded correctly from price levels.
+        for b in seed_bars:
+            ts_ms = b['ts']
+            close = float(b['close'])
+            bids, asks = ob_by_sec.get(ts_ms // 1000, ([], []))
+            buf.update(ts_ms, close, bids, asks)
 
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
@@ -1364,7 +1392,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         state.tf1m  = tf1m;  state.tf5m  = tf5m
         state.tf15m = tf15m; state.tf1h  = tf1h
         state.tf4h  = tf4h;  state.ob_by_sec = ob_by_sec
-        _seed_state_from_candles(state, tf1m, ob_by_sec)
+        _seed_state_from_candles(state, tf1m, ob_by_sec, raw_lines=raw)
         s1_by_sec = {b['ts']//1000: b for b in s1}
         state.s1_by_sec = s1_by_sec
         trade_secs = sorted(s for s in s1_by_sec if s1_by_sec[s]['volume'] > 0)
