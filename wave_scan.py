@@ -235,8 +235,8 @@ def _build_tfs(raw_lines):
             raw_1m_ts.add(bucket)
             filled += 1
 
-    # Also fill from 1h candles — last 168 bars (1 week) is sufficient
-    candles_1h = _fetch_candles_1h()[-168:]
+    # Also fill from 1h candles — last 12 bars (12 hours) is sufficient
+    candles_1h = _fetch_candles_1h()[-12:]
     filled_h   = 0
     for c in candles_1h:
         h_bucket = (c['ts'] // 3_600_000) * 3_600_000
