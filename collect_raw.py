@@ -104,13 +104,19 @@ def _git_push_worker():
                 if sz == 0:
                     log(f'raw: gz empty', R)
                     continue
-                env_gc = {**os.environ, 'GIT_NO_AUTO_GC': '1',
-                          'GIT_INDEX_FILE': str(TMP_IDX)}
+                env_gc  = {**os.environ, 'GIT_NO_AUTO_GC': '1',
+                           'GIT_INDEX_FILE': str(TMP_IDX)}
+                env_obj = {**os.environ, 'GIT_NO_AUTO_GC': '1'}  # no index for hash-object
                 TMP_IDX.unlink(missing_ok=True)
-                r = _run('git', 'hash-object', '-w', str(gz_path))
+                r = _run('git', 'hash-object', '-w', str(gz_path), env=env_obj)
                 blob = r.stdout.strip()
                 if not blob:
-                    log(f'raw: hash-object failed (sz={sz}): {r.stderr.strip()[:120]}', R)
+                    # One retry after clearing any stale locks
+                    _clear_git_locks()
+                    r = _run('git', 'hash-object', '-w', str(gz_path), env=env_obj)
+                    blob = r.stdout.strip()
+                if not blob:
+                    log(f'raw: hash-object failed (sz={sz}): {r.stderr.strip()[:200]}', R)
                     continue
                 _run('git', 'update-index', '--add',
                      '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env_gc)
@@ -310,8 +316,10 @@ def _push_loop():
                 if not _raw_deque: continue
                 lines = list(_raw_deque)
 
-            with gzip.open(GZ_FILE, 'wt', compresslevel=1) as f:
+            tmp = GZ_FILE.with_suffix('.tmp')
+            with gzip.open(tmp, 'wt', compresslevel=1) as f:
                 f.write('\n'.join(lines))
+            os.replace(tmp, GZ_FILE)   # atomic: push thread never sees 0-byte file
 
             # Queue for git push — drop if queue is full (push still in progress)
             try:
