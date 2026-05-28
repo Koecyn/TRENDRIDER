@@ -67,6 +67,19 @@ def _existing_1m_end():
     return None
 
 
+def fetch_seed_bars(n=31):
+    """Fetch last n closed 1m bars directly from exchange. Returns bar dicts. No files."""
+    now_ms  = int(time.time() * 1000)
+    end_ms  = now_ms - 60_000          # exclude the live (unclosed) minute
+    start_ms = end_ms - n * 60_000
+    bars = _fetch_klines("1m", start_ms, end_ms)
+    print(f"[candles] seed: {len(bars)} x 1m bars from exchange", flush=True)
+    return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
+             'low': float(k[3]), 'close': float(k[4]),
+             'volume': float(k[5]), 'taker_buy': float(k[6])}
+            for k in bars]
+
+
 def _fetch_klines(interval, start_ms, end_ms):
     """Fetch klines for given interval from start_ms to end_ms."""
     step_ms = 3_600_000 if interval == "1h" else 60_000

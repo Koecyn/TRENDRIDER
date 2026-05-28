@@ -194,7 +194,7 @@ def _push_signals(txt: str, summary: dict) -> bool:
 
 # ── Scan loop — triggered by on_trade, reads deque directly ───────────────────
 
-def _scan_loop():
+def _scan_loop(seed_bars=None):
     try:
         import traceback
         sys.path.insert(0, str(REPO))
@@ -205,7 +205,13 @@ def _scan_loop():
         state          = _ws.ScanState()
         last_push_time = 0.0
 
-        # Wait for the deque to have data before seeding
+        # Seed directly from exchange bars — no deque needed for startup
+        log('scanner: seeding from exchange bars…', Y)
+        _ws.scan_incremental(state, raw_lines=[], signals_only=True,
+                             seed_bars=seed_bars or [])
+        log(f'scanner: ready | seeded {len(state.closed_1m)} bars', G)
+
+        # Wait for first live data
         log('scanner: waiting for first data…', Y)
         while True:
             _scan_trigger.wait(timeout=2.0)
@@ -213,12 +219,6 @@ def _scan_loop():
                 has_data = len(_raw_deque) > 0
             if has_data:
                 break
-
-        log('scanner: seeding from history…', Y)
-        with _deque_lock:
-            snapshot = list(_raw_deque)
-        _ws.scan_incremental(state, raw_lines=snapshot, signals_only=True)
-        log(f'scanner: ready | {state.sig_count} historical signals', G)
 
         while True:
             try:
@@ -402,15 +402,16 @@ async def stream():
 
 
 if __name__ == '__main__':
+    _seed_bars = []
     try:
         import pull_candles
-        pull_candles.backfill_local(verbose=True)
+        _seed_bars = pull_candles.fetch_seed_bars(31)
     except Exception as e:
-        log(f'candle backfill (non-fatal): {e}', R)
+        log(f'candle seed (non-fatal): {e}', R)
 
-    threading.Thread(target=_push_loop,       daemon=True).start()
-    threading.Thread(target=_git_push_worker, daemon=True).start()
-    threading.Thread(target=_scan_loop,       daemon=True).start()
+    threading.Thread(target=_push_loop,                    daemon=True).start()
+    threading.Thread(target=_git_push_worker,              daemon=True).start()
+    threading.Thread(target=_scan_loop, args=(_seed_bars,), daemon=True).start()
 
     loop = asyncio.new_event_loop()
     task = loop.create_task(stream())

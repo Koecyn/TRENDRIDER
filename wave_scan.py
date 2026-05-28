@@ -1627,27 +1627,23 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
                      signals_only: bool = True,
-                     raw_lines: list = None) -> list:
+                     raw_lines: list = None,
+                     seed_bars: list = None) -> list:
     """
     Incremental scan — fast live scanner.
 
-    First call: seeds closed_1m + thresholds from 1m candles (one fusion call
-    per candle, not per second), then runs tick-by-tick for the last _LIVE_MINS.
-    Subsequent calls: only processes new seconds since last call (~60 ticks).
+    First call: seeds state from exchange bars passed in directly.
+    Subsequent calls: processes new seconds from the raw deque.
     Returns list of new signal dicts emitted this call.
-
-    raw_lines: if provided, use directly instead of reading from disk.
     """
     raw = raw_lines if raw_lines is not None else _fetch_raw()
 
     if not state.last_sec:
         import time as _t
         now_s = int(_t.time())
-        # 30 exchange bars seed the state directly — no raw processing
-        tf1m = _fetch_candles_1m()
+        tf1m  = seed_bars or []
         if not tf1m:
             return []
-        state.closed_1m = tf1m
         _seed_state_from_candles(state, tf1m, {}, raw_lines=None)
         state.s1_by_sec = {}
         state.ob_by_sec = {}
