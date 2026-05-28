@@ -80,9 +80,14 @@ def fetch_seed_bars(n=31):
             for k in bars]
 
 
+_INTERVAL_MS = {
+    '1m': 60_000, '5m': 300_000, '15m': 900_000,
+    '1h': 3_600_000, '4h': 14_400_000,
+}
+
 def _fetch_klines(interval, start_ms, end_ms):
     """Fetch klines for given interval from start_ms to end_ms."""
-    step_ms = 3_600_000 if interval == "1h" else 60_000
+    step_ms = _INTERVAL_MS.get(interval, 60_000)
     bars = []
     cursor = start_ms
     while cursor < end_ms:

@@ -177,6 +177,26 @@ def _extend_s1(s1_by_sec: dict, ob_by_sec: dict, raw_lines: list, seed_close=Non
                           'ob': last_ob or ([], [])}
 
 
+def _agg(bars, period_ms):
+    """Aggregate 1m (or any) bars into a higher timeframe by period_ms."""
+    by_period = collections.defaultdict(list)
+    for b in bars:
+        by_period[(b['ts'] // period_ms) * period_ms].append(b)
+    result = []
+    for p in sorted(by_period):
+        sl = by_period[p]
+        result.append({
+            'ts':        p,
+            'open':      sl[0]['open'],
+            'high':      max(b['high'] for b in sl),
+            'low':       min(b['low']  for b in sl),
+            'close':     sl[-1]['close'],
+            'volume':    sum(b['volume'] for b in sl),
+            'taker_buy': sum(b['taker_buy'] for b in sl),
+        })
+    return result
+
+
 def _build_tfs(raw_lines):
     trade_by_sec = collections.defaultdict(list)
     ob_by_sec    = {}
@@ -223,24 +243,6 @@ def _build_tfs(raw_lines):
         s1.append({'ts':sec*1000,'open':o,'high':h,'low':l,'close':c,
                    'volume':vol,'taker_buy':tb,
                    'ob':last_ob or ([],[])})
-
-    def _agg(s1_bars, period_ms):
-        by_period = collections.defaultdict(list)
-        for b in s1_bars:
-            by_period[(b['ts']//period_ms)*period_ms].append(b)
-        result = []
-        for p in sorted(by_period):
-            sl = by_period[p]
-            result.append({
-                'ts':        p,
-                'open':      sl[0]['open'],
-                'high':      max(b['high'] for b in sl),
-                'low':       min(b['low']  for b in sl),
-                'close':     sl[-1]['close'],
-                'volume':    sum(b['volume'] for b in sl),
-                'taker_buy': sum(b['taker_buy'] for b in sl),
-            })
-        return result
 
     tf1m  = _agg(s1, 60_000)
     tf5m  = _agg(s1, 300_000)
@@ -1235,11 +1237,11 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             # MIN_PROFIT_USD above entry — no point entering if a sell wall is
             # sitting $10 above.
             if passed:
-                from physics import config as C
-                MIN_P = C.MIN_PROFIT_USD
-                atr1,  r1,  pnl1u  = _atr_ratio(closed_1m,  C.ATR_WINDOW)
-                atr5,  r5,  pnl5u  = _atr_ratio(b5,          C.ATR_WINDOW)
-                atr15, r15, pnl15u = _atr_ratio(b15,          C.ATR_WINDOW)
+                from physics import config as _cfg
+                MIN_P = _cfg.MIN_PROFIT_USD
+                atr1,  r1,  pnl1u  = _atr_ratio(closed_1m,  _cfg.ATR_WINDOW)
+                atr5,  r5,  pnl5u  = _atr_ratio(b5,          _cfg.ATR_WINDOW)
+                atr15, r15, pnl15u = _atr_ratio(b15,          _cfg.ATR_WINDOW)
 
                 # Direction-aware pnl: longs need upward leg, shorts need downward
                 is_long  = cand_dir > 0
@@ -1505,6 +1507,11 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         print(f'[seed] BAIL — need 30, got {len(seed_bars)}', flush=True)
         return
 
+    # Derive HTF bars from all closed seed 1m bars
+    _update_htf(state)
+    print(f'[seed] HTF: {len(state.tf5m)}x5m  {len(state.tf15m)}x15m  '
+          f'{len(state.tf1h)}x1h  {len(state.tf4h)}x4h', flush=True)
+
     c, o, v, t = _bars2arr(seed_bars)
     prices = (c + o) / 2.0
 
@@ -1627,7 +1634,18 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
                     buf.update(ts_ms, px, bids, asks)
 
 
-def _append_closed_1m(state: ScanState, s1_by_sec: dict, min_sec: int):
+def _update_htf(state: 'ScanState'):
+    """Re-derive 5m/15m/1h/4h from state.closed_1m (cheap O(n), called after each 1m close)."""
+    bars = state.closed_1m
+    if not bars:
+        return
+    state.tf5m  = _agg(bars, 300_000)
+    state.tf15m = _agg(bars, 900_000)
+    state.tf1h  = _agg(bars, 3_600_000)
+    state.tf4h  = _agg(bars, 14_400_000)
+
+
+def _append_closed_1m(state: 'ScanState', s1_by_sec: dict, min_sec: int):
     """Build a complete 1m bar from all per-second bars in s1_by_sec for min_sec."""
     secs = sorted(s for s in s1_by_sec if min_sec <= s < min_sec + 60)
     if not secs:
@@ -1643,6 +1661,7 @@ def _append_closed_1m(state: ScanState, s1_by_sec: dict, min_sec: int):
         'taker_buy': sum(b['taker_buy'] for b in bars),
     })
     state.appended_min_ts.add(min_sec)
+    _update_htf(state)
 
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
