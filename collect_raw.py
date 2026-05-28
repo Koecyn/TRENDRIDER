@@ -237,7 +237,7 @@ def _scan_loop():
                             vel  = round(buf._vel(), 3)
                             br, ar = buf._flow_rates()
                             ds   = round(buf._decay_score(), 3)
-                            fos  = round(buf._floor_score(conc, spr), 3)
+                            fos  = round(buf._floor_score(conc, spr, mid=mid, bids=bids, asks=asks), 3)
                             thr = _ws._thresholds(
                                 state.hist_scores, state.hist_phases,
                                 state.hist_obi, state.hist_kdv_bals,

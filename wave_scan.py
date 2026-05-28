@@ -196,7 +196,15 @@ def _build_tfs(raw_lines):
     if not all_secs:
         return [], [], [], [], [], [], {}
 
-    s1 = []; last_close = None; last_ob = None
+    # Seed last_close from candle history so OB-only seconds before the first
+    # live trade are included, not skipped.  Without this the session only
+    # starts at the first trade, leaving the OB dark until then.
+    _hist = _fetch_candles_1m()
+    first_live_ms = all_secs[0] * 1000
+    _prior = [c for c in _hist if c['ts'] < first_live_ms]
+    seed_close = _prior[-1]['close'] if _prior else None
+
+    s1 = []; last_close = seed_close; last_ob = None
     for sec in range(all_secs[0], all_secs[-1]+1):
         trades = trade_by_sec.get(sec, [])
         if trades:
@@ -1493,9 +1501,10 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             # use the incremental path instead of re-entering seed on every tick
             state.last_sec = tf1m[-1]['ts'] // 1000
             return []
-        trade_secs = [s for s in all_secs if s1_by_sec[s]['volume'] > 0]
-        t_end    = trade_secs[-1] if trade_secs else all_secs[-1]
-        start_at = t_end - _LIVE_MINS * 60
+        # Session runs from the very first second of collected data, not bounded
+        # by trade count or a fixed lookback window.  OB-only seconds advance
+        # time with no price change; phase transitions only fire on trade closes.
+        start_at = all_secs[0]
     else:
         # Subsequent calls: only parse lines newer than last processed second
         cutoff_ms = state.last_sec * 1000
