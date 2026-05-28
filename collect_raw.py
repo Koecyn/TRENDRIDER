@@ -97,13 +97,20 @@ def _git_push_worker():
         try:
             with _git_lock:
                 _clear_git_locks()
+                if not gz_path.exists():
+                    log(f'raw: gz missing {gz_path}', R)
+                    continue
+                sz = gz_path.stat().st_size
+                if sz == 0:
+                    log(f'raw: gz empty', R)
+                    continue
                 env_gc = {**os.environ, 'GIT_NO_AUTO_GC': '1',
                           'GIT_INDEX_FILE': str(TMP_IDX)}
                 TMP_IDX.unlink(missing_ok=True)
                 r = _run('git', 'hash-object', '-w', str(gz_path))
                 blob = r.stdout.strip()
                 if not blob:
-                    log(f'raw: hash-object failed: {r.stderr.strip()[:80]}', R)
+                    log(f'raw: hash-object failed (sz={sz}): {r.stderr.strip()[:120]}', R)
                     continue
                 _run('git', 'update-index', '--add',
                      '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env_gc)
@@ -379,7 +386,7 @@ async def stream():
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log(f'error ({e}) retry {backoff}s', R)
+                log(f'error ({type(e).__name__}: {e}) retry {backoff}s', R)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff*2, 60)
     finally:
