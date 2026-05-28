@@ -93,6 +93,10 @@ RES_SIZE_REDUCE     = 0.70   # size multiplier at dissonance or low alignment (<
 MIN_BANDS_TO_SIGNAL = 2      # minimum active bands before signal is valid
 KDV_MIN_BALANCE     = 4.0    # minimum KdV nonlinearity/dispersion ratio to count
 
+# ── Per-TF profitability gates ────────────────────────────────────────────────
+MIN_PROFIT_USD = 20.0        # minimum profitable move ($) — constant across all TFs
+ATR_WINDOW     = 14          # bars for ATR + direction-ratio computation
+
 # ── Data / backtest ───────────────────────────────────────────────────────────
 SYMBOL        = 'BTCUSDT'
 INTERVAL      = '1m'

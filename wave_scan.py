@@ -387,6 +387,41 @@ def _ob_gravity(bids, asks, mid):
     return bid_wd, ask_wd, bid_cog, ask_cog
 
 
+def _atr_ratio(bars, window=14):
+    """ATR + up/down direction ratio for per-TF profitability assessment.
+    Returns (atr, up_ratio, up_pnl) in dollars.
+    up_pnl = ATR × up_ratio = expected upward component of the range.
+    A $80 ATR with 0.25 up_ratio → $20 up_pnl: profitable on that TF.
+    """
+    if len(bars) < window + 1:
+        return _EPS, 0.5, _EPS
+    trs, ups, dns = [], [], []
+    for i in range(-window, 0):
+        b  = bars[i]; pc = bars[i-1]['close']
+        h  = b.get('high', b['close']); l = b.get('low', b['close'])
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        ups.append(max(0.0, h - pc))
+        dns.append(max(0.0, pc - l))
+    atr    = sum(trs) / len(trs)
+    tot    = sum(ups) + sum(dns)
+    up_rat = sum(ups) / tot if tot > 0 else 0.5
+    return max(atr, _EPS), up_rat, max(atr * up_rat, _EPS)
+
+
+def _ob_room_above(asks, price, min_dist):
+    """Check if the nearest significant ask wall is >= min_dist above price.
+    Significant = first ask level at or above average per-level volume.
+    Returns (has_room: bool, wall_dist: float, note: str).
+    """
+    if not asks:
+        return True, float('inf'), 'no-wall'
+    vols = [q for _, q in asks]
+    avg  = sum(vols) / len(vols)
+    wall = next((p for p, q in asks if q >= avg), asks[-1][0])
+    dist = wall - price
+    return dist >= min_dist, dist, f'wall@{wall:.0f}(+{dist:.0f})'
+
+
 # ── KnifeDecayBuffer ──────────────────────────────────────────────────────────
 
 class KnifeDecayBuffer:
@@ -1209,6 +1244,55 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
                 elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
                 elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
+
+            # (3) Per-TF ATR profitability gate + OB room gate.
+            # Each TF's ATR × up_ratio must reach MIN_PROFIT_USD.
+            # Try 1m first; if blocked, try 5m (requires 5m momentum not firmly
+            # down); then 15m.  OB room: nearest significant ask wall must be
+            # MIN_PROFIT_USD above entry — no point entering if a sell wall is
+            # sitting $10 above.
+            if passed:
+                from physics import config as C
+                MIN_P = C.MIN_PROFIT_USD
+                atr1,  r1,  pnl1  = _atr_ratio(closed_1m,    C.ATR_WINDOW)
+                atr5,  r5,  pnl5  = _atr_ratio(b5,            C.ATR_WINDOW)
+                atr15, r15, pnl15 = _atr_ratio(b15,           C.ATR_WINDOW)
+
+                sig_tf = None; atr_note = ''
+                if pnl1 >= MIN_P:
+                    sig_tf   = '1m'
+                    atr_note = f'1m:${pnl1:.0f}(atr={atr1:.0f}×{r1:.2f})'
+                elif pnl5 >= MIN_P:
+                    sc5  = res_out.get('tf_scores', {}).get('5m', 0.0)
+                    t5m_ = htf_ctx.get('trend_5m', 'down')
+                    if t5m_ != 'down' or sc5 > -0.3:
+                        sig_tf   = '5m'
+                        atr_note = (f'5m:${pnl5:.0f}(atr={atr5:.0f}×{r5:.2f})'
+                                    f'+1m-blocked(${pnl1:.0f}<${MIN_P:.0f})')
+                    else:
+                        passed      = False
+                        fail_reason = f'5m-momentum-down(sc={sc5:.2f},t={t5m_})'
+                elif pnl15 >= MIN_P:
+                    t15_ = htf_ctx.get('trend_15m', 'down')
+                    if t15_ != 'down':
+                        sig_tf   = '15m'
+                        atr_note = f'15m:${pnl15:.0f}(atr={atr15:.0f}×{r15:.2f})'
+                    else:
+                        passed      = False
+                        fail_reason = f'15m-trend-down,atr-pnl=${pnl15:.0f}'
+                else:
+                    passed      = False
+                    fail_reason = (f'atr-pnl:1m=${pnl1:.0f}'
+                                   f',5m=${pnl5:.0f},15m=${pnl15:.0f}<${MIN_P:.0f}')
+
+            if passed:
+                # OB room: sell wall must be >= MIN_P above entry price
+                room, wall_dist, room_note = _ob_room_above(asks, cand_entry, MIN_P)
+                if not room:
+                    passed      = False
+                    fail_reason = f'no-room({room_note}<${MIN_P:.0f})'
+                else:
+                    confirm_str += f'+tf={sig_tf}+{atr_note}+room=+${wall_dist:.0f}'
 
         # Record completed-minute stats for next minute's thresholds
         hist_scores.append(abs(final['score']))
