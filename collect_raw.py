@@ -272,7 +272,9 @@ def _check_update():
         branch = _run('git', 'rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
         if not branch or branch == 'HEAD': return
         with _git_lock:
-            _run('git', 'fetch', '--depth', '1', 'origin', branch)
+            r = _run('git', 'fetch', '--depth', '1', 'origin', branch)
+            if r.returncode != 0:
+                return   # fetch failed — objects incomplete, don't attempt reset
             local  = _run('git', 'rev-parse', 'HEAD').stdout.strip()
             remote = _run('git', 'rev-parse', 'FETCH_HEAD').stdout.strip()
             if not remote or remote == local: return
