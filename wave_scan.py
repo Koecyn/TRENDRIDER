@@ -1456,7 +1456,8 @@ class ScanState:
                  'hist_aligns', 'prev_kdv_global', 'last_sig_time',
                  'last_sig_dir', 'last_sig_price', 'sig_count',
                  'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
-                 's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals')
+                 's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
+                 'appended_min_ts')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1480,6 +1481,7 @@ class ScanState:
         self.ob_by_sec        = {}
         self.knife_buf        = KnifeDecayBuffer()
         self.signals          = []   # list of signal dicts emitted so far
+        self.appended_min_ts  = set()
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
@@ -1623,6 +1625,24 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
                     if mid is None: continue
                     px = last_px if last_px is not None else mid
                     buf.update(ts_ms, px, bids, asks)
+
+
+def _append_closed_1m(state: ScanState, s1_by_sec: dict, min_sec: int):
+    """Build a complete 1m bar from all per-second bars in s1_by_sec for min_sec."""
+    secs = sorted(s for s in s1_by_sec if min_sec <= s < min_sec + 60)
+    if not secs:
+        return
+    bars = [s1_by_sec[s] for s in secs]
+    state.closed_1m.append({
+        'ts':        min_sec * 1000,
+        'open':      bars[0]['open'],
+        'high':      max(b['high'] for b in bars),
+        'low':       min(b['low']  for b in bars),
+        'close':     bars[-1]['close'],
+        'volume':    sum(b['volume']    for b in bars),
+        'taker_buy': sum(b['taker_buy'] for b in bars),
+    })
+    state.appended_min_ts.add(min_sec)
 
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
@@ -1825,6 +1845,9 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                      'micro_sc':micro_sc,'micro_ph':micro_ph,'micro_kdv':micro_kdv}
 
         if not final:
+            if (s1_secs[-1] >= min_sec + 60
+                    and min_sec not in state.appended_min_ts):
+                _append_closed_1m(state, s1_by_sec, min_sec)
             continue
 
         # HTF + MTF
@@ -1917,16 +1940,9 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         kdv_f = final.get('kdv', 0)
         if kdv_f != 0: state.prev_kdv_global = kdv_f
 
-        if p_opens and p_closes:
-            state.closed_1m.append({
-                'ts':        min_sec * 1000,
-                'open':      p_opens[0],
-                'high':      max(p_closes),
-                'low':       min(p_closes),
-                'close':     p_closes[-1],
-                'volume':    sum(p_vols),
-                'taker_buy': sum(p_tb),
-            })
+        if (s1_secs[-1] >= min_sec + 60
+                and min_sec not in state.appended_min_ts):
+            _append_closed_1m(state, s1_by_sec, min_sec)
 
     if new_secs:
         state.last_sec = new_secs[-1]
