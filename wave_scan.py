@@ -1515,7 +1515,7 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         return
     state.closed_1m = list(tf1m[:-1])
     seed_bars = state.closed_1m[-250:]
-    if len(seed_bars) < 3:
+    if len(seed_bars) < 30:
         return
 
     c, o, v, t = _bars2arr(seed_bars)
@@ -1744,7 +1744,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             partial = {'open':p_opens[0],'high':max(p_closes),'low':min(p_closes),
                        'close':p_close,'volume':sum(p_vols),'taker_buy':sum(p_tb)}
             window = state.closed_1m[-200:] + [partial]
-            if len(window) < 3: continue
+            if len(window) < 10: continue
 
             closes_a, opens_a, volumes_a, taker_buy_a = _bars2arr(window)
             bids, asks = ob_by_sec.get(sec, ([], []))
