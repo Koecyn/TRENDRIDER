@@ -62,10 +62,6 @@ def _run(*a, env=None):
     return subprocess.run(list(a), capture_output=True, text=True,
                           cwd=str(REPO), env=env, timeout=GIT_TIMEOUT)
 
-def _run(*a, env=None):
-    return subprocess.run(list(a), capture_output=True, text=True,
-                          cwd=str(REPO), env=env)
-
 
 # ── Git push thread — reads from queue, never blocks the write loop ───────────
 
