@@ -1656,8 +1656,18 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
     raw = raw_lines if raw_lines is not None else _fetch_raw()
 
     if not state.last_sec:
-        # First call: build timeframes from raw + backfilled candles
-        s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(raw)
+        import time as _t
+        now_s = int(_t.time())
+        # Only pass recent raw to _build_tfs — exchange candles cover history.
+        # Processing hours of raw history on restart is redundant and slow.
+        cutoff_live = (now_s - 120) * 1000
+        recent_raw  = [ln for ln in raw if ln and _quick_ts(ln) >= cutoff_live]
+        s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(recent_raw)
+        # If no live ticks yet, load exchange candles directly
+        if not tf1m:
+            tf1m = _fetch_candles_1m()
+            tf5m = tf15m = tf1h = tf4h = []
+            ob_by_sec = {}
         if not tf1m:
             return []
         state.tf1m  = tf1m;  state.tf5m  = tf5m
@@ -1666,15 +1676,10 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         _seed_state_from_candles(state, tf1m, ob_by_sec, raw_lines=raw)
         s1_by_sec = {b['ts']//1000: b for b in s1}
         state.s1_by_sec = s1_by_sec
-        all_secs  = sorted(s1_by_sec.keys())
-        if not all_secs:
-            # No live second data yet — anchor to last candle so depth triggers
-            # use the incremental path instead of re-entering seed on every tick
-            state.last_sec = tf1m[-1]['ts'] // 1000
-            return []
-        # Only replay the last 120 seconds — state is seeded from candles.
-        # Replaying full raw history on restart causes >60s startup delay.
-        start_at = max(all_secs[0], all_secs[-1] - 119)
+        # Anchor to current second — no historical replay, exchange backfill
+        # already seeded the state. Incremental path picks up from here.
+        state.last_sec = now_s - 1
+        return []
     else:
         # Subsequent calls: only parse lines newer than last processed second
         cutoff_ms = state.last_sec * 1000
