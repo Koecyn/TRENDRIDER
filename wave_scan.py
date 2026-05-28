@@ -180,6 +180,14 @@ def _build_tfs(raw_lines):
         return [], [], [], [], [], [], {}
 
     s1 = []; last_close = None; last_ob = None
+
+    # Seed price from first OB snapshot so OB-only sessions (no trades) build bars
+    for sec in sorted(ob_by_sec.keys()):
+        bids, asks = ob_by_sec[sec]
+        if bids and asks:
+            last_close = (bids[0][0] + asks[0][0]) / 2.0
+            break
+
     for sec in range(all_secs[0], all_secs[-1]+1):
         trades = trade_by_sec.get(sec, [])
         if trades:
