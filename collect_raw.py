@@ -219,6 +219,7 @@ def _scan_loop(seed_bars=None):
                 has_data = len(_raw_deque) > 0
             if has_data:
                 break
+        log('scanner: live data flowing — starting main loop', G)
 
         while True:
             try:
@@ -292,6 +293,14 @@ def _scan_loop(seed_bars=None):
                     }
                     if not _push_signals('', summary):
                         log('sig push failed', R)
+                    else:
+                        px   = live.get('price', '?')
+                        ph   = live.get('phase', '?')
+                        ds   = live.get('decay_sc', '?')
+                        fos  = live.get('floor_sc', '?')
+                        sc   = live.get('score', '?')
+                        bars = len(state.closed_1m)
+                        log(f'push ok | ${px:,.2f}  {ph}  ds={ds}  fos={fos}  score={sc}  bars={bars}', Y)
                     last_push_time = time.time()
 
             except Exception:
