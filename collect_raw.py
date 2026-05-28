@@ -281,6 +281,10 @@ def _scan_loop(seed_bars=None):
                                 'micro_ph_peak':   round(peak_ph, 3),
                                 'micro_ph_trough': round(trough_ph, 3),
                                 'align_need': round(align_cont, 3),
+                                'res_align':  round(state.last_align, 3),
+                                'res_dir':    state.last_res_dir,
+                                'htf_sup':    state.last_htf_sup,
+                                'htf_bars':   f'{len(state.tf5m)}x5m {len(state.tf15m)}x15m {len(state.tf1h)}x1h {len(state.tf4h)}x4h',
                             }
                     except Exception:
                         pass
@@ -300,7 +304,10 @@ def _scan_loop(seed_bars=None):
                         fos  = live.get('floor_sc', '?')
                         sc   = live.get('score', '?')
                         bars = len(state.closed_1m)
-                        log(f'push ok | ${px:,.2f}  {ph}  ds={ds}  fos={fos}  score={sc}  bars={bars}', Y)
+                        res  = f'res={state.last_res_dir}@{state.last_align:.2f}'
+                        htf  = f'htf={len(state.tf5m)}x5m/{len(state.tf1h)}x1h'
+                        sup  = ' SUP' if state.last_htf_sup else ''
+                        log(f'push ok | ${px:,.2f}  {ph}  ds={ds}  fos={fos}  score={sc}  {res}  {htf}{sup}  bars={bars}', Y)
                     last_push_time = time.time()
 
             except Exception:

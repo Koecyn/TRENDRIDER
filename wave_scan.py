@@ -1459,7 +1459,7 @@ class ScanState:
                  'last_sig_dir', 'last_sig_price', 'sig_count',
                  'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
-                 'appended_min_ts')
+                 'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1484,6 +1484,9 @@ class ScanState:
         self.knife_buf        = KnifeDecayBuffer()
         self.signals          = []   # list of signal dicts emitted so far
         self.appended_min_ts  = set()
+        self.last_align       = 0.0
+        self.last_res_dir     = 0
+        self.last_htf_sup     = False
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
@@ -1879,6 +1882,10 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             dissonance = res_out.get('dissonance', False)
         except Exception:
             res_dir=0; align=0.0; dissonance=False
+
+        state.last_align   = align
+        state.last_res_dir = res_dir
+        state.last_htf_sup = at_sup
 
         passed=False; fail_reason=''; confirm_str=''
         if cand_sec is not None:
