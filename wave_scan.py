@@ -1743,7 +1743,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             p_close = p_closes[-1]
             partial = {'open':p_opens[0],'high':max(p_closes),'low':min(p_closes),
                        'close':p_close,'volume':sum(p_vols),'taker_buy':sum(p_tb)}
-            window = state.closed_1m[-200:] + [partial]
+            window = state.closed_1m[-30:] + [partial]
             if len(window) < 10: continue
 
             closes_a, opens_a, volumes_a, taker_buy_a = _bars2arr(window)
