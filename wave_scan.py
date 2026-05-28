@@ -180,14 +180,6 @@ def _build_tfs(raw_lines):
         return [], [], [], [], [], [], {}
 
     s1 = []; last_close = None; last_ob = None
-
-    # Seed price from first OB snapshot so OB-only sessions (no trades) build bars
-    for sec in sorted(ob_by_sec.keys()):
-        bids, asks = ob_by_sec[sec]
-        if bids and asks:
-            last_close = (bids[0][0] + asks[0][0]) / 2.0
-            break
-
     for sec in range(all_secs[0], all_secs[-1]+1):
         trades = trade_by_sec.get(sec, [])
         if trades:
@@ -1393,9 +1385,9 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
     raw = raw_lines if raw_lines is not None else _fetch_raw()
 
     if not state.last_sec:
-        # First call: full build to get candles and timeframes
+        # First call: build timeframes from raw + backfilled candles
         s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(raw)
-        if not s1:
+        if not tf1m:
             return []
         state.tf1m  = tf1m;  state.tf5m  = tf5m
         state.tf15m = tf15m; state.tf1h  = tf1h
@@ -1405,6 +1397,9 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         state.s1_by_sec = s1_by_sec
         all_secs  = sorted(s1_by_sec.keys())
         if not all_secs:
+            # No live second data yet — anchor to last candle so depth triggers
+            # use the incremental path instead of re-entering seed on every tick
+            state.last_sec = tf1m[-1]['ts'] // 1000
             return []
         trade_secs = [s for s in all_secs if s1_by_sec[s]['volume'] > 0]
         t_end    = trade_secs[-1] if trade_secs else all_secs[-1]
