@@ -1433,21 +1433,60 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         state.hist_aligns.append(0.5)
 
     # Seed knife buffer in two passes:
-    # Pass 1 — candle closes (always): establishes swing-low structure and
-    #   phase history from up to 250 bars of price action.  Velocity will be
-    #   0 (bars are 60s apart, outside the 5s window) but peak/trough/bounce
-    #   state survives restarts instead of resetting to NEUTRAL every time.
-    # Pass 2 — raw T/D stream (when available): replays sub-second ticks on
-    #   top so _vel() has real data points and OB metrics are current.
-    #   buf.last_ts is cleared between passes to prevent the 20-min timeout
-    #   from wiping pass-1 state when there's a gap between candle history
-    #   and the live window.
+    # Pass 1 — direct swing-low injection from candle closes.
+    #   Running the state machine over candles is unreliable: _vol_thresh scales
+    #   thresholds with std of 1m closes (~$200-500 for BTC), so min_drop ends
+    #   up $300+ and very few FALLING→BOUNCE cycles complete.  Instead detect
+    #   local minima directly (11-bar window) and inject them into buf.lows so
+    #   ds > 0 from the first update after restart.
+    # Pass 2 — raw T/D stream (when available): replays sub-second ticks so
+    #   _vel() has real data and OB metrics are current.  buf.last_ts is cleared
+    #   between passes to prevent the 20-min timeout from wiping pass-1 state.
     buf = state.knife_buf
-    for b in seed_bars:
-        ts_ms = b['ts']
-        close = float(b['close'])
-        bids, asks = ob_by_sec.get(ts_ms // 1000, ([], []))
-        buf.update(ts_ms, close, bids, asks)
+    closes  = [float(b['close']) for b in seed_bars]
+    ts_list = [b['ts']           for b in seed_bars]
+    n_bars  = len(closes)
+    WIN     = 5   # local-min half-width (11-bar window)
+
+    raw_low_idx = []
+    for i in range(WIN, n_bars - WIN):
+        if closes[i] == min(closes[i - WIN : i + WIN + 1]):
+            raw_low_idx.append(i)
+
+    injected = []
+    for k, i in enumerate(raw_low_idx):
+        next_i    = raw_low_idx[k + 1] if k + 1 < len(raw_low_idx) else n_bars
+        bounce_hi = max(closes[i:next_i]) if next_i > i + 1 else None
+        b2, a2    = ob_by_sec.get(ts_list[i] // 1000, ([], []))
+        obi       = 0.0
+        if b2 and a2:
+            bv = sum(q for _, q in b2[:5]); av = sum(q for _, q in a2[:5])
+            obi = (bv - av) / (bv + av) if bv + av else 0.0
+        injected.append(dict(ts=ts_list[i], px=closes[i], vel=0.0,
+                             obi=obi, conc=0.0, spr=0.0,
+                             bounce_hi=bounce_hi, bid_flow=0.0, ask_flow=0.0))
+
+    buf.lows = injected[-buf.MAX_LOWS:]
+
+    # Set phase / peak / trough from recent candle action
+    if n_bars >= 3:
+        recent = closes[-20:]
+        pk     = max(recent)
+        last   = closes[-1]
+        if pk - last > 0:
+            buf.phase     = 'FALLING'
+            buf.peak      = pk
+            buf.trough    = last
+            buf._low_snap = (ts_list[-1], last, 0.0, 0.0, 0.0, 0.0)
+        else:
+            buf.phase     = 'BOUNCE'
+            buf.bounce_pk = last
+            buf.peak      = max(closes[-50:]) if n_bars >= 50 else pk
+
+    # Seed px_buf for velocity window (last 120 candle closes)
+    start_px = max(0, n_bars - 120)
+    buf.px_buf  = [(ts_list[i], closes[i]) for i in range(start_px, n_bars)]
+    buf.last_ts = ts_list[-1] if ts_list else None
 
     if raw_lines:
         recs = []
