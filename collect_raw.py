@@ -54,7 +54,7 @@ _git_lock     = threading.Lock()         # serialize all git operations — one 
 _last_trade_sec = 0
 _last_depth_sec = 0
 
-GIT_TIMEOUT = 25   # seconds before a git subprocess is killed
+GIT_TIMEOUT = 60   # seconds before a git subprocess is killed
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'
 def log(m, c=Z): print(f'{c}[raw] {m}{Z}', flush=True)
@@ -70,6 +70,14 @@ def _del_obj(sha):
     """Delete a loose git object by SHA — no-op if already packed or missing."""
     if sha and len(sha) >= 4:
         (REPO / '.git' / 'objects' / sha[:2] / sha[2:]).unlink(missing_ok=True)
+
+def _clear_git_locks():
+    """Remove stale ref lock files left by killed git push subprocesses."""
+    git_dir = REPO / '.git'
+    for branch in (DATA_BRANCH, SIG_BRANCH):
+        lock = git_dir / 'refs' / 'heads' / Path(branch.replace('/', os.sep) + '.lock')
+        lock.unlink(missing_ok=True)
+    (git_dir / 'index.lock').unlink(missing_ok=True)
 
 
 def _git_push_worker():
@@ -88,6 +96,7 @@ def _git_push_worker():
         blob = tree = commit = ''
         try:
             with _git_lock:
+                _clear_git_locks()
                 env_gc = {**os.environ, 'GIT_NO_AUTO_GC': '1',
                           'GIT_INDEX_FILE': str(TMP_IDX)}
                 TMP_IDX.unlink(missing_ok=True)
@@ -132,6 +141,7 @@ def _push_signals(txt: str, summary: dict) -> bool:
     SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
     with _git_lock:
         try:
+            _clear_git_locks()
             env = {**os.environ, 'GIT_INDEX_FILE': str(SIG_IDX), 'GIT_NO_AUTO_GC': '1'}
             SIG_IDX.unlink(missing_ok=True)
             tree_paths = {
