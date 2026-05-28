@@ -93,28 +93,32 @@ def _git_push_worker():
             with _git_lock:
                 env_gc = {**os.environ, 'GIT_NO_AUTO_GC': '1',
                           'GIT_INDEX_FILE': str(TMP_IDX)}
+                TMP_IDX.unlink(missing_ok=True)
                 r = _run('git', 'hash-object', '-w', str(gz_path))
                 blob = r.stdout.strip()
-                if not blob: continue
-                parent_r = _run('git', 'rev-parse', f'origin/{DATA_BRANCH}')
-                raw = parent_r.stdout.strip()
-                parent = raw if (len(raw) == 40 and raw.isalnum()) else ''
-                if parent:
-                    _run('git', 'read-tree', f'origin/{DATA_BRANCH}', env=env_gc)
+                if not blob:
+                    log(f'raw: hash-object failed: {r.stderr.strip()[:80]}', R)
+                    continue
                 _run('git', 'update-index', '--add',
                      '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env_gc)
                 r = _run('git', 'write-tree', env=env_gc)
                 tree = r.stdout.strip()
                 TMP_IDX.unlink(missing_ok=True)
-                if not tree: continue
+                if not tree:
+                    log(f'raw: write-tree failed: {r.stderr.strip()[:80]}', R)
+                    continue
                 env_no_gc = {k: v for k, v in env_gc.items()
                              if k != 'GIT_INDEX_FILE'}
-                cmd = ['git', 'commit-tree', tree, '-m', f'raw {int(time.time())}']
-                if parent: cmd += ['-p', parent]
-                r = _run(*cmd, env=env_no_gc)
+                r = _run('git', 'commit-tree', tree, '-m', f'raw {int(time.time())}',
+                         env=env_no_gc)
                 commit = r.stdout.strip()
-                if not commit: continue
-                _run('git', 'push', 'origin', f'{commit}:refs/heads/{DATA_BRANCH}')
+                if not commit:
+                    log(f'raw: commit-tree failed: {r.stderr.strip()[:80]}', R)
+                    continue
+                r = _run('git', 'push', '--force', 'origin',
+                         f'{commit}:refs/heads/{DATA_BRANCH}')
+                if r.returncode != 0:
+                    log(f'raw: push failed: {r.stderr.strip()[:120]}', R)
                 for sha in (blob, tree, commit):
                     _del_obj(sha)
         except Exception as e:
