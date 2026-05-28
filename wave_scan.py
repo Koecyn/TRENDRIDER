@@ -1323,6 +1323,17 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict):
         state.hist_kdv_bals.append(0.0 if np.isnan(kd) else float(abs(kd)))
         state.hist_aligns.append(0.5)
 
+    # Seed knife buffer phase from candle price structure so the scanner knows
+    # the current swing context (FLAT/FALLING/BOUNCE/lows) on the very first tick.
+    # OB data from candles is sparse — decay/floor scores stay 0 until live depth
+    # flows in, but phase and swing lows are price-only and seed correctly here.
+    buf = state.knife_buf
+    for b in seed_bars:
+        ts_ms = b['ts']
+        close = float(b['close'])
+        bids, asks = ob_by_sec.get(ts_ms // 1000, ([], []))
+        buf.update(ts_ms, close, bids, asks)
+
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
                      signals_only: bool = True,
