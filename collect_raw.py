@@ -253,9 +253,6 @@ def _push_loop():
             if cycle % GC_EVERY == 0:
                 gc.collect()
 
-            if cycle % 150 == 0:   # every 5 minutes — auto-restart on code update
-                _check_update()
-
             if cycle % LOG_MEM_EVERY == 0:
                 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 sz  = GZ_FILE.stat().st_size if GZ_FILE.exists() else 0
@@ -264,28 +261,6 @@ def _push_loop():
         except Exception as e:
             log(f'write error: {e}', R)
 
-
-# ── Code-update check ─────────────────────────────────────────────────────────
-
-def _check_update():
-    try:
-        branch = _run('git', 'rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
-        if not branch or branch == 'HEAD': return
-        with _git_lock:
-            r = _run('git', 'fetch', '--depth', '1', 'origin', branch)
-            if r.returncode != 0:
-                return   # fetch failed — objects incomplete, don't attempt reset
-            local  = _run('git', 'rev-parse', 'HEAD').stdout.strip()
-            remote = _run('git', 'rev-parse', 'FETCH_HEAD').stdout.strip()
-            if not remote or remote == local: return
-            log('update detected — restarting...', Y)
-            r = _run('git', 'reset', '--hard', 'FETCH_HEAD')
-            if r.returncode != 0:
-                log(f'reset failed: {r.stderr.strip()[:120]}', R)
-                return
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except Exception as e:
-        log(f'update check error: {e}', R)
 
 
 # ── WebSocket → deque (hot path — zero I/O) ───────────────────────────────────
