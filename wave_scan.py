@@ -63,21 +63,18 @@ def _fetch_raw():
 
 
 def _load_candles(fname):
-    """Load a candle file: ~/.trendrider/ first (backfill_local saves here),
-    then /tmp/trendrider/, then git."""
-    _HOME_TMP = os.path.join(os.path.expanduser('~'), '.trendrider')
-    for base in [_HOME_TMP, _TMP]:
-        local = os.path.join(base, fname)
-        if os.path.exists(local):
-            try:
-                with gzip.open(local, 'rb') as f:
-                    klines = json.loads(f.read().decode())
-                return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
-                         'low': float(k[3]), 'close': float(k[4]),
-                         'volume': float(k[5]), 'taker_buy': float(k[6])}
-                        for k in klines]
-            except Exception:
-                continue
+    """Load candle file from ~/.trendrider/ (backfill_local target) then git."""
+    local = os.path.join(_TMP, fname)
+    if os.path.exists(local):
+        try:
+            with gzip.open(local, 'rb') as f:
+                klines = json.loads(f.read().decode())
+            return [{'ts': int(k[0]), 'open': float(k[1]), 'high': float(k[2]),
+                     'low': float(k[3]), 'close': float(k[4]),
+                     'volume': float(k[5]), 'taker_buy': float(k[6])}
+                    for k in klines]
+        except Exception:
+            pass
     r = subprocess.run(
         ['git','show', f'origin/data/raw:data/raw/{fname}'],
         capture_output=True, cwd=REPO)
