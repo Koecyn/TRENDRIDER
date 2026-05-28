@@ -110,10 +110,12 @@ def _quick_ts(ln: str) -> int:
         return 0
 
 
-def _extend_s1(s1_by_sec: dict, ob_by_sec: dict, raw_lines: list):
+def _extend_s1(s1_by_sec: dict, ob_by_sec: dict, raw_lines: list, seed_close=None):
     """
     Parse new raw lines and extend s1_by_sec / ob_by_sec in place.
     Called on subsequent incremental scan passes — no full rebuild needed.
+    seed_close: last known close from candle history — used to anchor OB-only
+    seconds when no trade has been seen yet in the live stream.
     """
     trade_by_sec = collections.defaultdict(list)
     for ln in raw_lines:
@@ -130,7 +132,7 @@ def _extend_s1(s1_by_sec: dict, ob_by_sec: dict, raw_lines: list):
             ob_by_sec[sec] = ([(p/100, q/10000) for p,q in rec[2][:5]],
                               [(p/100, q/10000) for p,q in rec[3][:5]])
 
-    last_close = None
+    last_close = seed_close   # candle close anchors price before first live trade
     last_ob    = None
     if s1_by_sec:
         last_key   = max(s1_by_sec.keys())
@@ -1415,7 +1417,9 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         # Append new 1s bars to existing s1_by_sec
         s1_by_sec = state.s1_by_sec
         ob_by_sec = state.ob_by_sec
-        _extend_s1(s1_by_sec, ob_by_sec, new_raw)
+        # Seed close from last candle so OB-only seconds get a valid price anchor
+        seed_close = state.closed_1m[-1]['close'] if state.closed_1m else None
+        _extend_s1(s1_by_sec, ob_by_sec, new_raw, seed_close=seed_close)
         start_at  = state.last_sec + 1
 
     s1_secs  = sorted(s1_by_sec.keys())
