@@ -1641,17 +1641,15 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
     if not state.last_sec:
         import time as _t
         now_s = int(_t.time())
-        # Build candles from raw trades (exchange backfill merged in by _build_tfs)
-        s1, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(raw)
+        # 30 exchange bars seed the state directly — no raw processing
+        tf1m = _fetch_candles_1m()
         if not tf1m:
             return []
-        state.tf1m  = tf1m;  state.tf5m  = tf5m
-        state.tf15m = tf15m; state.tf1h  = tf1h
-        state.tf4h  = tf4h;  state.ob_by_sec = ob_by_sec
-        _seed_state_from_candles(state, tf1m, ob_by_sec, raw_lines=None)
-        state.s1_by_sec = {b['ts']//1000: b for b in s1}
-        # Anchor to now — no history replay, state is seeded
-        state.last_sec = now_s - 1
+        state.closed_1m = tf1m
+        _seed_state_from_candles(state, tf1m, {}, raw_lines=None)
+        state.s1_by_sec = {}
+        state.ob_by_sec = {}
+        state.last_sec  = now_s - 1
         return []
     else:
         # Subsequent calls: only parse lines newer than last processed second
