@@ -312,7 +312,8 @@ def _ob_obi5(bids, asks):
     bv = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
     return (bv-av)/(bv+av) if bv+av else 0.0
 
-def _ob_conc(bids, asks, mid, w=25):
+def _ob_conc(bids, asks, mid, w=None):
+    w = (mid * 0.0004) if w is None else w   # 0.04% of price
     bv = sum(q for p,q in bids if abs(p-mid)<=w)
     av = sum(q for p,q in asks if abs(p-mid)<=w)
     return (bv-av)/(bv+av) if bv+av else 0.0
@@ -356,8 +357,10 @@ class KnifeDecayBuffer:
     _SCHAR  = [' ',' ','D','D','F','F']
     _CCHAR  = ['-','-','?','!','?','!']
 
-    MIN_DROP    = 12.0   # $ drop from peak  → enter FALLING
-    MIN_BOUNCE  = 6.0    # $ rise from trough → confirm swing low
+    MIN_DROP_PCT   = 0.00035   # 0.035% of mid → FALLING trigger  (~$25 at $73k)
+    MIN_BOUNCE_PCT = 0.000175  # 0.0175% of mid → swing low confirm (~$13 at $73k)
+    SPR_TIGHT_PCT  = 0.000025  # 0.0025% of mid → "tight spread"   (~$1.8 at $73k)
+    SPR_VTIGHT_PCT = 0.000012  # 0.0012% of mid → "very tight"     (~$0.9 at $73k)
     VEL_WIN_MS  = 5000   # ms rolling window for velocity at swing lows
     MAX_LOWS    = 5      # keep this many recent swing lows
     TIMEOUT_S   = 1200   # seconds quiet → reset pattern
@@ -476,22 +479,24 @@ class KnifeDecayBuffer:
             if ask_r < ref.get('ask_flow', 0): sc += 0.05   # sellers more withdrawn
         return min(1.0, sc)
 
-    def _floor_score(self, conc, spr):
+    def _floor_score(self, conc, spr, mid=None):
         """0→1: OB confirmation that a floor is forming at current price."""
         vel = self._vel()
         sc = 0.0
         if conc > 0.05:         sc += 0.15
         if conc > 0.30:         sc += 0.10
-        # conc_flip = bids just reloaded.  Suppress during active free-falls
-        # (market makers transiently reloading into a drop is NOT a floor signal;
-        # the +0.20 boost would push fos above FLOCK threshold mid-fall).
-        # Gate: only count it when velocity isn't a fast downward move.
         if self.conc_flip and vel > -1.0: sc += 0.20
-        if spr < 2.0:           sc += 0.10
-        if spr < 0.5:           sc += 0.10
+        # Spread tightness relative to price
+        if mid and mid > 0:
+            spr_tight  = mid * self.SPR_TIGHT_PCT
+            spr_vtight = mid * self.SPR_VTIGHT_PCT
+        else:
+            spr_tight  = self.SPR_TIGHT_PCT * 73000  # fallback ~$1.8
+            spr_vtight = self.SPR_VTIGHT_PCT * 73000
+        if spr < spr_tight:  sc += 0.10
+        if spr < spr_vtight: sc += 0.10
         if self.spr_cnt >= 3:   sc += 0.10
         if self.spr_cnt >= 8:   sc += 0.05
-        # Flow walking: sellers exiting + buyers accumulating (visible as OB noise)
         sc += self._flow_walking_score() * 0.30
         return min(1.0, sc)
 
@@ -520,9 +525,10 @@ class KnifeDecayBuffer:
         # Bid/ask net flow deltas (from consecutive OB snapshots)
         self._update_flows(ts_ms, bids, asks)
 
-        # SPR tracking
-        if spr < 1.0: self.spr_cnt += 1
-        else:         self.spr_cnt = max(0, self.spr_cnt - 2)
+        # SPR tracking (relative to price)
+        spr_tight = mid * self.SPR_TIGHT_PCT
+        if spr < spr_tight: self.spr_cnt += 1
+        else:               self.spr_cnt = max(0, self.spr_cnt - 2)
 
         # CONC flip detection (negative → positive)
         was_pos        = self.conc_pos
@@ -530,11 +536,13 @@ class KnifeDecayBuffer:
         self.conc_flip = (not was_pos) and self.conc_pos
 
         # ── Phase / swing-low machine ────────────────────────────────────
+        min_drop   = mid * self.MIN_DROP_PCT
+        min_bounce = mid * self.MIN_BOUNCE_PCT
 
         if self.phase == 'FLAT':
             if self.peak is None or price > self.peak:
                 self.peak = price
-            if self.peak - price >= self.MIN_DROP:
+            if self.peak - price >= min_drop:
                 self.phase     = 'FALLING'
                 self.trough    = price
                 self._low_snap = (ts_ms, price, vel, obi, cnc, spr)
@@ -543,7 +551,7 @@ class KnifeDecayBuffer:
             if price < self.trough:
                 self.trough    = price
                 self._low_snap = (ts_ms, price, vel, obi, cnc, spr)
-            if price - self.trough >= self.MIN_BOUNCE:
+            if price - self.trough >= min_bounce:
                 # Bounce confirmed: register the trough as a swing low
                 self._register_low()
                 self.phase     = 'BOUNCE'
@@ -554,8 +562,8 @@ class KnifeDecayBuffer:
             if self.bounce_pk is None or price > self.bounce_pk:
                 self.bounce_pk = price
             self._set_bounce_hi(price)
-            # New down leg: drop MIN_DROP from bounce peak
-            if self.bounce_pk - price >= self.MIN_DROP:
+            # New down leg: drop min_drop from bounce peak
+            if self.bounce_pk - price >= min_drop:
                 self.phase     = 'FALLING'
                 self.peak      = self.bounce_pk   # reset reference high
                 self.trough    = price
@@ -565,7 +573,7 @@ class KnifeDecayBuffer:
         # ── State machine ────────────────────────────────────────────────
 
         ds  = self._decay_score()
-        fos = self._floor_score(cnc, spr)
+        fos = self._floor_score(cnc, spr, mid=mid)
         n   = len(self.lows)
 
         if self.phase == 'FLAT' and n == 0:
