@@ -1825,9 +1825,6 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                      'micro_sc':micro_sc,'micro_ph':micro_ph,'micro_kdv':micro_kdv}
 
         if not final:
-            for b in tf1m:
-                if b['ts']//1000 == min_sec:
-                    state.closed_1m.append(b); break
             continue
 
         # HTF + MTF
@@ -1920,9 +1917,16 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         kdv_f = final.get('kdv', 0)
         if kdv_f != 0: state.prev_kdv_global = kdv_f
 
-        for b in tf1m:
-            if b['ts']//1000 == min_sec:
-                state.closed_1m.append(b); break
+        if p_opens and p_closes:
+            state.closed_1m.append({
+                'ts':        min_sec * 1000,
+                'open':      p_opens[0],
+                'high':      max(p_closes),
+                'low':       min(p_closes),
+                'close':     p_closes[-1],
+                'volume':    sum(p_vols),
+                'taker_buy': sum(p_tb),
+            })
 
     if new_secs:
         state.last_sec = new_secs[-1]
