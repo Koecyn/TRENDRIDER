@@ -49,7 +49,7 @@ SIG_IDX      = REPO / '.git' / 'scan_push.idx'
 _raw_deque    = collections.deque(maxlen=WINDOW_LINES)
 _deque_lock   = threading.Lock()
 _push_queue   = queue.Queue(maxsize=1)   # non-blocking git push pipeline
-_scan_trigger = threading.Event()        # set by on_trade on each new second
+_scan_trigger = threading.Event()        # set by on_trade/on_depth; scanner also wakes on timeout
 _git_lock     = threading.Lock()         # serialize all git operations — one at a time
 _last_trade_sec = 0
 
@@ -198,7 +198,7 @@ def _scan_loop():
 
         while True:
             try:
-                _scan_trigger.wait()
+                _scan_trigger.wait(timeout=10.0)
                 _scan_trigger.clear()
 
                 with _deque_lock:
