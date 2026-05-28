@@ -36,6 +36,8 @@ TROUGH_PH    = -0.75  # structural: bottom outer-quarter of -1..+1 wave cycle
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m'
 
+_EPS = 0.001   # minimum non-zero floor for all computed scores/imbalances
+
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
@@ -333,13 +335,17 @@ def _thresholds(hist_scores, hist_phases, hist_obi, hist_kdv_bals, hist_aligns,
 
 def _ob_obi5(bids, asks):
     bv = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
-    return (bv-av)/(bv+av) if bv+av else 0.0
+    if not bv+av: return _EPS
+    v = (bv-av)/(bv+av)
+    return v if v != 0.0 else _EPS
 
 def _ob_conc(bids, asks, mid, w=None):
     w = (mid * 0.0004) if w is None else w   # 0.04% of price
     bv = sum(q for p,q in bids if abs(p-mid)<=w)
     av = sum(q for p,q in asks if abs(p-mid)<=w)
-    return (bv-av)/(bv+av) if bv+av else 0.0
+    if not bv+av: return _EPS
+    v = (bv-av)/(bv+av)
+    return v if v != 0.0 else _EPS
 
 def _ob_spr(bids, asks):
     return asks[0][0]-bids[0][0] if bids and asks else 99.0
@@ -492,9 +498,9 @@ class KnifeDecayBuffer:
     def _flow_rates(self):
         """(bid_net_BTC/s, ask_net_BTC/s) over _FLOW_WIN_MS rolling window.
         Positive bid = buyers accumulating. Negative ask = sellers pulling."""
-        if len(self._flow_buf) < 3: return 0.0, 0.0
+        if len(self._flow_buf) < 3: return _EPS, _EPS
         span = (self._flow_buf[-1][0] - self._flow_buf[0][0]) / 1000.0
-        if span < 2.0: return 0.0, 0.0
+        if span < 2.0: return _EPS, _EPS
         return (sum(b for _,b,_ in self._flow_buf) / span,
                 sum(a for _,_,a in self._flow_buf) / span)
 
@@ -519,7 +525,7 @@ class KnifeDecayBuffer:
     def _decay_score(self):
         """0→1: strength of momentum-decay pattern across confirmed lows."""
         ls = self.lows
-        if len(ls) < 2: return 0.0
+        if len(ls) < 2: return _EPS
 
         v = [abs(l['vel']) for l in ls]
         vel = sum(v[i] < v[i-1] for i in range(1, len(v))) / max(1, len(v)-1)
@@ -584,7 +590,7 @@ class KnifeDecayBuffer:
             elif bid_cog < spr_eff * 25: sc += 0.04
             # Sellers retreated (ask wall far) → floor has room to hold
             if ask_wd > spr_eff * 15:    sc += 0.05
-        return min(1.0, max(0.0, sc))
+        return min(1.0, max(_EPS, sc))
 
     # ── public ──────────────────────────────────────────────────────────────
 
