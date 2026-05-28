@@ -556,7 +556,7 @@ class KnifeDecayBuffer:
         if conc > 0.30:         sc += 0.10
         if self.conc_flip and vel > -1.0: sc += 0.20
         # Spread tightness relative to rolling minimum (not a fixed dollar gate)
-        spr_min = getattr(self, '_spr_min', spr)
+        spr_min = self._spr_min if self._spr_min is not None else spr
         if spr < spr_min * 1.10: sc += 0.10   # near tightest seen
         if spr < spr_min * 1.03: sc += 0.10   # essentially at minimum
         if self.spr_cnt >= 3:   sc += 0.10
@@ -604,7 +604,7 @@ class KnifeDecayBuffer:
         self._update_flows(ts_ms, bids, asks)
 
         # SPR tracking: tight = below rolling min spread (book is locking up)
-        self._spr_min = min(getattr(self, '_spr_min', spr), spr)
+        self._spr_min = spr if self._spr_min is None else min(self._spr_min, spr)
         spr_tight = self._spr_min * 1.2   # within 20% of tightest seen
         if spr < spr_tight: self.spr_cnt += 1
         else:               self.spr_cnt = max(0, self.spr_cnt - 2)
