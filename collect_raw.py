@@ -213,14 +213,36 @@ def _scan_loop():
                     try:
                         if state.s1_by_sec:
                             last_sec = max(state.s1_by_sec)
-                            bar = state.s1_by_sec[last_sec]
+                            bar  = state.s1_by_sec[last_sec]
                             bids, asks = bar['ob']
-                            bv = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
-                            obi = round((bv-av)/(bv+av), 3) if bv+av else 0.0
+                            mid  = bar['close']
+                            bv   = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
+                            obi  = round((bv-av)/(bv+av), 3) if bv+av else 0.0
+                            bv2  = sum(q for p,q in bids if abs(p-mid)<=25)
+                            av2  = sum(q for p,q in asks if abs(p-mid)<=25)
+                            conc = round((bv2-av2)/(bv2+av2), 3) if bv2+av2 else 0.0
+                            spr  = round(asks[0][0]-bids[0][0], 2) if bids and asks else 99.0
+                            buf  = state.knife_buf
+                            vel  = round(buf._vel(), 3)
+                            br, ar = buf._flow_rates()
+                            ds   = round(buf._decay_score(), 3)
+                            fos  = round(buf._floor_score(conc, spr), 3)
                             live = {
-                                'price': round(bar['close'], 2),
-                                'obi':   obi,
-                                'at':    datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
+                                'at':        datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
+                                'price':     round(mid, 2),
+                                'obi':       obi,
+                                'conc':      conc,
+                                'spr':       spr,
+                                'vel':       vel,
+                                'bid_flow':  round(br, 4),
+                                'ask_flow':  round(ar, 4),
+                                'phase':     buf.phase,
+                                'dk':        buf.LABELS.get(buf.state, str(buf.state)),
+                                'decay_sc':  ds,
+                                'floor_sc':  fos,
+                                'score':     round(state.hist_scores[-1], 3) if state.hist_scores else None,
+                                'kdv_bal':   round(state.hist_kdv_bals[-1], 3) if state.hist_kdv_bals else None,
+                                'micro_ph':  round(state.hist_phases[-1], 3) if state.hist_phases else None,
                             }
                     except Exception:
                         pass
