@@ -263,8 +263,10 @@ def backfill_local(verbose=True):
     existing_1m = _load_local(FNAME_1M)
     if existing_1m:
         start_1m = existing_1m[-1][0] + 60_000
+        # If existing is short, reach back so combined total >= MIN_BARS
+        if len(existing_1m) < MIN_BARS:
+            start_1m = min(start_1m, end_ms - MIN_BARS * 60_000)
     else:
-        # No local file — always pull MIN_BARS regardless of remote state
         start_1m = end_ms - MIN_BARS * 60_000
 
     # Gap start for 1h: same logic

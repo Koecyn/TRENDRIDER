@@ -1498,7 +1498,9 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         return
     state.closed_1m = list(tf1m[:-1])
     seed_bars = state.closed_1m[-30:]
+    print(f'[seed] {len(tf1m)} candle bars loaded, seeding from last {len(seed_bars)}', flush=True)
     if len(seed_bars) < 30:
+        print(f'[seed] BAIL — need 30, got {len(seed_bars)}', flush=True)
         return
 
     c, o, v, t = _bars2arr(seed_bars)
