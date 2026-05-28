@@ -1661,29 +1661,32 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
     if not state.last_sec:
         import time as _t
         now_s = int(_t.time())
-        # Exchange candles have OHLC, volume, taker — everything needed.
-        # Raw deque is live-only; no replay, no raw touching on startup.
+        # Prefer exchange candle backfill; fall back to building from raw trades
         tf1m = _fetch_candles_1m()
-        if not tf1m:
-            return []
-        # Aggregate higher TFs from the same candle set
-        def _agg_c(bars, period_ms):
-            by_p = collections.defaultdict(list)
-            for b in bars:
-                by_p[(b['ts'] // period_ms) * period_ms].append(b)
-            return [{'ts':p,'open':sl[0]['open'],'high':max(b['high'] for b in sl),
-                     'low':min(b['low'] for b in sl),'close':sl[-1]['close'],
-                     'volume':sum(b['volume'] for b in sl),
-                     'taker_buy':sum(b['taker_buy'] for b in sl)}
-                    for p,sl in sorted(by_p.items())]
-        tf5m  = _agg_c(tf1m, 300_000)
-        tf15m = _agg_c(tf1m, 900_000)
-        tf1h  = _agg_c(tf1m, 3_600_000)
-        tf4h  = _agg_c(tf1m, 14_400_000)
+        if tf1m:
+            def _agg_c(bars, period_ms):
+                by_p = collections.defaultdict(list)
+                for b in bars:
+                    by_p[(b['ts'] // period_ms) * period_ms].append(b)
+                return [{'ts':p,'open':sl[0]['open'],'high':max(b['high'] for b in sl),
+                         'low':min(b['low'] for b in sl),'close':sl[-1]['close'],
+                         'volume':sum(b['volume'] for b in sl),
+                         'taker_buy':sum(b['taker_buy'] for b in sl)}
+                        for p,sl in sorted(by_p.items())]
+            tf5m  = _agg_c(tf1m, 300_000)
+            tf15m = _agg_c(tf1m, 900_000)
+            tf1h  = _agg_c(tf1m, 3_600_000)
+            tf4h  = _agg_c(tf1m, 14_400_000)
+            ob_by_sec = {}
+        else:
+            # No candle file yet — build from raw trade history
+            _, tf1m, tf5m, tf15m, tf1h, tf4h, ob_by_sec = _build_tfs(raw)
+            if not tf1m:
+                return []
         state.tf1m  = tf1m;  state.tf5m  = tf5m
         state.tf15m = tf15m; state.tf1h  = tf1h
-        state.tf4h  = tf4h;  state.ob_by_sec = {}
-        _seed_state_from_candles(state, tf1m, {}, raw_lines=None)
+        state.tf4h  = tf4h;  state.ob_by_sec = ob_by_sec
+        _seed_state_from_candles(state, tf1m, ob_by_sec, raw_lines=None)
         state.s1_by_sec = {}
         state.last_sec  = now_s - 1
         return []
