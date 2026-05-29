@@ -1475,6 +1475,7 @@ class ScanState:
                  'hist_aligns', 'prev_kdv_global', 'last_sig_time',
                  'last_sig_dir', 'last_sig_price', 'sig_count',
                  'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
+                 'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup')
 
@@ -1496,6 +1497,7 @@ class ScanState:
         self.sig_count        = 0
         self.last_sec         = 0
         self.tf1m = self.tf5m = self.tf15m = self.tf1h = self.tf4h = []
+        self.tf1h_seed        = []   # historical 1h candles — base layer for 1h/4h
         self.s1_by_sec        = {}
         self.ob_by_sec        = {}
         self.knife_buf        = KnifeDecayBuffer()
@@ -1527,10 +1529,14 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         print(f'[seed] BAIL — need 30, got {len(seed_bars)}', flush=True)
         return
 
-    # Derive HTF bars from all closed seed 1m bars
+    # Load historical 1h candles as the base layer for 1h/4h depth
+    h1 = _fetch_candles_1h()
+    if h1:
+        state.tf1h_seed = h1
     _update_htf(state)
     print(f'[seed] HTF: {len(state.tf5m)}x5m  {len(state.tf15m)}x15m  '
-          f'{len(state.tf1h)}x1h  {len(state.tf4h)}x4h', flush=True)
+          f'{len(state.tf1h)}x1h  {len(state.tf4h)}x4h'
+          f'  (1h-seed={len(h1)})', flush=True)
 
     c, o, v, t = _bars2arr(seed_bars)
     prices = (c + o) / 2.0
@@ -1655,14 +1661,25 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
 
 
 def _update_htf(state: 'ScanState'):
-    """Re-derive 5m/15m/1h/4h from state.closed_1m (cheap O(n), called after each 1m close)."""
+    """
+    Re-derive 5m/15m from closed_1m (fine, live layer).
+    1h/4h: blend historical 1h seed with live-derived 1h tail so both TFs
+    have meaningful depth from session start rather than waiting hours.
+    Live-derived bars always win at overlap (same ts = more accurate OHLC).
+    """
     bars = state.closed_1m
     if not bars:
         return
     state.tf5m  = _agg(bars, 300_000)
     state.tf15m = _agg(bars, 900_000)
-    state.tf1h  = _agg(bars, 3_600_000)
-    state.tf4h  = _agg(bars, 14_400_000)
+    live_1h = _agg(bars, 3_600_000)
+    if state.tf1h_seed:
+        live_ts    = {b['ts'] for b in live_1h}
+        merged_1h  = [b for b in state.tf1h_seed if b['ts'] not in live_ts] + live_1h
+        state.tf1h = sorted(merged_1h, key=lambda b: b['ts'])
+    else:
+        state.tf1h = live_1h
+    state.tf4h = _agg(state.tf1h, 14_400_000)
 
 
 def _append_closed_1m(state: 'ScanState', s1_by_sec: dict, min_sec: int):

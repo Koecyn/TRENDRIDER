@@ -421,7 +421,7 @@ if __name__ == '__main__':
     _seed_bars = []
     try:
         import pull_candles
-        _seed_bars = pull_candles.fetch_seed_bars(301)
+        _seed_bars = pull_candles.fetch_seed_bars(400)  # 400 → 26x 15m bars ≥ resonance min
     except Exception as e:
         log(f'candle seed (non-fatal): {e}', R)
 

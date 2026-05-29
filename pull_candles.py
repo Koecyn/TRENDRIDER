@@ -287,13 +287,12 @@ def backfill_local(verbose=True):
     else:
         start_1m = end_ms - MIN_BARS * 60_000
 
-    # Gap start for 1h: same logic
+    # Gap start for 1h: deep backfill on first fetch (200h = 50+ 4h bars at startup)
     existing_1h = _load_local("BTCUSDT_1h.json.gz")
     if existing_1h:
         start_1h = existing_1h[-1][0] + 3_600_000
     else:
-        # Align 1h to the same gap anchor as 1m, rounded down to hour
-        start_1h = (start_1m // 3_600_000) * 3_600_000
+        start_1h = end_ms - 200 * 3_600_000
 
     gap_min = max(0, int((end_ms - start_1m) / 60_000))
     gap_hr  = max(0, int((end_ms - start_1h) / 3_600_000))
