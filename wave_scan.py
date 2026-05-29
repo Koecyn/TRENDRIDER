@@ -408,6 +408,69 @@ def _ob_room_above(asks, price, min_dist):
     return dist >= min_dist, dist, f'wall@{wall:.0f}(+{dist:.0f})'
 
 
+def _wall_absorption(bids, asks, price, closed_1m, b5, b15, is_long, n=14):
+    """
+    Compare the nearest significant OB wall to average taker-directional
+    completed volume at each timeframe.
+
+    A wall is not a true barrier if the market's typical throughput at a
+    higher timeframe exceeds it — the wall gets eaten in one bar.
+    Only completed (taker) orders count; pulled/cancelled orders are ignored.
+
+    is_long=True  → look at ask wall above price, compare to avg taker_buy
+    is_long=False → look at bid wall below price, compare to avg taker_sell
+
+    Returns (tf_clears, wall_vol, wall_price, note)
+      tf_clears: '15m'/'5m'/'1m'/None — highest TF whose avg flow >= wall_vol
+    """
+    # Locate nearest significant wall
+    if is_long:
+        levels = asks
+    else:
+        levels = list(reversed(bids)) if bids else []  # closest bid below price
+
+    wall_price = wall_vol = None
+    if levels:
+        vols = [q for _, q in levels]
+        avg  = sum(vols) / len(vols) if vols else 0.0
+        for p, q in levels:
+            if q >= avg:
+                wall_price, wall_vol = p, q
+                break
+        if wall_price is None:
+            wall_price, wall_vol = levels[-1][0], levels[-1][1]
+
+    if not wall_vol:
+        return 'no-wall', 0.0, price, 'no-wall'
+
+    # Average taker-directional completed volume per bar at each TF
+    def _avg(bars):
+        if not bars: return 0.0
+        recent = bars[-n:]
+        if is_long:
+            vals = [b.get('taker_buy', b['volume'] * 0.5) for b in recent]
+        else:
+            vals = [b['volume'] - b.get('taker_buy', b['volume'] * 0.5) for b in recent]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    avg_1m  = _avg(closed_1m)
+    avg_5m  = _avg(b5)
+    avg_15m = _avg(b15)
+
+    dist = abs(wall_price - price)
+    sign = '+' if is_long else '-'
+    note = (f'w={wall_vol:.3f}@{wall_price:.0f}({sign}{dist:.0f})'
+            f'|1m={avg_1m:.3f},5m={avg_5m:.3f},15m={avg_15m:.3f}')
+
+    # Highest TF whose typical flow can absorb the wall in one bar
+    tf_clears = None
+    if   avg_15m >= wall_vol: tf_clears = '15m'
+    elif avg_5m  >= wall_vol: tf_clears = '5m'
+    elif avg_1m  >= wall_vol: tf_clears = '1m'
+
+    return tf_clears, wall_vol, wall_price, note
+
+
 # ── KnifeDecayBuffer ──────────────────────────────────────────────────────────
 
 class KnifeDecayBuffer:
@@ -1323,88 +1386,16 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
                 elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
 
-            # (3) Per-TF ATR profitability gate + OB room gate.
-            # REV signals hold for a multi-minute swing — the relevant ATR is 5m/15m.
-            # Checking 1m first would wrongly block reversals where the 1m range is
-            # noise but the 5m has a $20+ projected leg.  Also: for REV signals the
-            # 5m/15m trend WILL be against the entry direction (that's the reversal
-            # thesis) — skip the momentum check that applies to CONT signals.
-            # CONT signals still try 1m first; 5m/15m momentum check still applies.
+            # (3) Wall absorption annotation — does NOT block the signal.
+            # Compares nearest OB wall volume to avg taker-directional completed
+            # volume at each TF. Walls don't scale with TF; throughput does.
+            # wa=5m → 5m avg flow can eat the wall; wa=X → no TF clears it.
             if passed:
-                from physics import config as _cfg
-                MIN_P  = _cfg.MIN_PROFIT_USD
-                is_rev = cand_stype.endswith('-REV')
-                atr1,  r1,  pnl1u  = _atr_ratio(closed_1m,  _cfg.ATR_WINDOW)
-                atr5,  r5,  pnl5u  = _atr_ratio(b5,          _cfg.ATR_WINDOW)
-                atr15, r15, pnl15u = _atr_ratio(b15,          _cfg.ATR_WINDOW)
-
-                # Direction-aware pnl: longs need upward leg, shorts need downward
-                is_long  = cand_dir > 0
-                pnl1  = pnl1u              if is_long else max(atr1  * (1-r1),  _EPS)
-                pnl5  = pnl5u              if is_long else max(atr5  * (1-r5),  _EPS)
-                pnl15 = pnl15u             if is_long else max(atr15 * (1-r15), _EPS)
-                rat1  = r1                 if is_long else 1-r1
-                rat5  = r5                 if is_long else 1-r5
-                rat15 = r15                if is_long else 1-r15
-                d_sym = 'up' if is_long else 'dn'
-
-                sig_tf = None; atr_note = ''
-                if not is_rev and pnl1 >= MIN_P:
-                    # CONT only: 1m scalp is a valid hold for continuation
-                    sig_tf   = '1m'
-                    atr_note = f'1m:${pnl1:.0f}({d_sym}={atr1:.0f}×{rat1:.2f})'
-                elif pnl5 >= MIN_P:
-                    sc5  = res_out.get('tf_scores', {}).get('5m', 0.0)
-                    t5m_ = htf_ctx.get('trend_5m', 'down')
-                    # REV: 5m trend against entry is expected — no momentum check
-                    # CONT: 5m shouldn't be firmly opposing the signal direction
-                    mom_ok = True if is_rev else (
-                        (t5m_ != 'down' or sc5 > -0.3) if is_long else
-                        (t5m_ != 'up'   or sc5 < +0.3))
-                    if mom_ok:
-                        sig_tf   = '5m'
-                        atr_note = f'5m:${pnl5:.0f}({d_sym}={atr5:.0f}×{rat5:.2f})'
-                        if not is_rev and pnl1 < MIN_P:
-                            atr_note += f'+1m-blocked(${pnl1:.0f}<${MIN_P:.0f})'
-                    else:
-                        passed      = False
-                        fail_reason = f'5m-momentum-wrong(sc={sc5:.2f},t={t5m_})'
-                elif pnl15 >= MIN_P:
-                    t15_ = htf_ctx.get('trend_15m', 'down')
-                    # REV: 15m trend against entry is expected — no trend check
-                    tf_ok = True if is_rev else (
-                        (t15_ != 'down') if is_long else (t15_ != 'up'))
-                    if tf_ok:
-                        sig_tf   = '15m'
-                        atr_note = f'15m:${pnl15:.0f}({d_sym}={atr15:.0f}×{rat15:.2f})'
-                    else:
-                        passed      = False
-                        fail_reason = f'15m-trend-wrong,atr-pnl=${pnl15:.0f}'
-                else:
-                    passed      = False
-                    fail_reason = (f'atr-pnl({d_sym}):1m=${pnl1:.0f}'
-                                   f',5m=${pnl5:.0f},15m=${pnl15:.0f}<${MIN_P:.0f}')
-
-            if passed:
-                # OB room: for longs, sell wall above must be >= MIN_P away
-                #          for shorts, bid wall below must be >= MIN_P away
-                if cand_dir > 0:
-                    room, wall_dist, room_note = _ob_room_above(asks, cand_entry, MIN_P)
-                else:
-                    # check bid wall below (reverse: distance from price down to bid wall)
-                    if bids:
-                        bvols = [q for _,q in bids]; bavg = sum(bvols)/len(bvols)
-                        bwall = next((p for p,q in reversed(bids) if q >= bavg), bids[-1][0])
-                        wall_dist = cand_entry - bwall
-                        room      = wall_dist >= MIN_P
-                        room_note = f'bid-wall@{bwall:.0f}(-{wall_dist:.0f})'
-                    else:
-                        room = True; wall_dist = float('inf'); room_note = 'no-bids'
-                if not room:
-                    passed      = False
-                    fail_reason = f'no-room({room_note}<${MIN_P:.0f})'
-                else:
-                    confirm_str += f'+tf={sig_tf}+{atr_note}+room=${wall_dist:.0f}'
+                is_long = cand_dir > 0
+                tf_cl, w_vol, w_px, wa_note = _wall_absorption(
+                    bids, asks, cand_entry, closed_1m, b5, b15, is_long)
+                wa_tag = f'wa={tf_cl}' if tf_cl else 'wa=X'
+                confirm_str += f'+{wa_tag}({wa_note})'
 
         # Record completed-minute stats for next minute's thresholds
         hist_scores.append(abs(final['score']))
@@ -2088,6 +2079,11 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             if cand_dec_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
             elif cand_dec_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
             elif cand_dec_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
+            # Wall absorption annotation
+            is_long_s = cand_dir > 0
+            tf_cl_s, _, _, wa_note_s = _wall_absorption(
+                bids, asks, cand_entry, state.closed_1m, b5, b15, is_long_s)
+            confirm_str += f'+wa={tf_cl_s}' if tf_cl_s else '+wa=X'
             sig = {
                 'n':      state.sig_count,
                 'dir':    cand_dir,
