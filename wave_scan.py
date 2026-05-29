@@ -834,6 +834,65 @@ def _gates(stype, score, kdv_bal, kdv_dir,
     return False, 'mid-state'
 
 
+def _divergence_pattern(hist_signed, hist_dk_ds, hist_dk_fos, stype, window=12):
+    """
+    Predict reversals by scanning indicator history as a mini chart.
+
+    TROUGH-REV: signed score still negative but making higher lows (becoming less
+                negative) over the last `window` candles, with decay or floor score
+                improving in the second half of the window → fall losing energy.
+    PEAK-REV:   signed score still positive but making lower highs → momentum fading.
+
+    Returns (bool, description_str).
+    """
+    n = len(hist_signed)
+    if n < window:
+        return False, ''
+
+    recent = hist_signed[-window:]
+    half   = window // 2
+
+    if stype == 'TROUGH-REV':
+        if recent[-1] >= 0:          # score already flipped positive — normal path
+            return False, ''
+
+        lo_early = min(recent[:half])
+        lo_late  = min(recent[half:])
+        if lo_late <= lo_early + 0.02:   # need clear improvement (higher low)
+            return False, ''
+
+        # Physical confirmation: decay or floor score must be improving
+        ds_ok = fos_ok = False
+        if len(hist_dk_ds) >= window:
+            ds_early = max(hist_dk_ds[-window:-half]) if half else 0.0
+            ds_late  = max(hist_dk_ds[-half:])
+            ds_ok    = ds_late > ds_early + 0.05
+        if len(hist_dk_fos) >= window:
+            fos_late = max(hist_dk_fos[-half:])
+            fos_ok   = fos_late > 0.25
+
+        if not (ds_ok or fos_ok):
+            return False, ''
+
+        desc = (f'patt({lo_early:+.2f}→{lo_late:+.2f})'
+                + ('+ds' if ds_ok else '') + ('+fos' if fos_ok else ''))
+        return True, desc
+
+    elif stype == 'PEAK-REV':
+        if recent[-1] <= 0:          # score already flipped negative — normal path
+            return False, ''
+
+        hi_early = max(recent[:half])
+        hi_late  = max(recent[half:])
+        if hi_early - hi_late < 0.05:   # need meaningful drop in score peaks
+            return False, ''
+
+        desc = f'patt({hi_early:+.2f}→{hi_late:+.2f})'
+        return True, desc
+
+    return False, ''
+
+
 # ── Main scan ─────────────────────────────────────────────────────────────────
 
 def _preseed(session_tf1m, ob_by_sec):
@@ -953,6 +1012,9 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     hist_obi     = []   # raw OBI at minute end
     hist_kdv_bals= []   # KdV balance at minute end
     hist_aligns  = []   # MTF alignment at minute end
+    hist_signed  = []   # signed score — pattern engine (divergence detection)
+    hist_dk_ds_a = []   # decay score per minute
+    hist_dk_fos_a= []   # floor score per minute
 
     # Pre-seed distributions when no prior history (first session of the day)
     if len(history_1m) < 15:
@@ -961,6 +1023,9 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         ps, pp, po, pk, pa = _preseed(session_tf1m, ob_by_sec)
         hist_scores   = ps; hist_phases = pp
         hist_obi      = po; hist_kdv_bals = pk; hist_aligns = pa
+        hist_signed   = [0.0] * len(ps)   # preseed has no sign info; pattern engine warms up live
+        hist_dk_ds_a  = [0.0] * len(ps)
+        hist_dk_fos_a = [0.0] * len(ps)
         if not signals_only:
             print(f"Pre-seeded from {len(ps)} session bars (no prior history)")
 
@@ -1226,11 +1291,30 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 confirm_str = 'knife-floor'
                 fail_reason = ''
 
-            # (1b) Hard minimum: TROUGH-REV requires confirmed DECAY pattern.
+            # (1c) Indicator divergence: predictive reversal before score threshold.
+            #      Score still negative/positive but making higher-lows/lower-highs
+            #      in indicator history → momentum exhaustion → early entry.
+            patt_confirmed = False
+            if (not passed and fail_reason in ('not-at-support', 'not-at-resistance')
+                    and cand_stype in ('TROUGH-REV', 'PEAK-REV')):
+                patt_ok, patt_desc = _divergence_pattern(
+                    hist_signed, hist_dk_ds_a, hist_dk_fos_a, cand_stype)
+                if patt_ok:
+                    can_bypass = (cand_stype == 'PEAK-REV'
+                                  or min_dk_state >= KnifeDecayBuffer.DWATCH)
+                    if can_bypass:
+                        passed      = True
+                        confirm_str = patt_desc
+                        fail_reason = ''
+                        patt_confirmed = True
+
+            # (1b) Hard minimum: TROUGH-REV requires DECAY (DWATCH if pattern confirmed).
             #      OBI alone at KNIFE state fires premature longs into downtrends.
-            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < KnifeDecayBuffer.DCONF:
+            dk_min_st = KnifeDecayBuffer.DWATCH if patt_confirmed else KnifeDecayBuffer.DCONF
+            dk_min_lbl = 'DEC?' if patt_confirmed else 'DECAY'
+            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < dk_min_st:
                 passed      = False
-                fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<DECAY'
+                fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<{dk_min_lbl}'
 
             # (2) Annotate passed TROUGH-REV signals with decay confidence.
             if passed and cand_stype == 'TROUGH-REV':
@@ -1327,6 +1411,9 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         hist_obi.append(final['obi'])
         hist_kdv_bals.append(final['kdv_bal'])
         hist_aligns.append(align)
+        hist_signed.append(final['score'])    # signed — for divergence pattern
+        hist_dk_ds_a.append(min_dk_ds)
+        hist_dk_fos_a.append(min_dk_fos)
 
         # ── Output ───────────────────────────────────────────────────────────
         comp_f = final['comp']
@@ -1472,7 +1559,8 @@ class ScanState:
     """Persists between incremental scan calls — holds session context."""
     __slots__ = ('closed_1m', 'accum', 'micro_accum', 'micro_window',
                  'hist_scores', 'hist_phases', 'hist_obi', 'hist_kdv_bals',
-                 'hist_aligns', 'prev_kdv_global', 'last_sig_time',
+                 'hist_aligns', 'hist_signed_scores', 'hist_dk_ds', 'hist_dk_fos',
+                 'prev_kdv_global', 'last_sig_time',
                  'last_sig_dir', 'last_sig_price', 'sig_count',
                  'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
                  'tf1h_seed',
@@ -1490,6 +1578,9 @@ class ScanState:
         self.hist_obi         = []
         self.hist_kdv_bals    = []
         self.hist_aligns      = []
+        self.hist_signed_scores = []   # signed score per closed minute (pattern engine)
+        self.hist_dk_ds         = []   # decay score per closed minute
+        self.hist_dk_fos        = []   # floor score per closed minute
         self.prev_kdv_global  = 0
         self.last_sig_time    = None
         self.last_sig_dir     = 0
@@ -1566,6 +1657,9 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         state.hist_obi.append(float(obi_arr[i]))
         state.hist_kdv_bals.append(0.0 if np.isnan(kd) else float(abs(kd)))
         state.hist_aligns.append(0.5)
+        state.hist_signed_scores.append(float(sc))  # signed — used by pattern engine
+        state.hist_dk_ds.append(0.0)                # dk not available from candles
+        state.hist_dk_fos.append(0.0)
 
     # Seed knife buffer in two passes:
     # Pass 1 — direct swing-low injection from candle closes.
@@ -1955,15 +2049,35 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                     and cand_dec_state >= KnifeDecayBuffer.FLOCK):
                 passed = True; confirm_str = 'knife-floor'; fail_reason = ''
 
-            # Hard minimum: TROUGH-REV requires confirmed DECAY pattern.
-            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < KnifeDecayBuffer.DCONF:
-                passed = False; fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<DECAY'
+            # Indicator divergence: predictive reversal before score threshold.
+            patt_confirmed = False
+            if (not passed and fail_reason in ('not-at-support', 'not-at-resistance')
+                    and cand_stype in ('TROUGH-REV', 'PEAK-REV')):
+                patt_ok, patt_desc = _divergence_pattern(
+                    state.hist_signed_scores, state.hist_dk_ds, state.hist_dk_fos,
+                    cand_stype)
+                if patt_ok:
+                    can_bypass = (cand_stype == 'PEAK-REV'
+                                  or min_dk_state >= KnifeDecayBuffer.DWATCH)
+                    if can_bypass:
+                        passed = True; confirm_str = patt_desc; fail_reason = ''
+                        patt_confirmed = True
+
+            # Hard minimum: TROUGH-REV requires DECAY (DWATCH if pattern confirmed).
+            dk_min_st  = KnifeDecayBuffer.DWATCH if patt_confirmed else KnifeDecayBuffer.DCONF
+            dk_min_lbl = 'DEC?' if patt_confirmed else 'DECAY'
+            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < dk_min_st:
+                passed = False
+                fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<{dk_min_lbl}'
 
         state.hist_scores.append(abs(final['score']))
         state.hist_phases.append(final['micro_phase'])
         state.hist_obi.append(final['obi'])
         state.hist_kdv_bals.append(final['kdv_bal'])
         state.hist_aligns.append(align)
+        state.hist_signed_scores.append(final['score'])
+        state.hist_dk_ds.append(min_dk_ds)
+        state.hist_dk_fos.append(min_dk_fos)
 
         if passed:
             state.sig_count     += 1
