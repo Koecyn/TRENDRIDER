@@ -1235,14 +1235,16 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
 
             # (3) Per-TF ATR profitability gate + OB room gate.
-            # Each TF's ATR × up_ratio must reach MIN_PROFIT_USD.
-            # Try 1m first; if blocked, try 5m (requires 5m momentum not firmly
-            # down); then 15m.  OB room: nearest significant ask wall must be
-            # MIN_PROFIT_USD above entry — no point entering if a sell wall is
-            # sitting $10 above.
+            # REV signals hold for a multi-minute swing — the relevant ATR is 5m/15m.
+            # Checking 1m first would wrongly block reversals where the 1m range is
+            # noise but the 5m has a $20+ projected leg.  Also: for REV signals the
+            # 5m/15m trend WILL be against the entry direction (that's the reversal
+            # thesis) — skip the momentum check that applies to CONT signals.
+            # CONT signals still try 1m first; 5m/15m momentum check still applies.
             if passed:
                 from physics import config as _cfg
-                MIN_P = _cfg.MIN_PROFIT_USD
+                MIN_P  = _cfg.MIN_PROFIT_USD
+                is_rev = cand_stype.endswith('-REV')
                 atr1,  r1,  pnl1u  = _atr_ratio(closed_1m,  _cfg.ATR_WINDOW)
                 atr5,  r5,  pnl5u  = _atr_ratio(b5,          _cfg.ATR_WINDOW)
                 atr15, r15, pnl15u = _atr_ratio(b15,          _cfg.ATR_WINDOW)
@@ -1258,24 +1260,31 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 d_sym = 'up' if is_long else 'dn'
 
                 sig_tf = None; atr_note = ''
-                if pnl1 >= MIN_P:
+                if not is_rev and pnl1 >= MIN_P:
+                    # CONT only: 1m scalp is a valid hold for continuation
                     sig_tf   = '1m'
                     atr_note = f'1m:${pnl1:.0f}({d_sym}={atr1:.0f}×{rat1:.2f})'
                 elif pnl5 >= MIN_P:
                     sc5  = res_out.get('tf_scores', {}).get('5m', 0.0)
                     t5m_ = htf_ctx.get('trend_5m', 'down')
-                    mom_ok = (t5m_ != 'down' or sc5 > -0.3) if is_long else \
-                             (t5m_ != 'up'   or sc5 < +0.3)
+                    # REV: 5m trend against entry is expected — no momentum check
+                    # CONT: 5m shouldn't be firmly opposing the signal direction
+                    mom_ok = True if is_rev else (
+                        (t5m_ != 'down' or sc5 > -0.3) if is_long else
+                        (t5m_ != 'up'   or sc5 < +0.3))
                     if mom_ok:
                         sig_tf   = '5m'
-                        atr_note = (f'5m:${pnl5:.0f}({d_sym}={atr5:.0f}×{rat5:.2f})'
-                                    f'+1m-blocked(${pnl1:.0f}<${MIN_P:.0f})')
+                        atr_note = f'5m:${pnl5:.0f}({d_sym}={atr5:.0f}×{rat5:.2f})'
+                        if not is_rev and pnl1 < MIN_P:
+                            atr_note += f'+1m-blocked(${pnl1:.0f}<${MIN_P:.0f})'
                     else:
                         passed      = False
                         fail_reason = f'5m-momentum-wrong(sc={sc5:.2f},t={t5m_})'
                 elif pnl15 >= MIN_P:
                     t15_ = htf_ctx.get('trend_15m', 'down')
-                    tf_ok = (t15_ != 'down') if is_long else (t15_ != 'up')
+                    # REV: 15m trend against entry is expected — no trend check
+                    tf_ok = True if is_rev else (
+                        (t15_ != 'down') if is_long else (t15_ != 'up'))
                     if tf_ok:
                         sig_tf   = '15m'
                         atr_note = f'15m:${pnl15:.0f}({d_sym}={atr15:.0f}×{rat15:.2f})'
