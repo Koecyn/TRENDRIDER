@@ -791,7 +791,7 @@ def _sig_type(state, direction):
 def _gates(stype, score, kdv_bal, kdv_dir,
            thresh, gate_rev, gate_cont, obi_conf, align_cont,
            obi_pressure, align, res_dir, sig_dir,
-           at_sup, kdv_flipped, sc_gate=None):
+           at_sup, kdv_flipped, sc_gate=None, at_res=False):
     """Returns (pass: bool, reason_or_confirm: str)."""
     # Skip score magnitude gate when KdV flip is the confirmation:
     # the flip (direction reversal) IS the signal; gate_rev on balance provides strength filter
@@ -804,18 +804,21 @@ def _gates(stype, score, kdv_bal, kdv_dir,
         kdv_matches = (sig_dir < 0 and kdv_dir <= -1) or (sig_dir > 0 and kdv_dir >= 1)
         ob_confirms = (stype == 'TROUGH-REV' and obi_pressure >=  obi_conf) or \
                       (stype == 'PEAK-REV'   and obi_pressure <= -obi_conf)
-        # HTF structural support bypasses the micro-flow direction requirement:
+        # HTF structural level bypasses the micro-flow direction requirement:
         # when HTF identifies price at a key level, structure IS the confirmation.
-        htf_confirms = (stype == 'TROUGH-REV' and at_sup)
+        htf_confirms = (stype == 'TROUGH-REV' and at_sup) or \
+                       (stype == 'PEAK-REV'   and at_res)
         if not (kdv_matches or kdv_flipped or ob_confirms or htf_confirms):
             return False, f'kdv-dir={kdv_dir},obi={obi_pressure:+.2f}'
         if kdv_bal < gate_rev:
             return False, f'kdv-bal={kdv_bal:.1f}<{gate_rev:.1f}'
         if stype == 'TROUGH-REV' and not at_sup:
             return False, 'not-at-support'
+        if stype == 'PEAK-REV' and not at_res:
+            return False, 'not-at-resistance'
         if kdv_flipped:        confirm = 'kdv-flip'
         elif kdv_matches:      confirm = f'kdv={kdv_dir:+d}'
-        elif htf_confirms:     confirm = 'htf-sup'
+        elif htf_confirms:     confirm = 'htf-res'
         else:                  confirm = f'ob={obi_pressure:+.2f}'
         return True, confirm
 
@@ -1193,6 +1196,14 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             if in_cooldown:
                 fail_reason = f'cooldown({(min_sec - last_sig_time)//60}m,Δ${abs(cand_entry-last_sig_price):.0f})'
             else:
+                # Peak inversion override: at HTF resistance, sb=+1 at a real peak
+                # (price above mean) maps to PEAK-CONT LONG — wrong direction.
+                # Override to PEAK-REV (sell/exit signal) when price is at resistance.
+                if cand_stype == 'PEAK-CONT' and cand_dir > 0 and at_res:
+                    cand_stype = 'PEAK-REV'
+                    cand_dir   = -1
+                    if cand_tgt > cand_entry:
+                        cand_tgt = cand_entry - (cand_tgt - cand_entry)
                 kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
                               (cand_dir < 0 and kdv_flipped_down)
                 # Use best OBI seen during the minute (most extreme in signal direction)
@@ -1202,7 +1213,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                     cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
                     thresh, gate_rev, gate_cont, obi_conf, align_cont,
                     gate_obi, align, res_dir, cand_dir,
-                    at_sup, kdv_flipped, sc_gate=cand_sc_gate)
+                    at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
             if passed:
                 confirm_str = fail_reason
                 fail_reason = ''
@@ -1905,7 +1916,8 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
 
         # HTF + MTF
         htf_ctx = htf.regime(final['price'], b1h, b4h, state.closed_1m[-30:], b5, b15)
-        at_sup  = htf_ctx.get('at_support', False)
+        at_sup  = htf_ctx.get('at_support',    False)
+        at_res  = htf_ctx.get('at_resistance', False)
         try:
             res_out    = RES.resonance(state.closed_1m[-30:], b5, b15, b1h, b4h)
             res_dir    = res_out.get('direction', 0)
@@ -1928,6 +1940,14 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                            and (min_sec - state.last_sig_time) < 180
                            and abs(cand_entry - state.last_sig_price) < zone_thresh)
             if not in_cooldown:
+                # Peak inversion override: at HTF resistance, sb=+1 at a real peak
+                # (price above mean) maps to PEAK-CONT LONG — wrong direction.
+                # Override to PEAK-REV (sell/exit signal) when price is at resistance.
+                if cand_stype == 'PEAK-CONT' and cand_dir > 0 and at_res:
+                    cand_stype = 'PEAK-REV'
+                    cand_dir   = -1
+                    if cand_tgt > cand_entry:
+                        cand_tgt = cand_entry - (cand_tgt - cand_entry)
                 kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
                               (cand_dir < 0 and kdv_flipped_down)
                 gate_obi = (best_obi_long  if cand_dir > 0 else
@@ -1936,7 +1956,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                     cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
                     thresh, gate_rev, gate_cont, obi_conf, align_cont,
                     gate_obi, align, res_dir, cand_dir,
-                    at_sup, kdv_flipped, sc_gate=cand_sc_gate)
+                    at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
                 if passed:
                     confirm_str = fail_reason; fail_reason = ''
 
