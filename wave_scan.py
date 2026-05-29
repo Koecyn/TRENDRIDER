@@ -1132,22 +1132,13 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 state = _micro_state(micro_phase, peak_ph, trough_ph)
                 stype = _sig_type(state, sb)
                 dec_now = knife_states.get(sec, (0,0.0,0.0,'NEUT'))[0]
-                # At a confirmed decay trough the fusion score lags the actual floor:
-                # price below mean → score negative → sb=-1 → would fire TROUGH-CONT.
-                # Override to TROUGH-REV LONG when decay state confirms the structure.
-                if (state == 'TROUGH' and sb < 0
-                        and dec_now >= KnifeDecayBuffer.DCONF):
-                    stype   = 'TROUGH-REV'
-                    eff_dir = +1
-                else:
-                    eff_dir = sb
                 cand_sec    = sec
                 cand_score  = f_sc
-                cand_dir    = eff_dir
+                cand_dir    = sb
                 cand_stype  = stype
                 cand_entry  = p_close
                 cand_tgt    = tgts.get('primary',
-                                p_close + comp.get('carrier',{}).get('amplitude',0)*eff_dir)
+                                p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
                 cand_kdvbal = kdv_bal
                 cand_kdvdir = kdv
                 cand_obi       = obi_p
@@ -1196,14 +1187,6 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             if in_cooldown:
                 fail_reason = f'cooldown({(min_sec - last_sig_time)//60}m,Δ${abs(cand_entry-last_sig_price):.0f})'
             else:
-                # Peak inversion override: at HTF resistance, sb=+1 at a real peak
-                # (price above mean) maps to PEAK-CONT LONG — wrong direction.
-                # Override to PEAK-REV (sell/exit signal) when price is at resistance.
-                if cand_stype == 'PEAK-CONT' and cand_dir > 0 and at_res:
-                    cand_stype = 'PEAK-REV'
-                    cand_dir   = -1
-                    if cand_tgt > cand_entry:
-                        cand_tgt = cand_entry - (cand_tgt - cand_entry)
                 kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
                               (cand_dir < 0 and kdv_flipped_down)
                 # Use best OBI seen during the minute (most extreme in signal direction)
@@ -1888,18 +1871,10 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             if sb != 0 and sustain_count >= sustain_needed and cand_sec is None:
                 state_ = _micro_state(micro_phase, peak_ph, trough_ph)
                 stype  = _sig_type(state_, sb)
-                # At a confirmed decay trough the fusion score lags the actual floor.
-                # Override to TROUGH-REV LONG when decay state confirms the structure.
-                if (state_ == 'TROUGH' and sb < 0
-                        and dk_st >= KnifeDecayBuffer.DCONF):
-                    stype   = 'TROUGH-REV'
-                    eff_dir = +1
-                else:
-                    eff_dir = sb
-                cand_sec    = sec; cand_score  = f_sc; cand_dir = eff_dir
+                cand_sec    = sec; cand_score  = f_sc; cand_dir = sb
                 cand_stype  = stype; cand_entry = p_close
                 cand_tgt    = tgts.get('primary',
-                                p_close + comp.get('carrier',{}).get('amplitude',0)*eff_dir)
+                                p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
                 cand_kdvbal = kdv_bal; cand_kdvdir = kdv
                 cand_obi    = obi_p;  cand_sc_gate = sc_gate
                 cand_dec_state = dk_st
@@ -1940,14 +1915,6 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                            and (min_sec - state.last_sig_time) < 180
                            and abs(cand_entry - state.last_sig_price) < zone_thresh)
             if not in_cooldown:
-                # Peak inversion override: at HTF resistance, sb=+1 at a real peak
-                # (price above mean) maps to PEAK-CONT LONG — wrong direction.
-                # Override to PEAK-REV (sell/exit signal) when price is at resistance.
-                if cand_stype == 'PEAK-CONT' and cand_dir > 0 and at_res:
-                    cand_stype = 'PEAK-REV'
-                    cand_dir   = -1
-                    if cand_tgt > cand_entry:
-                        cand_tgt = cand_entry - (cand_tgt - cand_entry)
                 kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
                               (cand_dir < 0 and kdv_flipped_down)
                 gate_obi = (best_obi_long  if cand_dir > 0 else
