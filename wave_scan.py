@@ -1128,18 +1128,28 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             if sb != 0 and sustain_count >= sustain_needed and cand_sec is None:
                 state = _micro_state(micro_phase, peak_ph, trough_ph)
                 stype = _sig_type(state, sb)
+                dec_now = knife_states.get(sec, (0,0.0,0.0,'NEUT'))[0]
+                # At a confirmed decay trough the fusion score lags the actual floor:
+                # price below mean → score negative → sb=-1 → would fire TROUGH-CONT.
+                # Override to TROUGH-REV LONG when decay state confirms the structure.
+                if (state == 'TROUGH' and sb < 0
+                        and dec_now >= KnifeDecayBuffer.DCONF):
+                    stype   = 'TROUGH-REV'
+                    eff_dir = +1
+                else:
+                    eff_dir = sb
                 cand_sec    = sec
                 cand_score  = f_sc
-                cand_dir    = sb
+                cand_dir    = eff_dir
                 cand_stype  = stype
                 cand_entry  = p_close
                 cand_tgt    = tgts.get('primary',
-                                p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
+                                p_close + comp.get('carrier',{}).get('amplitude',0)*eff_dir)
                 cand_kdvbal = kdv_bal
                 cand_kdvdir = kdv
                 cand_obi       = obi_p
-                cand_sc_gate   = sc_gate        # effective score gate at candidate time
-                cand_dec_state = knife_states.get(sec, (0,0.0,0.0,'NEUT'))[0]  # state at exact candidate second
+                cand_sc_gate   = sc_gate
+                cand_dec_state = dec_now
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
@@ -1412,7 +1422,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             import re
             arrow  = '▲' if cand_dir > 0 else '▼'
             side   = 'LONG' if cand_dir > 0 else 'SHORT'
-            stype  = 'TROUGH REVERSAL' if 'TROUGH' in cand_stype else 'PEAK REVERSAL'
+            stype  = cand_stype.replace('-', ' ')
             c      = G if cand_dir > 0 else R
             bar    = '━' * 50
 
@@ -1867,10 +1877,18 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             if sb != 0 and sustain_count >= sustain_needed and cand_sec is None:
                 state_ = _micro_state(micro_phase, peak_ph, trough_ph)
                 stype  = _sig_type(state_, sb)
-                cand_sec    = sec; cand_score  = f_sc; cand_dir = sb
+                # At a confirmed decay trough the fusion score lags the actual floor.
+                # Override to TROUGH-REV LONG when decay state confirms the structure.
+                if (state_ == 'TROUGH' and sb < 0
+                        and dk_st >= KnifeDecayBuffer.DCONF):
+                    stype   = 'TROUGH-REV'
+                    eff_dir = +1
+                else:
+                    eff_dir = sb
+                cand_sec    = sec; cand_score  = f_sc; cand_dir = eff_dir
                 cand_stype  = stype; cand_entry = p_close
                 cand_tgt    = tgts.get('primary',
-                                p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
+                                p_close + comp.get('carrier',{}).get('amplitude',0)*eff_dir)
                 cand_kdvbal = kdv_bal; cand_kdvdir = kdv
                 cand_obi    = obi_p;  cand_sc_gate = sc_gate
                 cand_dec_state = dk_st
@@ -1967,7 +1985,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 import re as _re
                 arrow = '▲' if cand_dir > 0 else '▼'
                 side  = 'LONG' if cand_dir > 0 else 'SHORT'
-                stype = 'TROUGH REVERSAL' if 'TROUGH' in cand_stype else 'PEAK REVERSAL'
+                stype = cand_stype.replace('-', ' ')
                 c     = G if cand_dir > 0 else R
                 bar   = '━' * 50
                 print(f"\n{c}{bar}")
