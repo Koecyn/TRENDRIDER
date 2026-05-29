@@ -251,9 +251,10 @@ def _build_tfs(raw_lines):
     tf4h  = _agg(s1, 14_400_000)
 
     # Merge backfilled 1m candles into gaps (raw tick data always wins)
-    # Cap at last 600 bars — only need recent history for threshold seeding
+    # Need enough history for 5m ATR (15 bars × 5m = 75m) + 15m ATR (15 × 15m = 225m)
+    # Load 400 bars — covers 5m ATR warmup from the start of any 96m session window
     raw_1m_ts = {b['ts'] for b in tf1m}
-    candles   = _fetch_candles_1m()[-30:]
+    candles   = _fetch_candles_1m()[-400:]
     filled    = 0
     for c in candles:
         bucket = (c['ts'] // 60_000) * 60_000
