@@ -856,34 +856,34 @@ def _gates(stype, score, kdv_bal, kdv_dir,
            thresh, gate_rev, gate_cont, obi_conf, align_cont,
            obi_pressure, align, res_dir, sig_dir,
            at_sup, kdv_flipped, sc_gate=None, at_res=False):
-    """Returns (pass: bool, reason_or_confirm: str)."""
-    # Skip score magnitude gate when KdV flip is the confirmation:
-    # the flip (direction reversal) IS the signal; gate_rev on balance provides strength filter
+    """Returns (pass: bool, reason_or_confirm: str).
+
+    REV signals: mark every peak/trough — gates annotate confidence, not suppress.
+    Only hard blocks: score below noise floor, or kdv_bal=0 (no soliton data yet).
+    HTF levels, OBI direction, kdv direction = confirmation bonuses, not requirements.
+    """
     if not kdv_flipped:
         effective_thresh = sc_gate if sc_gate is not None else thresh
         if abs(score) < effective_thresh:
             return False, f'score={score:+.3f}<{effective_thresh:.3f}'
 
     if stype in ('PEAK-REV', 'TROUGH-REV'):
-        kdv_matches = (sig_dir < 0 and kdv_dir <= -1) or (sig_dir > 0 and kdv_dir >= 1)
-        ob_confirms = (stype == 'TROUGH-REV' and obi_pressure >=  obi_conf) or \
-                      (stype == 'PEAK-REV'   and obi_pressure <= -obi_conf)
-        # HTF structural level bypasses the micro-flow direction requirement:
-        # when HTF identifies price at a key level, structure IS the confirmation.
+        # Hard minimum: soliton must have computed (kdv_bal=0 = cold start, no data)
+        if kdv_bal < 0.3:
+            return False, f'kdv-bal={kdv_bal:.2f}<0.3(cold)'
+
+        # Annotate what's present — none of these block detection
+        kdv_matches  = (sig_dir < 0 and kdv_dir <= -1) or (sig_dir > 0 and kdv_dir >= 1)
+        ob_confirms  = (stype == 'TROUGH-REV' and obi_pressure >=  obi_conf) or \
+                       (stype == 'PEAK-REV'   and obi_pressure <= -obi_conf)
         htf_confirms = (stype == 'TROUGH-REV' and at_sup) or \
                        (stype == 'PEAK-REV'   and at_res)
-        if not (kdv_matches or kdv_flipped or ob_confirms or htf_confirms):
-            return False, f'kdv-dir={kdv_dir},obi={obi_pressure:+.2f}'
-        if kdv_bal < gate_rev:
-            return False, f'kdv-bal={kdv_bal:.1f}<{gate_rev:.1f}'
-        if stype == 'TROUGH-REV' and not at_sup:
-            return False, 'not-at-support'
-        if stype == 'PEAK-REV' and not at_res:
-            return False, 'not-at-resistance'
-        if kdv_flipped:        confirm = 'kdv-flip'
-        elif kdv_matches:      confirm = f'kdv={kdv_dir:+d}'
-        elif htf_confirms:     confirm = 'htf-res'
-        else:                  confirm = f'ob={obi_pressure:+.2f}'
+
+        if   kdv_flipped:   confirm = 'kdv-flip'
+        elif kdv_matches:   confirm = f'kdv={kdv_dir:+d}'
+        elif htf_confirms:  confirm = 'htf-lvl'
+        elif ob_confirms:   confirm = f'ob={obi_pressure:+.2f}'
+        else:               confirm = 'detect'   # phase+score only — still a valid mark
         return True, confirm
 
     if stype in ('PEAK-CONT', 'TROUGH-CONT'):
@@ -1344,47 +1344,28 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                     fail_reason = (f'stale-obi(decay={obi_decay:.2f})'
                                    f'+weak-kdv(bal={cand_kdvbal:.1f})')
 
-            # ── Knife-decay gate integration ──────────────────────────────
-            # (1) FLOOR_LOCK overrides the not-at-support block for TROUGH-REV:
-            #     the decay pattern IS the structural support evidence.
-            if (not passed
-                    and fail_reason == 'not-at-support'
-                    and cand_stype  == 'TROUGH-REV'
-                    and cand_dec_state >= KnifeDecayBuffer.FLOCK):
-                passed      = True
-                confirm_str = 'knife-floor'
-                fail_reason = ''
-
-            # (1c) Indicator divergence: predictive reversal before score threshold.
-            #      Score still negative/positive but making higher-lows/lower-highs
-            #      in indicator history → momentum exhaustion → early entry.
-            patt_confirmed = False
-            if (not passed and fail_reason in ('not-at-support', 'not-at-resistance')
-                    and cand_stype in ('TROUGH-REV', 'PEAK-REV')):
-                patt_ok, patt_desc = _divergence_pattern(
-                    hist_signed, hist_dk_ds_a, hist_dk_fos_a, cand_stype)
-                if patt_ok:
-                    can_bypass = (cand_stype == 'PEAK-REV'
-                                  or min_dk_state >= KnifeDecayBuffer.DWATCH)
-                    if can_bypass:
-                        passed      = True
-                        confirm_str = patt_desc
-                        fail_reason = ''
-                        patt_confirmed = True
-
-            # (1b) Hard minimum: TROUGH-REV requires DECAY (DWATCH if pattern confirmed).
-            #      OBI alone at KNIFE state fires premature longs into downtrends.
-            dk_min_st = KnifeDecayBuffer.DWATCH if patt_confirmed else KnifeDecayBuffer.DCONF
-            dk_min_lbl = 'DEC?' if patt_confirmed else 'DECAY'
-            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < dk_min_st:
-                passed      = False
-                fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<{dk_min_lbl}'
-
-            # (2) Annotate passed TROUGH-REV signals with decay confidence.
+            # ── Knife-decay annotation ────────────────────────────────────
+            # TROUGH-REV: annotate dk confidence; dk KNIFE minimum kept as basic
+            # sanity (some falling price action must be observed).
+            # Divergence pattern adds early entry path from indicator history.
             if passed and cand_stype == 'TROUGH-REV':
                 if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
                 elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
                 elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
+                elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_str += '+DEC?'
+                elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_str += '+KNIFE'
+                # Minimum: at least KNIFE state (some downward price action seen)
+                if min_dk_state < KnifeDecayBuffer.KNIFE:
+                    passed      = False
+                    fail_reason = f'dk-none(no-fall-detected)'
+
+            # Divergence pattern: annotate when indicator history shows momentum
+            # exhaustion — fires even without structural level confirmation.
+            if passed and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
+                patt_ok, patt_desc = _divergence_pattern(
+                    hist_signed, hist_dk_ds_a, hist_dk_fos_a, cand_stype)
+                if patt_ok:
+                    confirm_str += f'+{patt_desc}'
 
             # (3) Wall absorption annotation — does NOT block the signal.
             # Compares nearest OB wall volume to avg taker-directional completed
@@ -2030,37 +2011,24 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 if passed:
                     confirm_str = fail_reason; fail_reason = ''
 
-            if passed and cand_stype == 'TROUGH-REV' and cand_dir > 0:
-                obi_decay = best_obi_long - cand_obi
-                if obi_decay > 0.5 and cand_kdvbal < 5.0:
+            # TROUGH-REV dk annotation + KNIFE minimum
+            if passed and cand_stype == 'TROUGH-REV':
+                if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
+                elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
+                elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
+                elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_str += '+DEC?'
+                elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_str += '+KNIFE'
+                if min_dk_state < KnifeDecayBuffer.KNIFE:
                     passed = False
-                    fail_reason = f'stale-obi(decay={obi_decay:.2f})'
+                    fail_reason = 'dk-none(no-fall-detected)'
 
-            if (not passed and fail_reason == 'not-at-support'
-                    and cand_stype == 'TROUGH-REV'
-                    and cand_dec_state >= KnifeDecayBuffer.FLOCK):
-                passed = True; confirm_str = 'knife-floor'; fail_reason = ''
-
-            # Indicator divergence: predictive reversal before score threshold.
-            patt_confirmed = False
-            if (not passed and fail_reason in ('not-at-support', 'not-at-resistance')
-                    and cand_stype in ('TROUGH-REV', 'PEAK-REV')):
+            # Divergence pattern annotation
+            if passed and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
                 patt_ok, patt_desc = _divergence_pattern(
                     state.hist_signed_scores, state.hist_dk_ds, state.hist_dk_fos,
                     cand_stype)
                 if patt_ok:
-                    can_bypass = (cand_stype == 'PEAK-REV'
-                                  or min_dk_state >= KnifeDecayBuffer.DWATCH)
-                    if can_bypass:
-                        passed = True; confirm_str = patt_desc; fail_reason = ''
-                        patt_confirmed = True
-
-            # Hard minimum: TROUGH-REV requires DECAY (DWATCH if pattern confirmed).
-            dk_min_st  = KnifeDecayBuffer.DWATCH if patt_confirmed else KnifeDecayBuffer.DCONF
-            dk_min_lbl = 'DEC?' if patt_confirmed else 'DECAY'
-            if passed and cand_stype == 'TROUGH-REV' and min_dk_state < dk_min_st:
-                passed = False
-                fail_reason = f'dk-weak({KnifeDecayBuffer.LABELS.get(min_dk_state,"?")})<{dk_min_lbl}'
+                    confirm_str += f'+{patt_desc}'
 
         state.hist_scores.append(abs(final['score']))
         state.hist_phases.append(final['micro_phase'])
@@ -2076,9 +2044,6 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             state.last_sig_time  = min_sec
             state.last_sig_dir   = cand_dir
             state.last_sig_price = cand_entry
-            if cand_dec_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
-            elif cand_dec_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
-            elif cand_dec_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
             # Wall absorption annotation
             is_long_s = cand_dir > 0
             tf_cl_s, _, _, wa_note_s = _wall_absorption(
