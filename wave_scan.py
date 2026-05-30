@@ -1035,30 +1035,24 @@ def _wf_phase(bars, n=30):
         return 0.0
 
 
-def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars):
+def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0):
     """
-    Label current second's order flow structure using the rolling 1s window only.
+    Label current second's order flow structure.
 
-    micro_bars: rolling 120s list of 1s bar dicts — never resets at minute
-    boundaries, always has full history.  Returns 'MID' until 15 bars.
+    micro_bars : rolling 120s 1s-bar list — never resets at minute boundaries.
+    res_dir    : resonance direction from multi-TF physics (+1/-1/0).
 
     Returns: 'PEAK' | 'TROUGH' | 'CONT_UP' | 'CONT_DOWN' | 'MID'
 
-    Patterns:
-      PEAK      price at structural high (both 12s and 45s window agree)
-                + buying EXHAUSTED: taker buy was >60% in prior window,
-                  now <40% — the flip IS the signal.
-                OR KdV just flipped down at a high.
-
-      TROUGH    price at structural low + selling EXHAUSTED (flip to buying)
-                OR KdV just flipped up at a low.
-
-      CONT_UP   price at 12s high + buying SUSTAINED in both windows + OBI pos.
-                No momentum flip.  Price wants to go higher.
-
-      CONT_DOWN price at 12s low  + selling SUSTAINED + OBI neg.
-
-      MID       no structural extreme, or signals absent/mixed.
+    PEAK      price in top portion of the recent range, dual-window high,
+              + buying exhausted (was >60% taker-buy, now <40%) OR KdV flipped
+              down while OBI isn't blocking.
+    TROUGH    price in bottom portion of range, dual-window low,
+              + selling exhausted (flip to buying) OR KdV flipped up.
+    CONT_UP   price at 12s high, buying sustained, OBI positive, no KdV down.
+              Cross-TF: res_dir not bearish.
+    CONT_DOWN price at 12s low, selling sustained, OBI negative, no KdV up.
+    MID       no meaningful structure.
     """
     m = len(micro_bars)
     if m < 15:
@@ -1068,18 +1062,30 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars):
     vols   = [b['volume']                         for b in micro_bars]
     tbs    = [b.get('taker_buy', b['volume']*0.5) for b in micro_bars]
 
-    # Price extremes — dual window prevents single-tick spikes from qualifying
     n_s = min(12, m)
     n_l = min(45, m)
-    at_hi_s = price >= max(closes[-n_s:])
-    at_lo_s = price <= min(closes[-n_s:])
-    at_hi   = at_hi_s and price >= max(closes[-n_l:])
-    at_lo   = at_lo_s and price <= min(closes[-n_l:])
+    hi_s = max(closes[-n_s:]); lo_s = min(closes[-n_s:])
+    hi_l = max(closes[-n_l:]); lo_l = min(closes[-n_l:])
+    range_l = hi_l - lo_l
 
-    # Taker buy ratio windows — always from the rolling bar list, never the
-    # per-minute buffer that resets to 1 entry at each minute boundary.
-    vol_now = sum(vols[-3:]);  tb_now = sum(tbs[-3:])
-    vol_pr  = sum(vols[-12:-3]); tb_pr = sum(tbs[-12:-3])
+    # No meaningful structure below 0.03% price movement (~$22 on $73k BTC).
+    # Flat/dead markets generate spurious "at extreme" signals without this.
+    if range_l < price * 0.0003:
+        return 'MID'
+
+    # Where is price within the 45s range?  0.0 = at bottom, 1.0 = at top.
+    pct_pos = (price - lo_l) / range_l
+
+    # Structural extreme: dual-window agreement AND price must be in the
+    # upper/lower portion of the range.  This blocks "PEAK" calls when price
+    # just ticked up from a trough — even if it's the 45s max, if it's still
+    # near the bottom of the range it isn't a structural high.
+    at_hi = (price >= hi_s and price >= hi_l and pct_pos >= 0.65)
+    at_lo = (price <= lo_s and price <= lo_l and pct_pos <= 0.35)
+
+    # Taker buy ratio: rolling windows from micro_bars only
+    vol_now = sum(vols[-3:]);    tb_now = sum(tbs[-3:])
+    vol_pr  = sum(vols[-12:-3]); tb_pr  = sum(tbs[-12:-3])
     tr_now  = tb_now / vol_now if vol_now > 1e-8 else 0.5
     tr_pr   = tb_pr  / vol_pr  if vol_pr  > 1e-8 else 0.5
 
@@ -1090,28 +1096,56 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars):
     buy_sustained  = buy_now  and tr_pr > 0.55
     sell_sustained = sell_now and tr_pr < 0.45
 
-    obi_pos = obi >  0.05
-    obi_neg = obi < -0.05
+    obi_pos     = obi >  0.05;  obi_neg     = obi < -0.05
+    obi_str_pos = obi >  0.20;  obi_str_neg = obi < -0.20
 
-    # Volume divergence: volume dries up as price makes new extreme
-    vol_e = sum(vols[-8:-4]); vol_l = sum(vols[-4:])
-    vol_div = vol_e > 1e-8 and vol_l < vol_e * 0.50
+    vol_e = sum(vols[-8:-4]); vol_l_w = sum(vols[-4:])
+    vol_div = vol_e > 1e-8 and vol_l_w < vol_e * 0.50
+
+    # Velocity: $/s over two 5-second windows.
+    # vel_cont_* = BOTH windows moving same direction = sustained directional move.
+    # vel_up/vel_dn = significant single-window speed ($0.10/s ≈ $6/min).
+    n5  = min(5, m - 1)
+    n10 = min(10, m - 1)
+    vel_now = (closes[-1] - closes[-(n5 + 1)]) / n5       if n5  > 0 else 0.0
+    vel_pr  = (closes[-(n5 + 1)] - closes[-(n10 + 1)]) / (n10 - n5) \
+              if n10 > n5 else 0.0
+    vel_cont_up = vel_now > 0.02 and vel_pr > 0.02   # both windows rising
+    vel_cont_dn = vel_now < -0.02 and vel_pr < -0.02  # both windows falling
+    vel_up      = vel_now >  0.10                      # strong upward push
+    vel_dn      = vel_now < -0.10                      # strong downward push
 
     # ── PEAK ──────────────────────────────────────────────────────────────────
     if at_hi:
-        if kdv_down:                          return 'PEAK'   # KdV turned at high
-        if buy_flipped:                       return 'PEAK'   # buying exhausted
-        if sell_now and (obi_neg or vol_div): return 'PEAK'   # sell confirmed
+        if kdv_down and not obi_str_pos:       return 'PEAK'
+        if buy_flipped:                         return 'PEAK'
+        if sell_now and obi_neg:                return 'PEAK'
+        if sell_now and vol_div:                return 'PEAK'
+        if sell_now and res_dir == -1:          return 'PEAK'
 
     # ── TROUGH ────────────────────────────────────────────────────────────────
     if at_lo:
-        if kdv_up:                            return 'TROUGH'
-        if sell_flipped:                      return 'TROUGH'
-        if buy_now and (obi_pos or vol_div):  return 'TROUGH'
+        if kdv_up and not obi_str_neg:         return 'TROUGH'
+        if sell_flipped:                        return 'TROUGH'
+        if buy_now and obi_pos:                 return 'TROUGH'
+        if buy_now and vol_div:                 return 'TROUGH'
+        if buy_now and res_dir == +1:           return 'TROUGH'
 
-    # ── CONT_UP / CONT_DOWN ───────────────────────────────────────────────────
-    if at_hi_s and buy_sustained and obi_pos and not kdv_down:  return 'CONT_UP'
-    if at_lo_s and sell_sustained and obi_neg and not kdv_up:   return 'CONT_DOWN'
+    # ── CONT_UP ───────────────────────────────────────────────────────────────
+    # Price at 12s high with no KdV bearish flip. Three paths:
+    #   1. Taker buy ratio sustained (classic order-flow continuation)
+    #   2. Velocity positive both windows + taker/OBI confirmation (momentum continuation)
+    #   3. Strong upward velocity with positive OBI (velocity continuation)
+    if price >= hi_s and not kdv_down:
+        if buy_sustained and not obi_str_neg:          return 'CONT_UP'
+        if vel_cont_up and (buy_now or obi_pos):        return 'CONT_UP'
+        if vel_up and obi_pos:                          return 'CONT_UP'
+
+    # ── CONT_DOWN ─────────────────────────────────────────────────────────────
+    if price <= lo_s and not kdv_up:
+        if sell_sustained and not obi_str_pos:          return 'CONT_DOWN'
+        if vel_cont_dn and (sell_now or obi_neg):        return 'CONT_DOWN'
+        if vel_dn and obi_neg:                          return 'CONT_DOWN'
 
     return 'MID'
 
@@ -1385,9 +1419,9 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
     # Per-TF phase state for edge-detected multi-TF signals
     last_tf_states = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
-    # 1m intrabar state — prevents re-firing same direction until phase returns to MID
     last_1m_state  = 'MID'
-    last_range_state = None   # 'sup'|'res' — last ranging side fired
+    mid_streak     = 0         # consecutive MID seconds; clears last_1m_state at 3
+    last_range_state = None    # 'sup'|'res' — last ranging side fired
 
     # Micro layer: rolling 1s window across minute boundaries
     micro_window  = []   # list of 1s bar dicts
@@ -1574,11 +1608,16 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
             # ── Pattern observation — order flow patterns at price extremes ───
             obs_label = _observe_structural(
-                p_close, obi_p, kdv_flipped_up, kdv_flipped_down, micro_window)
+                p_close, obi_p, kdv_flipped_up, kdv_flipped_down,
+                micro_window, res_dir=res_dir)
 
             if obs_label == 'MID':
-                last_1m_state = 'MID'
-            elif obs_label != last_1m_state:
+                mid_streak += 1
+                if mid_streak >= 3:
+                    last_1m_state = 'MID'
+            else:
+                mid_streak = 0
+            if obs_label not in ('MID',) and obs_label != last_1m_state:
                 last_1m_state = obs_label
                 obs_dir   = +1 if obs_label in ('TROUGH', 'CONT_UP') else -1
                 side_o    = 'LONG' if obs_dir > 0 else 'SHORT'
@@ -1834,8 +1873,8 @@ class ScanState:
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
-                 'last_tf_states', 'last_1m_state', 'last_range_state',
-                 'session_shelves')
+                 'last_tf_states', 'last_1m_state', 'mid_streak',
+                 'last_range_state', 'session_shelves')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1866,6 +1905,7 @@ class ScanState:
         self.last_htf_sup     = False
         self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
         self.last_1m_state    = 'MID'
+        self.mid_streak       = 0
         self.last_range_state = None   # 'sup'|'res' — last ranging side fired
         self.session_shelves  = []
 
@@ -2281,11 +2321,16 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             # composite_phase_i kept for display only, not for state management.
             # _observe_structural uses the rolling micro_window — no minute resets.
             obs_label_i = _observe_structural(
-                p_close, obi_p, kdv_flipped_up, kdv_flipped_down, state.micro_window)
+                p_close, obi_p, kdv_flipped_up, kdv_flipped_down,
+                state.micro_window, res_dir=res_dir)
 
             if obs_label_i == 'MID':
-                state.last_1m_state = 'MID'
-            elif obs_label_i != state.last_1m_state:
+                state.mid_streak += 1
+                if state.mid_streak >= 3:
+                    state.last_1m_state = 'MID'
+            else:
+                state.mid_streak = 0
+            if obs_label_i not in ('MID',) and obs_label_i != state.last_1m_state:
                 state.last_1m_state = obs_label_i
                 obs_dir_i  = +1 if obs_label_i in ('TROUGH', 'CONT_UP') else -1
                 side_oi    = 'LONG' if obs_dir_i > 0 else 'SHORT'
