@@ -408,6 +408,78 @@ def _ob_room_above(asks, price, min_dist):
     return dist >= min_dist, dist, f'wall@{wall:.0f}(+{dist:.0f})'
 
 
+def _detect_shelves(bars, min_bars=3, range_pct=0.0005):
+    """Find consolidation zones — runs where 1m close range stays within range_pct.
+
+    Returns list of shelf dicts sorted by level ascending:
+      level     float  — mean close price of the shelf
+      bars      int    — minutes spent at this level
+      vol       float  — total volume traded while shelving
+      buy_ratio float  — taker_buy / total vol (>0.5 = mostly bought, longs sitting here)
+      broken    str    — 'up'|'down'|'open' (open = price still in zone)
+      ts_start  int    — epoch ms of first bar in shelf
+      ts_end    int    — epoch ms of last bar in shelf
+    """
+    if len(bars) < min_bars:
+        return []
+    shelves = []
+    i = 0
+    while i < len(bars):
+        j = i
+        base = bars[i]['close']
+        while j + 1 < len(bars):
+            nxt_closes = [bars[k]['close'] for k in range(i, j+2)]
+            rng = (max(nxt_closes) - min(nxt_closes)) / base if base else 1.0
+            if rng > range_pct:
+                break
+            j += 1
+        span = j - i + 1
+        if span >= min_bars:
+            sl = bars[i:j+1]
+            closes = [b['close'] for b in sl]
+            level = sum(closes) / len(closes)
+            vol   = sum(b['volume'] for b in sl)
+            tb    = sum(b.get('taker_buy', b['volume'] * 0.5) for b in sl)
+            buy_r = tb / vol if vol > 0 else 0.5
+            # Determine break direction from the bar after the shelf (if available)
+            if j + 1 < len(bars):
+                after = bars[j+1]['close']
+                broken = 'up' if after > level * (1 + range_pct) else \
+                         'down' if after < level * (1 - range_pct) else 'open'
+            else:
+                broken = 'open'
+            shelves.append({
+                'level':     level,
+                'bars':      span,
+                'vol':       vol,
+                'buy_ratio': buy_r,
+                'broken':    broken,
+                'ts_start':  sl[0]['ts'],
+                'ts_end':    sl[-1]['ts'],
+            })
+        i = j + 1
+    return sorted(shelves, key=lambda s: s['level'])
+
+
+def _shelf_context(shelves, price):
+    """Return nearest shelf above and below current price as annotation strings."""
+    below = [s for s in shelves if s['level'] < price]
+    above = [s for s in shelves if s['level'] > price]
+    parts = []
+    if below:
+        s = below[-1]          # closest below
+        dist = price - s['level']
+        bias = 'L' if s['buy_ratio'] >= 0.55 else ('S' if s['buy_ratio'] <= 0.45 else '~')
+        # L = longs trapped below (potential sellers on return), S = shorts
+        parts.append(f"sup↓${s['level']:,.0f}({s['bars']}bar,{bias},{dist:.0f}Δ)")
+    if above:
+        s = above[0]           # closest above
+        dist = s['level'] - price
+        bias = 'L' if s['buy_ratio'] >= 0.55 else ('S' if s['buy_ratio'] <= 0.45 else '~')
+        parts.append(f"res↑${s['level']:,.0f}({s['bars']}bar,{bias},{dist:.0f}Δ)")
+    return '  '.join(parts)
+
+
 def _wall_absorption(bids, asks, price, closed_1m, b5, b15, is_long, n=14):
     """
     Compare the nearest significant OB wall to average taker-directional
@@ -1117,6 +1189,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     accum           = HydraulicAccumulator()
     prev_kdv_global = 0
     sig_count       = 0
+    session_shelves = []   # updated each minute from closed_1m
 
 
     # Per-closed-candle history for adaptive thresholds
@@ -1426,6 +1499,8 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         hist_dk_ds_a.append(min_dk_ds)
         hist_dk_fos_a.append(min_dk_fos)
 
+        session_shelves = _detect_shelves(closed_1m[-60:])
+
         # ── Output ───────────────────────────────────────────────────────────
         comp_f = final['comp']
         mi  = comp_f.get('micro',{});  sh_ = comp_f.get('subharm',{})
@@ -1540,6 +1615,8 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             if reason_str: print(f"     {reason_str}")
             if dk_str:     print(f"     {dk_str}")
             print(f"     {mtf}")
+            shelf_ann = _shelf_context(session_shelves, cand_entry)
+            if shelf_ann: print(f"     {shelf_ann}")
             print(f"{bar}{Z}\n")
 
         # ── Per-TF independent phase detection ───────────────────────────
@@ -1580,6 +1657,8 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             print(f"  [{tf_lbl}] {tf_arrow}  {tf_side}  ·  {tf_stype:<20}  [{sig_count}]")
             print(f"     {_ts(min_sec)}  ·  ${tf_entry:>10,.2f}")
             print(f"     {tf_conf}")
+            tf_shelf_ann = _shelf_context(session_shelves, tf_entry)
+            if tf_shelf_ann: print(f"     {tf_shelf_ann}")
             print(f"{tf_bar}{Z}\n")
 
         if kdv != 0: prev_kdv_global = kdv
@@ -1613,7 +1692,7 @@ class ScanState:
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
-                 'last_tf_states')
+                 'last_tf_states', 'session_shelves')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1643,6 +1722,7 @@ class ScanState:
         self.last_res_dir     = 0
         self.last_htf_sup     = False
         self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
+        self.session_shelves  = []
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
@@ -2044,6 +2124,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             if (s1_secs[-1] >= min_sec + 60
                     and min_sec not in state.appended_min_ts):
                 _append_closed_1m(state, s1_by_sec, min_sec)
+                state.session_shelves = _detect_shelves(state.closed_1m[-60:])
             continue
 
         # HTF + MTF
@@ -2104,6 +2185,8 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         state.hist_dk_ds.append(min_dk_ds)
         state.hist_dk_fos.append(min_dk_fos)
 
+        state.session_shelves = _detect_shelves(state.closed_1m[-60:])
+
         if passed:
             state.sig_count += 1
             # Wall absorption annotation
@@ -2134,6 +2217,8 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 print(f"  {arrow}  {side}  ·  {stype:<20}  [{state.sig_count}]")
                 print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
                 print(f"     {confirm_str}")
+                shelf_ann_i = _shelf_context(state.session_shelves, cand_entry)
+                if shelf_ann_i: print(f"     {shelf_ann_i}")
                 print(f"{bar}{Z}\n")
 
         kdv_f = final.get('kdv', 0)
@@ -2189,11 +2274,14 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 print(f"  [{tf_lbl_i}] {tf_arrow_i}  {tf_side_i}  ·  {tf_stype_i:<20}  [{state.sig_count}]")
                 print(f"     {_ts(min_sec)}  ·  ${tf_entry_i:>10,.2f}")
                 print(f"     {tf_conf_i}")
+                tf_shelf_ann_i = _shelf_context(state.session_shelves, tf_entry_i)
+                if tf_shelf_ann_i: print(f"     {tf_shelf_ann_i}")
                 print(f"{tf_bar_i}{Z}\n")
 
         if (s1_secs[-1] >= min_sec + 60
                 and min_sec not in state.appended_min_ts):
             _append_closed_1m(state, s1_by_sec, min_sec)
+            state.session_shelves = _detect_shelves(state.closed_1m[-60:])
 
     if new_secs:
         state.last_sec = new_secs[-1]
