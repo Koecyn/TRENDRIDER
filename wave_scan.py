@@ -100,8 +100,37 @@ def _load_candles(fname):
 
 
 def _fetch_candles_1m():
-    """Load backfilled 1m candles."""
-    return _load_candles('BTCUSDT_1m.json.gz')
+    """Load backfilled 1m candles, merging live session bars written by scan_live."""
+    base = _load_candles('BTCUSDT_1m.json.gz')
+
+    # Live session candles (bar dicts, not klines) — check local file first, then git
+    live_bars = []
+    live_local = os.path.join(REPO, 'data', 'raw', 'BTCUSDT_1m_live.json.gz')
+    if os.path.exists(live_local):
+        try:
+            with gzip.open(live_local, 'rb') as _lf:
+                live_bars = json.loads(_lf.read().decode())
+        except Exception:
+            pass
+    if not live_bars:
+        try:
+            r = subprocess.run(
+                ['git', 'show', 'origin/data/signals:data/raw/BTCUSDT_1m_live.json.gz'],
+                capture_output=True, cwd=REPO)
+            if r.stdout:
+                live_bars = json.loads(gzip.decompress(r.stdout).decode())
+        except Exception:
+            pass
+
+    if live_bars:
+        base_ts = {b['ts'] for b in base}
+        for b in live_bars:
+            if b['ts'] not in base_ts:
+                base.append(b)
+                base_ts.add(b['ts'])
+        base.sort(key=lambda b: b['ts'])
+
+    return base
 
 
 def _fetch_candles_1h():
@@ -1002,6 +1031,57 @@ def _wf_phase(bars, n=30):
         return 0.0
 
 
+def _observe_structural(price, prices_buf, vols_buf, takers_buf,
+                        obi, kdv_up, kdv_down):
+    """
+    Label current second's order flow pattern from observable data only.
+
+    Returns: 'PEAK' | 'TROUGH' | 'CONT_UP' | 'CONT_DOWN' | 'MID'
+
+    No wave phase threshold — patterns only:
+      PEAK    = price at N-bar high  + sell pressure appearing  + OBI softening or KdV flipping down
+      TROUGH  = price at N-bar low   + buy pressure appearing   + OBI strengthening or KdV flipping up
+      CONT_UP = price at N-bar high  + buyers driving           + OBI positive (continuation)
+      CONT_DOWN = price at N-bar low + sellers driving          + OBI negative (continuation)
+    """
+    n = len(prices_buf)
+    if n < 3:
+        return 'MID'
+
+    # 3-second taker-buy ratio: who is hitting market orders?
+    vol3 = sum(vols_buf[-3:])
+    tb3  = sum(takers_buf[-3:])
+    tb_r = tb3 / vol3 if vol3 > 1e-8 else 0.5
+    sell_pres = tb_r < 0.40   # takers are mostly selling into bids
+    buy_pres  = tb_r > 0.60   # takers are mostly buying into asks
+
+    # Price position vs recent bars (up to 5 seconds)
+    recent = prices_buf[max(0, n - 5):]
+    at_hi  = price >= max(recent)
+    at_lo  = price <= min(recent)
+
+    obi_pos = obi >  0.05
+    obi_neg = obi < -0.05
+
+    # Peak: price just made a new high AND selling is starting to dominate
+    if at_hi and (sell_pres or kdv_down) and (obi_neg or kdv_down):
+        return 'PEAK'
+
+    # Trough: price just made a new low AND buying is starting to dominate
+    if at_lo and (buy_pres or kdv_up) and (obi_pos or kdv_up):
+        return 'TROUGH'
+
+    # Continuation up: buyers driving price to new highs, OBI confirming
+    if at_hi and buy_pres and obi_pos:
+        return 'CONT_UP'
+
+    # Continuation down: sellers driving price to new lows, OBI confirming
+    if at_lo and sell_pres and obi_neg:
+        return 'CONT_DOWN'
+
+    return 'MID'
+
+
 def _tf_phase_state(bars, tf_label):
     """Run WF on TF bar array using TF-specific gates.
     Returns (state, phase, range_pct, wf_dir, fail_reason).
@@ -1322,18 +1402,6 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
 
-        cand_sec    = None
-        cand_score  = 0.0
-        cand_dir    = 0
-        cand_stype  = 'MID'
-        cand_entry  = 0.0
-        cand_tgt    = 0.0
-        cand_kdvbal = 0.0
-        cand_kdvdir = 0
-        cand_obi    = 0.0
-        cand_sc_gate = thresh
-        cand_dec_state = 0
-
         sustain_count    = 0
         prev_sb          = 0
         prev_kdv_min     = prev_kdv_global
@@ -1461,8 +1529,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
             sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
 
-            # Composite multi-TF phase: +1.0 = ALL timeframes at their crest together.
-            # 1m weight is small — its micro cycle alone cannot trigger a signal.
+            # Composite multi-TF phase — kept as context in the observation, not the trigger.
             composite_phase = (
                 _COMP_W['1m']  * micro_phase  +
                 _COMP_W['5m']  * _tf_ph_5m    +
@@ -1470,144 +1537,52 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 _COMP_W['1h']  * _tf_ph_1h    +
                 _COMP_W['4h']  * _tf_ph_4h
             )
-            state_now = _micro_state(composite_phase, peak_ph, trough_ph)
 
-            # Stale-price suppression: WF oscillates freely on flat zero-volume bars.
-            # Suppress PEAK/TROUGH when the last 3+ closed minutes show no price movement.
-            if state_now != 'MID' and len(closed_1m) >= 3:
-                recent3 = closed_1m[-3:]
-                if (len(set(b['close'] for b in recent3)) == 1
-                        and sum(b['volume'] for b in recent3) < 1e-6
-                        and sum(p_vols) < 1e-6):
-                    state_now = 'MID'
+            # ── Pattern observation — no threshold on any derived metric ──────
+            # Label is driven by order flow patterns AT price extremes.
+            obs_label = _observe_structural(
+                p_close, p_closes, p_vols, p_tb,
+                obi_p, kdv_flipped_up, kdv_flipped_down)
 
-            # Reset edge tracker when phase returns to MID
-            if state_now == 'MID':
+            if obs_label == 'MID':
                 last_1m_state = 'MID'
+            elif obs_label != last_1m_state:
+                last_1m_state = obs_label
+                obs_dir   = +1 if obs_label in ('TROUGH', 'CONT_UP') else -1
+                side_o    = 'LONG' if obs_dir > 0 else 'SHORT'
+                arrow_o   = '▲' if obs_dir > 0 else '▼'
+                c_o       = G if obs_dir > 0 else R
+                bar_o     = '━' * 50
 
-            # Fire gate the moment physics qualifies — don't wait for minute close.
-            # Condition: score sustained, phase at extreme, haven't fired this state yet.
-            if (sb != 0 and sustain_count >= sustain_needed
-                    and state_now != 'MID' and state_now != last_1m_state):
-                stype = _sig_type(state_now, sb)
-                dec_now = knife_states.get(sec, (0,0.0,0.0,'NEUT'))[0]
-                cand_sec    = sec
-                cand_score  = f_sc
-                cand_dir    = sb
-                cand_stype  = stype
-                cand_entry  = p_close
-                cand_tgt    = tgts.get('primary',
-                                p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
-                cand_kdvbal = kdv_bal
-                cand_kdvdir = kdv
-                cand_obi       = obi_p
-                cand_sc_gate   = sc_gate
-                cand_dec_state = dec_now
+                vol3_o  = sum(p_vols[-3:])
+                tb3_o   = sum(p_tb[-3:])
+                tb_r_o  = tb3_o / vol3_o if vol3_o > 1e-8 else 0.5
+                tb_pct_o = f"taker {tb_r_o*100:.0f}%"
+                kdv_ev_o = ('kdv↑' if kdv_flipped_up else
+                            'kdv↓' if kdv_flipped_down else
+                            f'kdv={kdv_bal:+.1f}')
+                dk_o     = KnifeDecayBuffer.compact(min_dk_state, min_dk_ds, min_dk_fos)
+                shelf_o  = _shelf_context(session_shelves, p_close)
+                t1mo= htf_ctx.get('trend_1m','ne')[:2]
+                t5mo= htf_ctx.get('trend_5m','ne')[:2]
+                t15o= htf_ctx.get('trend_15m','ne')[:2]
+                t1ho= htf_ctx.get('trend_1h','ne')[:2]
+                t4ho= htf_ctx.get('trend_4h','ne')[:2]
+                def _tr2o(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+                mtf_o = (f"1m{_tr2o(t1mo)}  5m{_tr2o(t5mo)}  15m{_tr2o(t15o)}"
+                         f"  1h{_tr2o(t1ho)}  4h{_tr2o(t4ho)}")
 
-                # Evaluate gate RIGHT NOW with current-second indicators
-                kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
-                              (cand_dir < 0 and kdv_flipped_down)
-                gate_obi = (best_obi_long  if cand_dir > 0 else
-                            best_obi_short if cand_dir < 0 else cand_obi)
-                passed_now, fail_now = _gates(
-                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
-                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
-                    gate_obi, align, res_dir, cand_dir,
-                    at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
-                confirm_now = fail_now if passed_now else ''
-                if not passed_now: fail_now_str = fail_now
-                else: fail_now_str = ''
-
-                # Stale-OBI gate
-                if passed_now and cand_stype == 'TROUGH-REV' and cand_dir > 0:
-                    obi_decay = best_obi_long - cand_obi
-                    if obi_decay > 0.5 and cand_kdvbal < 5.0:
-                        passed_now  = False
-                        fail_now_str = (f'stale-obi(decay={obi_decay:.2f})'
-                                        f'+weak-kdv(bal={cand_kdvbal:.1f})')
-
-                # Knife-decay annotation + KNIFE minimum
-                if passed_now and cand_stype == 'TROUGH-REV':
-                    if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_now += '+FLOOR'
-                    elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_now += '+FLR?'
-                    elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_now += '+DECAY'
-                    elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_now += '+DEC?'
-                    elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_now += '+KNIFE'
-                    if min_dk_state < KnifeDecayBuffer.KNIFE:
-                        passed_now   = False
-                        fail_now_str = 'dk-none(no-fall-detected)'
-
-                # Divergence pattern
-                if passed_now and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
-                    patt_ok, patt_desc = _divergence_pattern(
-                        hist_signed, hist_dk_ds_a, hist_dk_fos_a, cand_stype)
-                    if patt_ok:
-                        confirm_now += f'+{patt_desc}'
-
-                if passed_now:
-                    # Wall absorption annotation
-                    is_long = cand_dir > 0
-                    tf_cl, w_vol, w_px, wa_note = _wall_absorption(
-                        bids, asks, cand_entry, closed_1m, b5, b15, is_long)
-                    wa_tag = f'wa={tf_cl}' if tf_cl else 'wa=X'
-                    confirm_now += f'+{wa_tag}({wa_note})'
-
-                    sig_count += 1
-                    t_off = cand_sec - min_sec
-                    conf  = f' [{confirm_now}]' if confirm_now else ''
-                    notes_inline = (f"[{sig_count}] *** {cand_stype} "
-                                    f"{'LONG' if cand_dir>0 else 'SHORT'} @ {_ts(cand_sec)} "
-                                    f"(t+{t_off}s){conf}  ${cand_entry:,.2f} → ${cand_tgt:,.2f}")
-
-                    # Signal card — printed immediately at the second it fires
-                    import re as _re
-                    arrow  = '▲' if cand_dir > 0 else '▼'
-                    side   = 'LONG' if cand_dir > 0 else 'SHORT'
-                    stype_lbl = cand_stype.replace('-', ' ')
-                    c      = G if cand_dir > 0 else R
-                    bar    = '━' * 50
-                    reasons = []
-                    cs = confirm_now
-                    m2 = _re.search(r'ob=([+\-\d.]+)', cs)
-                    if m2: reasons.append(f"OBI {m2.group(1)}")
-                    if 'kdv' in cs.lower() or 'flip' in cs.lower():
-                        reasons.append(f"KdV {'↑' if cand_dir>0 else '↓'}")
-                    if 'FLOOR' in cs and 'FLR' not in cs: reasons.append('FLOOR locked')
-                    elif 'FLR?' in cs: reasons.append('Floor forming')
-                    elif 'DECAY' in cs: reasons.append('Momentum decay')
-                    if not reasons: reasons.append(cs)
-                    reason_str = '  ·  '.join(reasons)
-                    dk_lbl2 = KnifeDecayBuffer.LABELS.get(min_dk_state, '')
-                    dk_str2 = (f"{dk_lbl2}  ds={min_dk_ds:.2f}  fos={min_dk_fos:.2f}"
-                               if min_dk_state else '')
-
-                    t1m_= htf_ctx.get('trend_1m','ne')[:2]
-                    t5m_= htf_ctx.get('trend_5m','ne')[:2]
-                    t15_= htf_ctx.get('trend_15m','ne')[:2]
-                    t1h_= htf_ctx.get('trend_1h','ne')[:2]
-                    t4h_= htf_ctx.get('trend_4h','ne')[:2]
-                    def _tr2(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
-                    mtf_ = (f"1m{_tr2(t1m_)}  5m{_tr2(t5m_)}  15m{_tr2(t15_)}"
-                            f"  1h{_tr2(t1h_)}  4h{_tr2(t4h_)}")
-                    shelf_ann2 = _shelf_context(session_shelves, cand_entry)
-
-                    print(f"\n{c}{bar}")
-                    print(f"  {arrow}  {side}  ·  {stype_lbl:<20}  [{sig_count}]")
-                    print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
-                    if reason_str: print(f"     {reason_str}")
-                    if dk_str2:    print(f"     {dk_str2}")
-                    print(f"     {mtf_}")
-                    if shelf_ann2: print(f"     {shelf_ann2}")
-                    print(f"{bar}{Z}\n")
-
-                    # Mark this phase state fired — suppress until MID resets it
-                    last_1m_state = state_now
-                    cand_sec = None   # reset so next reversal can form
-
-                else:
-                    # Gate failed — log as blocked for wave table but allow retry next second
-                    notes_inline = f"sig:{cand_stype}/{'LONG' if cand_dir>0 else 'SHORT'} BLOCKED:{fail_now_str}"
-                    cand_sec = None
+                sig_count += 1
+                notes_inline = (f"[{sig_count}] {obs_label} {side_o} @ {_ts(sec)}"
+                                f"  ${p_close:,.2f}")
+                print(f"\n{c_o}{bar_o}")
+                print(f"  {arrow_o}  {side_o}  ·  {obs_label:<20}  [{sig_count}]")
+                print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
+                print(f"     {tb_pct_o}  ·  obi={obi_p:+.3f}  ·  {kdv_ev_o}")
+                print(f"     cph={composite_phase:+.3f}  ·  {mtf_o}")
+                if dk_o:    print(f"     {dk_o}")
+                if shelf_o: print(f"     {shelf_o}")
+                print(f"{bar_o}{Z}\n")
 
             # ── Ranging oscillation signal ─────────────────────────────────────
             rng_dir, rng_sup, rng_res, rng_span = _range_signal(
@@ -2156,10 +2131,6 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         _tf_ph_4h_i  = _wf_phase(b4h)
 
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
-        cand_sec=None; cand_score=0.0; cand_dir=0
-        cand_stype='MID'; cand_entry=0.0; cand_tgt=0.0
-        cand_kdvbal=0.0; cand_kdvdir=0; cand_obi=0.0
-        cand_sc_gate=thresh; cand_dec_state=0
         sustain_count=0; prev_sb=0
         prev_kdv_min=state.prev_kdv_global
         kdv_flipped_up=False; kdv_flipped_down=False
@@ -2287,88 +2258,61 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             if state_now_i == 'MID':
                 state.last_1m_state = 'MID'
 
-            if (sb != 0 and sustain_count >= sustain_needed
-                    and state_now_i != 'MID' and state_now_i != state.last_1m_state):
-                stype_i = _sig_type(state_now_i, sb)
-                cand_sec    = sec; cand_score  = f_sc; cand_dir = sb
-                cand_stype  = stype_i; cand_entry = p_close
-                cand_tgt    = tgts.get('primary',
-                                p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
-                cand_kdvbal = kdv_bal; cand_kdvdir = kdv
-                cand_obi    = obi_p;  cand_sc_gate = sc_gate
-                cand_dec_state = dk_st
+            # ── Pattern observation — no threshold on any derived metric ──────
+            obs_label_i = _observe_structural(
+                p_close, p_closes, p_vols, p_tb,
+                obi_p, kdv_flipped_up, kdv_flipped_down)
 
-                # Gate fires immediately at this second
-                kdv_flipped_i = (cand_dir > 0 and kdv_flipped_up) or \
-                                (cand_dir < 0 and kdv_flipped_down)
-                gate_obi_i = (best_obi_long  if cand_dir > 0 else
-                              best_obi_short if cand_dir < 0 else cand_obi)
-                passed_i, fail_i = _gates(
-                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
-                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
-                    gate_obi_i, align, res_dir, cand_dir,
-                    at_sup, kdv_flipped_i, sc_gate=cand_sc_gate, at_res=at_res)
-                confirm_i = fail_i if passed_i else ''
-                fail_i_str = '' if passed_i else fail_i
+            if obs_label_i == 'MID':
+                state.last_1m_state = 'MID'
+            elif obs_label_i != state.last_1m_state:
+                state.last_1m_state = obs_label_i
+                obs_dir_i  = +1 if obs_label_i in ('TROUGH', 'CONT_UP') else -1
+                side_oi    = 'LONG' if obs_dir_i > 0 else 'SHORT'
+                arrow_oi   = '▲' if obs_dir_i > 0 else '▼'
+                c_oi       = G if obs_dir_i > 0 else R
+                bar_oi     = '━' * 50
 
-                if passed_i and cand_stype == 'TROUGH-REV' and cand_dir > 0:
-                    obi_decay_i = best_obi_long - cand_obi
-                    if obi_decay_i > 0.5 and cand_kdvbal < 5.0:
-                        passed_i = False
-                        fail_i_str = (f'stale-obi(decay={obi_decay_i:.2f})'
-                                      f'+weak-kdv(bal={cand_kdvbal:.1f})')
+                vol3_oi = sum(p_vols[-3:])
+                tb3_oi  = sum(p_tb[-3:])
+                tb_r_oi = tb3_oi / vol3_oi if vol3_oi > 1e-8 else 0.5
+                kdv_ev_oi = ('kdv↑' if kdv_flipped_up else
+                             'kdv↓' if kdv_flipped_down else
+                             f'kdv={kdv_bal:+.1f}')
+                shelf_oi = _shelf_context(state.session_shelves, p_close)
+                t1moi= htf_ctx.get('trend_1m','ne')[:2]
+                t5moi= htf_ctx.get('trend_5m','ne')[:2]
+                t15oi= htf_ctx.get('trend_15m','ne')[:2]
+                t1hoi= htf_ctx.get('trend_1h','ne')[:2]
+                t4hoi= htf_ctx.get('trend_4h','ne')[:2]
+                def _tr2oi(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+                mtf_oi = (f"1m{_tr2oi(t1moi)}  5m{_tr2oi(t5moi)}  15m{_tr2oi(t15oi)}"
+                          f"  1h{_tr2oi(t1hoi)}  4h{_tr2oi(t4hoi)}")
 
-                if passed_i and cand_stype == 'TROUGH-REV':
-                    if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_i += '+FLOOR'
-                    elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_i += '+FLR?'
-                    elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_i += '+DECAY'
-                    elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_i += '+DEC?'
-                    elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_i += '+KNIFE'
-                    if min_dk_state < KnifeDecayBuffer.KNIFE:
-                        passed_i = False; fail_i_str = 'dk-none(no-fall-detected)'
+                state.sig_count += 1
+                sig_i = {
+                    'n':      state.sig_count,
+                    'dir':    obs_dir_i,
+                    'label':  obs_label_i,
+                    'time':   _ts(sec),
+                    'price':  p_close,
+                    'taker':  round(tb_r_oi, 3),
+                    'obi':    round(obi_p, 3),
+                    'kdv':    kdv_ev_oi,
+                    'cph':    round(composite_phase_i, 3),
+                    'min_sec': min_sec,
+                }
+                state.signals.append(sig_i)
+                new_signals.append(sig_i)
 
-                if passed_i and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
-                    patt_ok_i, patt_desc_i = _divergence_pattern(
-                        state.hist_signed_scores, state.hist_dk_ds, state.hist_dk_fos,
-                        cand_stype)
-                    if patt_ok_i: confirm_i += f'+{patt_desc_i}'
-
-                if passed_i:
-                    bids_now, asks_now = ob_by_sec.get(sec, ([], []))
-                    tf_cl_i2, _, _, wa_note_i2 = _wall_absorption(
-                        bids_now, asks_now, cand_entry, state.closed_1m, b5, b15,
-                        cand_dir > 0)
-                    confirm_i += f'+wa={tf_cl_i2}' if tf_cl_i2 else '+wa=X'
-
-                    state.sig_count += 1
-                    sig_i = {
-                        'n':      state.sig_count,
-                        'dir':    cand_dir,
-                        'stype':  cand_stype,
-                        'time':   _ts(cand_sec),
-                        'price':  cand_entry,
-                        'confirm':confirm_i,
-                        'min_sec':min_sec,
-                    }
-                    state.signals.append(sig_i)
-                    new_signals.append(sig_i)
-
-                    if signals_only:
-                        arrow_i = '▲' if cand_dir > 0 else '▼'
-                        side_i  = 'LONG' if cand_dir > 0 else 'SHORT'
-                        stype_lbl_i = cand_stype.replace('-', ' ')
-                        c_i = G if cand_dir > 0 else R
-                        bar_i = '━' * 50
-                        shelf_ann_now = _shelf_context(state.session_shelves, cand_entry)
-                        print(f"\n{c_i}{bar_i}")
-                        print(f"  {arrow_i}  {side_i}  ·  {stype_lbl_i:<20}  [{state.sig_count}]")
-                        print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
-                        print(f"     {confirm_i}")
-                        if shelf_ann_now: print(f"     {shelf_ann_now}")
-                        print(f"{bar_i}{Z}\n")
-
-                    state.last_1m_state = state_now_i
-                    cand_sec = None
+                if signals_only:
+                    print(f"\n{c_oi}{bar_oi}")
+                    print(f"  {arrow_oi}  {side_oi}  ·  {obs_label_i:<20}  [{state.sig_count}]")
+                    print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
+                    print(f"     taker {tb_r_oi*100:.0f}%  ·  obi={obi_p:+.3f}  ·  {kdv_ev_oi}")
+                    print(f"     cph={composite_phase_i:+.3f}  ·  {mtf_oi}")
+                    if shelf_oi: print(f"     {shelf_oi}")
+                    print(f"{bar_oi}{Z}\n")
 
             # ── Ranging oscillation signal ─────────────────────────────────────
             rng_dir_i, rng_sup_i, rng_res_i, rng_span_i = _range_signal(

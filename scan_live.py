@@ -19,6 +19,7 @@ REPO         = Path(__file__).resolve().parent
 RAW_DIR      = REPO / "data" / "raw"
 SIGNALS_TXT  = RAW_DIR / "BTCUSDT_SIGNALS.txt"
 SIGNALS_JSON = RAW_DIR / "BTCUSDT_SIGNALS.json"
+CANDLES_1M   = RAW_DIR / "BTCUSDT_1m_live.json.gz"
 DATA_BRANCH  = "data/signals"
 TMP_IDX      = REPO / ".git" / "scan_push.idx"
 LIVE_FILE    = Path.home() / '.trendrider' / 'BTCUSDT_LIVE.jsonl.gz'
@@ -222,7 +223,14 @@ def main():
                     'new_this_run': len(new_sigs),
                 }
                 SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
-                ok = _git_push_files([SIGNALS_TXT, SIGNALS_JSON])
+                if state.closed_1m:
+                    CANDLES_1M.parent.mkdir(parents=True, exist_ok=True)
+                    with gzip.open(CANDLES_1M, 'wb') as _cf:
+                        _cf.write(json.dumps(state.closed_1m[-200:]).encode())
+                push_files = [SIGNALS_TXT, SIGNALS_JSON]
+                if CANDLES_1M.exists():
+                    push_files.append(CANDLES_1M)
+                ok = _git_push_files(push_files)
                 last_push_time = time.time()
                 if not ok:
                     log('push failed', R)
