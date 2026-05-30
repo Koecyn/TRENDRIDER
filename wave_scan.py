@@ -29,7 +29,7 @@ from physics import fusion, waveform as WF, resonance as RES, htf
 from physics.signals import HydraulicAccumulator
 
 REPO         = os.path.dirname(__file__)
-SUSTAIN_S    = 5    # timing floor — minimum seconds score must persist
+SUSTAIN_S    = 1    # fire on first qualifying second — predict, not follow
 SUSTAIN_FLIP = 1    # when KdV flips, 1 confirmed second is enough (the flip IS confirmation)
 PEAK_PH      =  0.75  # structural: top outer-quarter of -1..+1 wave cycle
 TROUGH_PH    = -0.75  # structural: bottom outer-quarter of -1..+1 wave cycle
@@ -1217,6 +1217,8 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
     # Per-TF phase state for edge-detected multi-TF signals
     last_tf_states = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
+    # 1m intrabar state — prevents re-firing same direction until phase returns to MID
+    last_1m_state  = 'MID'
 
     # Micro layer: rolling 1s window across minute boundaries
     micro_window  = []   # list of 1s bar dicts
@@ -1241,6 +1243,21 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = \
             _thresholds(hist_scores, hist_phases, hist_obi, hist_kdv_bals, hist_aligns)
 
+        # HTF/MTF context uses only closed bars — stable for the whole minute.
+        # Compute once before the inner loop so gate checks fire immediately
+        # on each second without waiting for the minute to complete.
+        _htf_price = closed_1m[-1]['close'] if closed_1m else 0.0
+        htf_ctx = htf.regime(_htf_price, b1h, b4h, closed_1m[-30:], b5, b15)
+        at_sup  = htf_ctx.get('at_support',    False)
+        at_res  = htf_ctx.get('at_resistance', False)
+        try:
+            res_out    = RES.resonance(closed_1m[-30:], b5, b15, b1h, b4h)
+            res_dir    = res_out.get('direction',  0)
+            align      = res_out.get('alignment',  0.0)
+            dissonance = res_out.get('dissonance', False)
+        except Exception:
+            res_dir=0; align=0.0; dissonance=False
+
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
 
         cand_sec    = None
@@ -1253,7 +1270,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         cand_kdvdir = 0
         cand_obi    = 0.0
         cand_sc_gate = thresh
-        cand_dec_state = 0   # decay state at the moment the candidate formed
+        cand_dec_state = 0
 
         sustain_count    = 0
         prev_sb          = 0
@@ -1267,10 +1284,9 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         wh_secs       = []
         itype_changes = []
         final         = {}
-        best_obi_long  = 0.0   # most positive OBI seen this minute (TROUGH-REV use)
-        best_obi_short = 0.0   # most negative OBI seen this minute (PEAK-REV use)
+        best_obi_long  = 0.0
+        best_obi_short = 0.0
 
-        # Per-minute decay tracking: use highest state seen during the minute
         min_dk_state = 0; min_dk_ds = 0.0; min_dk_fos = 0.0; min_dk_lbl = 'NEUT'
 
         for sec in secs_in_min:
@@ -1382,9 +1398,17 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             prev_itype = itype
 
             sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
-            if sb != 0 and sustain_count >= sustain_needed and cand_sec is None:
-                state = _micro_state(micro_phase, peak_ph, trough_ph)
-                stype = _sig_type(state, sb)
+            state_now = _micro_state(micro_phase, peak_ph, trough_ph)
+
+            # Reset edge tracker when phase returns to MID
+            if state_now == 'MID':
+                last_1m_state = 'MID'
+
+            # Fire gate the moment physics qualifies — don't wait for minute close.
+            # Condition: score sustained, phase at extreme, haven't fired this state yet.
+            if (sb != 0 and sustain_count >= sustain_needed
+                    and state_now != 'MID' and state_now != last_1m_state):
+                stype = _sig_type(state_now, sb)
                 dec_now = knife_states.get(sec, (0,0.0,0.0,'NEUT'))[0]
                 cand_sec    = sec
                 cand_score  = f_sc
@@ -1399,6 +1423,111 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 cand_sc_gate   = sc_gate
                 cand_dec_state = dec_now
 
+                # Evaluate gate RIGHT NOW with current-second indicators
+                kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
+                              (cand_dir < 0 and kdv_flipped_down)
+                gate_obi = (best_obi_long  if cand_dir > 0 else
+                            best_obi_short if cand_dir < 0 else cand_obi)
+                passed_now, fail_now = _gates(
+                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
+                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
+                    gate_obi, align, res_dir, cand_dir,
+                    at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
+                confirm_now = fail_now if passed_now else ''
+                if not passed_now: fail_now_str = fail_now
+                else: fail_now_str = ''
+
+                # Stale-OBI gate
+                if passed_now and cand_stype == 'TROUGH-REV' and cand_dir > 0:
+                    obi_decay = best_obi_long - cand_obi
+                    if obi_decay > 0.5 and cand_kdvbal < 5.0:
+                        passed_now  = False
+                        fail_now_str = (f'stale-obi(decay={obi_decay:.2f})'
+                                        f'+weak-kdv(bal={cand_kdvbal:.1f})')
+
+                # Knife-decay annotation + KNIFE minimum
+                if passed_now and cand_stype == 'TROUGH-REV':
+                    if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_now += '+FLOOR'
+                    elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_now += '+FLR?'
+                    elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_now += '+DECAY'
+                    elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_now += '+DEC?'
+                    elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_now += '+KNIFE'
+                    if min_dk_state < KnifeDecayBuffer.KNIFE:
+                        passed_now   = False
+                        fail_now_str = 'dk-none(no-fall-detected)'
+
+                # Divergence pattern
+                if passed_now and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
+                    patt_ok, patt_desc = _divergence_pattern(
+                        hist_signed, hist_dk_ds_a, hist_dk_fos_a, cand_stype)
+                    if patt_ok:
+                        confirm_now += f'+{patt_desc}'
+
+                if passed_now:
+                    # Wall absorption annotation
+                    is_long = cand_dir > 0
+                    tf_cl, w_vol, w_px, wa_note = _wall_absorption(
+                        bids, asks, cand_entry, closed_1m, b5, b15, is_long)
+                    wa_tag = f'wa={tf_cl}' if tf_cl else 'wa=X'
+                    confirm_now += f'+{wa_tag}({wa_note})'
+
+                    sig_count += 1
+                    t_off = cand_sec - min_sec
+                    conf  = f' [{confirm_now}]' if confirm_now else ''
+                    notes_inline = (f"[{sig_count}] *** {cand_stype} "
+                                    f"{'LONG' if cand_dir>0 else 'SHORT'} @ {_ts(cand_sec)} "
+                                    f"(t+{t_off}s){conf}  ${cand_entry:,.2f} → ${cand_tgt:,.2f}")
+
+                    # Signal card — printed immediately at the second it fires
+                    import re as _re
+                    arrow  = '▲' if cand_dir > 0 else '▼'
+                    side   = 'LONG' if cand_dir > 0 else 'SHORT'
+                    stype_lbl = cand_stype.replace('-', ' ')
+                    c      = G if cand_dir > 0 else R
+                    bar    = '━' * 50
+                    reasons = []
+                    cs = confirm_now
+                    m2 = _re.search(r'ob=([+\-\d.]+)', cs)
+                    if m2: reasons.append(f"OBI {m2.group(1)}")
+                    if 'kdv' in cs.lower() or 'flip' in cs.lower():
+                        reasons.append(f"KdV {'↑' if cand_dir>0 else '↓'}")
+                    if 'FLOOR' in cs and 'FLR' not in cs: reasons.append('FLOOR locked')
+                    elif 'FLR?' in cs: reasons.append('Floor forming')
+                    elif 'DECAY' in cs: reasons.append('Momentum decay')
+                    if not reasons: reasons.append(cs)
+                    reason_str = '  ·  '.join(reasons)
+                    dk_lbl2 = KnifeDecayBuffer.LABELS.get(min_dk_state, '')
+                    dk_str2 = (f"{dk_lbl2}  ds={min_dk_ds:.2f}  fos={min_dk_fos:.2f}"
+                               if min_dk_state else '')
+
+                    t1m_= htf_ctx.get('trend_1m','ne')[:2]
+                    t5m_= htf_ctx.get('trend_5m','ne')[:2]
+                    t15_= htf_ctx.get('trend_15m','ne')[:2]
+                    t1h_= htf_ctx.get('trend_1h','ne')[:2]
+                    t4h_= htf_ctx.get('trend_4h','ne')[:2]
+                    def _tr2(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+                    mtf_ = (f"1m{_tr2(t1m_)}  5m{_tr2(t5m_)}  15m{_tr2(t15_)}"
+                            f"  1h{_tr2(t1h_)}  4h{_tr2(t4h_)}")
+                    shelf_ann2 = _shelf_context(session_shelves, cand_entry)
+
+                    print(f"\n{c}{bar}")
+                    print(f"  {arrow}  {side}  ·  {stype_lbl:<20}  [{sig_count}]")
+                    print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
+                    if reason_str: print(f"     {reason_str}")
+                    if dk_str2:    print(f"     {dk_str2}")
+                    print(f"     {mtf_}")
+                    if shelf_ann2: print(f"     {shelf_ann2}")
+                    print(f"{bar}{Z}\n")
+
+                    # Mark this phase state fired — suppress until MID resets it
+                    last_1m_state = state_now
+                    cand_sec = None   # reset so next reversal can form
+
+                else:
+                    # Gate failed — log as blocked for wave table but allow retry next second
+                    notes_inline = f"sig:{cand_stype}/{'LONG' if cand_dir>0 else 'SHORT'} BLOCKED:{fail_now_str}"
+                    cand_sec = None
+
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
                      'comp':comp,'itf':itf,'sb':sb,'micro_phase':micro_phase,
@@ -1410,84 +1539,6 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 if b['ts']//1000 == min_sec:
                     closed_1m.append(b); break
             continue
-
-        # HTF context
-        htf_ctx = htf.regime(final['price'], b1h, b4h, closed_1m[-30:], b5, b15)
-        at_sup  = htf_ctx.get('at_support',    False)
-        at_res  = htf_ctx.get('at_resistance', False)
-
-        # MTF resonance
-        try:
-            res_out    = RES.resonance(closed_1m[-30:], b5, b15, b1h, b4h)
-            res_dir    = res_out.get('direction',  0)
-            align      = res_out.get('alignment',  0.0)
-            dissonance = res_out.get('dissonance', False)
-        except Exception:
-            res_dir=0; align=0.0; dissonance=False
-
-        # Gate check
-        passed = False; fail_reason = ''; confirm_str = ''
-        if cand_sec is not None:
-            kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
-                          (cand_dir < 0 and kdv_flipped_down)
-            gate_obi = (best_obi_long  if cand_dir > 0 else
-                        best_obi_short if cand_dir < 0 else cand_obi)
-            passed, fail_reason = _gates(
-                cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
-                thresh, gate_rev, gate_cont, obi_conf, align_cont,
-                gate_obi, align, res_dir, cand_dir,
-                at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
-            if passed:
-                confirm_str = fail_reason
-                fail_reason = ''
-
-            # ── Stale-OBI gate ────────────────────────────────────────────
-            # If the best OBI this minute was captured BEFORE a fast fall,
-            # it can leak into OBI/KdV confirmation when the current book is flat.
-            # Block when: OBI decayed >0.5 AND KdV balance is below absolute floor (5.0).
-            # Gate: kdv_bal < 5.0 means momentum is weak regardless of session calibration.
-            # Use absolute floor (not gate_rev multiple) to avoid blocking late-session
-            # high-balance signals like 01:21 (kdv_bal=8.1 → passes, +$145 target).
-            if passed and cand_stype == 'TROUGH-REV' and cand_dir > 0:
-                obi_decay = best_obi_long - cand_obi
-                if obi_decay > 0.5 and cand_kdvbal < 5.0:
-                    passed      = False
-                    fail_reason = (f'stale-obi(decay={obi_decay:.2f})'
-                                   f'+weak-kdv(bal={cand_kdvbal:.1f})')
-
-            # ── Knife-decay annotation ────────────────────────────────────
-            # TROUGH-REV: annotate dk confidence; dk KNIFE minimum kept as basic
-            # sanity (some falling price action must be observed).
-            # Divergence pattern adds early entry path from indicator history.
-            if passed and cand_stype == 'TROUGH-REV':
-                if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
-                elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
-                elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
-                elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_str += '+DEC?'
-                elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_str += '+KNIFE'
-                # Minimum: at least KNIFE state (some downward price action seen)
-                if min_dk_state < KnifeDecayBuffer.KNIFE:
-                    passed      = False
-                    fail_reason = f'dk-none(no-fall-detected)'
-
-            # Divergence pattern: annotate when indicator history shows momentum
-            # exhaustion — fires even without structural level confirmation.
-            if passed and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
-                patt_ok, patt_desc = _divergence_pattern(
-                    hist_signed, hist_dk_ds_a, hist_dk_fos_a, cand_stype)
-                if patt_ok:
-                    confirm_str += f'+{patt_desc}'
-
-            # (3) Wall absorption annotation — does NOT block the signal.
-            # Compares nearest OB wall volume to avg taker-directional completed
-            # volume at each TF. Walls don't scale with TF; throughput does.
-            # wa=5m → 5m avg flow can eat the wall; wa=X → no TF clears it.
-            if passed:
-                is_long = cand_dir > 0
-                tf_cl, w_vol, w_px, wa_note = _wall_absorption(
-                    bids, asks, cand_entry, closed_1m, b5, b15, is_long)
-                wa_tag = f'wa={tf_cl}' if tf_cl else 'wa=X'
-                confirm_str += f'+{wa_tag}({wa_note})'
 
         # Record completed-minute stats for next minute's thresholds
         hist_scores.append(abs(final['score']))
@@ -1519,16 +1570,10 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         state_now = _micro_state(final['micro_phase'], peak_ph, trough_ph)
 
         notes = []
-        if cand_sec is not None:
-            lbl   = 'LONG' if cand_dir > 0 else 'SHORT'
-            t_off = cand_sec - min_sec
-            if passed:
-                sig_count += 1
-                conf = f' [{confirm_str}]' if confirm_str else ''
-                notes.append(f"[{sig_count}] *** {cand_stype} {lbl} @ {_ts(cand_sec)} "
-                             f"(t+{t_off}s){conf}  ${cand_entry:,.2f} → ${cand_tgt:,.2f}")
-            else:
-                notes.append(f"sig:{cand_stype}/{lbl} BLOCKED:{fail_reason}")
+        # notes_inline is set inside the inner loop when a signal fires or is blocked
+        if 'notes_inline' in dir() and notes_inline:
+            notes.append(notes_inline)
+            notes_inline = ''
 
         for fs, fd in kdv_flips:
             notes.append(f"KdV→{fd:+d}@{_ts(fs)}")
@@ -1551,21 +1596,13 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         kdv_str  = f"{kdv:+d}" if kdv != 0 else " 0"
         obi_str  = f"{obi_f:+.2f}"
 
-        if passed:
-            col = G if cand_dir > 0 else R
-        elif cand_sec is not None:
-            col = Y
-        elif notes:
-            col = Y
-        else:
-            col = Z
-
-        state_col = (C if state_now == 'PEAK' else
-                     G if state_now == 'TROUGH' else W)
+        col = Y if notes else Z
+        state_now_f = _micro_state(final['micro_phase'], peak_ph, trough_ph)
+        state_col = (C if state_now_f == 'PEAK' else
+                     G if state_now_f == 'TROUGH' else W)
 
         msc_f  = final.get('micro_sc',  0.0)
         mph_f  = final.get('micro_ph',  0.0)
-        mkdv_f = final.get('micro_kdv', 0)
         msc_str = f"{msc_f:>+6.3f}" if msc_f != 0.0 else "  ---  "
         mph_str = _ph(mph_f)
         dec_str = KnifeDecayBuffer.compact(min_dk_state, min_dk_ds, min_dk_fos)
@@ -1573,51 +1610,19 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                    C if min_dk_state >= KnifeDecayBuffer.DWATCH else
                    Y if min_dk_state >= KnifeDecayBuffer.KNIFE  else Z)
 
+        t1m = htf_ctx.get('trend_1m', 'ne')[:2]
+        t5m = htf_ctx.get('trend_5m', 'ne')[:2]
+        t15 = htf_ctx.get('trend_15m','ne')[:2]
+        t1h = htf_ctx.get('trend_1h', 'ne')[:2]
+        t4h = htf_ctx.get('trend_4h', 'ne')[:2]
+
         if not signals_only:
             print(f"{col}[wave] {_tm(min_sec)}  ${price:>9,.2f}  {score:>+7.4f} {_ds(wf_dir)}  "
                   f"{_ph(mi.get('phase',0)):>2} {_ph(sh_.get('phase',0)):>2} "
                   f"{_ph(ca.get('phase',0)):>2} {_ph(ma.get('phase',0)):>2}  "
                   f"{t1m} {t5m} {t15} {t1h} {t4h}  "
                   f"{kdv_str}  {obi_str}  {msc_str}  {mph_str}  {itype:4}  "
-                  f"{state_col}{state_now:6}{col}  {dec_col}{dec_str}{col}  {note_str}{Z}")
-
-        if passed:
-            # ── Clean signal card (always printed on any passed signal) ─────
-            import re
-            arrow  = '▲' if cand_dir > 0 else '▼'
-            side   = 'LONG' if cand_dir > 0 else 'SHORT'
-            stype  = cand_stype.replace('-', ' ')
-            c      = G if cand_dir > 0 else R
-            bar    = '━' * 50
-
-            reasons = []
-            cs = confirm_str
-            m = re.search(r'ob=([+\-\d.]+)', cs)
-            if m: reasons.append(f"OBI {m.group(1)}")
-            if 'kdv' in cs.lower() or 'flip' in cs.lower():
-                reasons.append(f"KdV {'↑' if cand_dir > 0 else '↓'}")
-            if 'FLOOR' in cs and 'FLR' not in cs: reasons.append('FLOOR locked')
-            elif 'FLR?' in cs: reasons.append('Floor forming')
-            elif 'DECAY' in cs: reasons.append('Momentum decay')
-            if 'knife-floor' in cs: reasons.append('Floor lock override')
-            if not reasons: reasons.append(cs)
-            reason_str = '  ·  '.join(reasons)
-
-            def _tr(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
-            mtf = f"1m{_tr(t1m)}  5m{_tr(t5m)}  15m{_tr(t15)}  1h{_tr(t1h)}  4h{_tr(t4h)}"
-
-            dk_lbl = KnifeDecayBuffer.LABELS.get(min_dk_state, '')
-            dk_str = f"{dk_lbl}  ds={min_dk_ds:.2f}  fos={min_dk_fos:.2f}" if min_dk_state else ''
-
-            print(f"\n{c}{bar}")
-            print(f"  {arrow}  {side}  ·  {stype:<20}  [{sig_count}]")
-            print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
-            if reason_str: print(f"     {reason_str}")
-            if dk_str:     print(f"     {dk_str}")
-            print(f"     {mtf}")
-            shelf_ann = _shelf_context(session_shelves, cand_entry)
-            if shelf_ann: print(f"     {shelf_ann}")
-            print(f"{bar}{Z}\n")
+                  f"{state_col}{state_now_f:6}{col}  {dec_col}{dec_str}{col}  {note_str}{Z}")
 
         # ── Per-TF independent phase detection ───────────────────────────
         # ── Per-TF independent phase detection ───────────────────────────
@@ -1692,7 +1697,7 @@ class ScanState:
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
-                 'last_tf_states', 'session_shelves')
+                 'last_tf_states', 'last_1m_state', 'session_shelves')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1722,6 +1727,7 @@ class ScanState:
         self.last_res_dir     = 0
         self.last_htf_sup     = False
         self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
+        self.last_1m_state    = 'MID'
         self.session_shelves  = []
 
 
@@ -1994,6 +2000,23 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             _thresholds(state.hist_scores, state.hist_phases, state.hist_obi,
                         state.hist_kdv_bals, state.hist_aligns)
 
+        # HTF/MTF context — computed once per minute batch from closed bars only.
+        # Moving this before the inner loop lets gate checks fire per-second.
+        _htf_px = state.closed_1m[-1]['close'] if state.closed_1m else 0.0
+        htf_ctx = htf.regime(_htf_px, b1h, b4h, state.closed_1m[-30:], b5, b15)
+        at_sup  = htf_ctx.get('at_support',    False)
+        at_res  = htf_ctx.get('at_resistance', False)
+        try:
+            res_out    = RES.resonance(state.closed_1m[-30:], b5, b15, b1h, b4h)
+            res_dir    = res_out.get('direction', 0)
+            align      = res_out.get('alignment', 0.0)
+            dissonance = res_out.get('dissonance', False)
+        except Exception:
+            res_dir=0; align=0.0; dissonance=False
+        state.last_align   = align
+        state.last_res_dir = res_dir
+        state.last_htf_sup = at_sup
+
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
         cand_sec=None; cand_score=0.0; cand_dir=0
         cand_stype='MID'; cand_entry=0.0; cand_tgt=0.0
@@ -2105,16 +2128,93 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             prev_sb = sb
 
             sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
-            if sb != 0 and sustain_count >= sustain_needed and cand_sec is None:
-                state_ = _micro_state(micro_phase, peak_ph, trough_ph)
-                stype  = _sig_type(state_, sb)
+            state_now_i = _micro_state(micro_phase, peak_ph, trough_ph)
+
+            if state_now_i == 'MID':
+                state.last_1m_state = 'MID'
+
+            if (sb != 0 and sustain_count >= sustain_needed
+                    and state_now_i != 'MID' and state_now_i != state.last_1m_state):
+                stype_i = _sig_type(state_now_i, sb)
                 cand_sec    = sec; cand_score  = f_sc; cand_dir = sb
-                cand_stype  = stype; cand_entry = p_close
+                cand_stype  = stype_i; cand_entry = p_close
                 cand_tgt    = tgts.get('primary',
                                 p_close + comp.get('carrier',{}).get('amplitude',0)*sb)
                 cand_kdvbal = kdv_bal; cand_kdvdir = kdv
                 cand_obi    = obi_p;  cand_sc_gate = sc_gate
                 cand_dec_state = dk_st
+
+                # Gate fires immediately at this second
+                kdv_flipped_i = (cand_dir > 0 and kdv_flipped_up) or \
+                                (cand_dir < 0 and kdv_flipped_down)
+                gate_obi_i = (best_obi_long  if cand_dir > 0 else
+                              best_obi_short if cand_dir < 0 else cand_obi)
+                passed_i, fail_i = _gates(
+                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
+                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
+                    gate_obi_i, align, res_dir, cand_dir,
+                    at_sup, kdv_flipped_i, sc_gate=cand_sc_gate, at_res=at_res)
+                confirm_i = fail_i if passed_i else ''
+                fail_i_str = '' if passed_i else fail_i
+
+                if passed_i and cand_stype == 'TROUGH-REV' and cand_dir > 0:
+                    obi_decay_i = best_obi_long - cand_obi
+                    if obi_decay_i > 0.5 and cand_kdvbal < 5.0:
+                        passed_i = False
+                        fail_i_str = (f'stale-obi(decay={obi_decay_i:.2f})'
+                                      f'+weak-kdv(bal={cand_kdvbal:.1f})')
+
+                if passed_i and cand_stype == 'TROUGH-REV':
+                    if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_i += '+FLOOR'
+                    elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_i += '+FLR?'
+                    elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_i += '+DECAY'
+                    elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_i += '+DEC?'
+                    elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_i += '+KNIFE'
+                    if min_dk_state < KnifeDecayBuffer.KNIFE:
+                        passed_i = False; fail_i_str = 'dk-none(no-fall-detected)'
+
+                if passed_i and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
+                    patt_ok_i, patt_desc_i = _divergence_pattern(
+                        state.hist_signed_scores, state.hist_dk_ds, state.hist_dk_fos,
+                        cand_stype)
+                    if patt_ok_i: confirm_i += f'+{patt_desc_i}'
+
+                if passed_i:
+                    bids_now, asks_now = ob_by_sec.get(sec, ([], []))
+                    tf_cl_i2, _, _, wa_note_i2 = _wall_absorption(
+                        bids_now, asks_now, cand_entry, state.closed_1m, b5, b15,
+                        cand_dir > 0)
+                    confirm_i += f'+wa={tf_cl_i2}' if tf_cl_i2 else '+wa=X'
+
+                    state.sig_count += 1
+                    sig_i = {
+                        'n':      state.sig_count,
+                        'dir':    cand_dir,
+                        'stype':  cand_stype,
+                        'time':   _ts(cand_sec),
+                        'price':  cand_entry,
+                        'confirm':confirm_i,
+                        'min_sec':min_sec,
+                    }
+                    state.signals.append(sig_i)
+                    new_signals.append(sig_i)
+
+                    if signals_only:
+                        arrow_i = '▲' if cand_dir > 0 else '▼'
+                        side_i  = 'LONG' if cand_dir > 0 else 'SHORT'
+                        stype_lbl_i = cand_stype.replace('-', ' ')
+                        c_i = G if cand_dir > 0 else R
+                        bar_i = '━' * 50
+                        shelf_ann_now = _shelf_context(state.session_shelves, cand_entry)
+                        print(f"\n{c_i}{bar_i}")
+                        print(f"  {arrow_i}  {side_i}  ·  {stype_lbl_i:<20}  [{state.sig_count}]")
+                        print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
+                        print(f"     {confirm_i}")
+                        if shelf_ann_now: print(f"     {shelf_ann_now}")
+                        print(f"{bar_i}{Z}\n")
+
+                    state.last_1m_state = state_now_i
+                    cand_sec = None
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'kdv':kdv,
                      'kdv_bal':kdv_bal,'obi':obi_p,'micro_phase':micro_phase,
@@ -2127,55 +2227,6 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 state.session_shelves = _detect_shelves(state.closed_1m[-60:])
             continue
 
-        # HTF + MTF
-        htf_ctx = htf.regime(final['price'], b1h, b4h, state.closed_1m[-30:], b5, b15)
-        at_sup  = htf_ctx.get('at_support',    False)
-        at_res  = htf_ctx.get('at_resistance', False)
-        try:
-            res_out    = RES.resonance(state.closed_1m[-30:], b5, b15, b1h, b4h)
-            res_dir    = res_out.get('direction', 0)
-            align      = res_out.get('alignment', 0.0)
-            dissonance = res_out.get('dissonance', False)
-        except Exception:
-            res_dir=0; align=0.0; dissonance=False
-
-        state.last_align   = align
-        state.last_res_dir = res_dir
-        state.last_htf_sup = at_sup
-
-        passed=False; fail_reason=''; confirm_str=''
-        if cand_sec is not None:
-            kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
-                          (cand_dir < 0 and kdv_flipped_down)
-            gate_obi = (best_obi_long  if cand_dir > 0 else
-                        best_obi_short if cand_dir < 0 else cand_obi)
-            passed, fail_reason = _gates(
-                cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
-                thresh, gate_rev, gate_cont, obi_conf, align_cont,
-                gate_obi, align, res_dir, cand_dir,
-                at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
-            if passed:
-                confirm_str = fail_reason; fail_reason = ''
-
-            # TROUGH-REV dk annotation + KNIFE minimum
-            if passed and cand_stype == 'TROUGH-REV':
-                if   min_dk_state >= KnifeDecayBuffer.FLOCK:  confirm_str += '+FLOOR'
-                elif min_dk_state >= KnifeDecayBuffer.FWATCH: confirm_str += '+FLR?'
-                elif min_dk_state >= KnifeDecayBuffer.DCONF:  confirm_str += '+DECAY'
-                elif min_dk_state >= KnifeDecayBuffer.DWATCH: confirm_str += '+DEC?'
-                elif min_dk_state >= KnifeDecayBuffer.KNIFE:  confirm_str += '+KNIFE'
-                if min_dk_state < KnifeDecayBuffer.KNIFE:
-                    passed = False
-                    fail_reason = 'dk-none(no-fall-detected)'
-
-            # Divergence pattern annotation
-            if passed and cand_stype in ('TROUGH-REV', 'PEAK-REV'):
-                patt_ok, patt_desc = _divergence_pattern(
-                    state.hist_signed_scores, state.hist_dk_ds, state.hist_dk_fos,
-                    cand_stype)
-                if patt_ok:
-                    confirm_str += f'+{patt_desc}'
-
         state.hist_scores.append(abs(final['score']))
         state.hist_phases.append(final['micro_phase'])
         state.hist_obi.append(final['obi'])
@@ -2186,40 +2237,6 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         state.hist_dk_fos.append(min_dk_fos)
 
         state.session_shelves = _detect_shelves(state.closed_1m[-60:])
-
-        if passed:
-            state.sig_count += 1
-            # Wall absorption annotation
-            is_long_s = cand_dir > 0
-            tf_cl_s, _, _, wa_note_s = _wall_absorption(
-                bids, asks, cand_entry, state.closed_1m, b5, b15, is_long_s)
-            confirm_str += f'+wa={tf_cl_s}' if tf_cl_s else '+wa=X'
-            sig = {
-                'n':      state.sig_count,
-                'dir':    cand_dir,
-                'stype':  cand_stype,
-                'time':   _ts(cand_sec),
-                'price':  cand_entry,
-                'confirm':confirm_str,
-                'min_sec':min_sec,
-            }
-            state.signals.append(sig)
-            new_signals.append(sig)
-
-            if signals_only:
-                import re as _re
-                arrow = '▲' if cand_dir > 0 else '▼'
-                side  = 'LONG' if cand_dir > 0 else 'SHORT'
-                stype = cand_stype.replace('-', ' ')
-                c     = G if cand_dir > 0 else R
-                bar   = '━' * 50
-                print(f"\n{c}{bar}")
-                print(f"  {arrow}  {side}  ·  {stype:<20}  [{state.sig_count}]")
-                print(f"     {_ts(cand_sec)}  ·  ${cand_entry:>10,.2f}")
-                print(f"     {confirm_str}")
-                shelf_ann_i = _shelf_context(state.session_shelves, cand_entry)
-                if shelf_ann_i: print(f"     {shelf_ann_i}")
-                print(f"{bar}{Z}\n")
 
         kdv_f = final.get('kdv', 0)
         if kdv_f != 0: state.prev_kdv_global = kdv_f
