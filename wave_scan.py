@@ -852,6 +852,19 @@ def _sig_type(state, direction):
         return 'TROUGH-REV' if direction > 0 else 'TROUGH-CONT'
     return 'MID'
 
+def _tf_phase_state(bars, peak_ph=PEAK_PH, trough_ph=TROUGH_PH):
+    """Run WF on TF bar array; return (state, phase). Needs ≥10 closed bars."""
+    if len(bars) < 10:
+        return 'MID', 0.0
+    closes = np.array([b['close'] for b in bars[-30:]], dtype=float)
+    try:
+        wf    = WF.run(closes, entry=closes[-1], direction=1)
+        phase = wf['components'].get('micro', {}).get('phase', 0.0)
+        return _micro_state(phase, peak_ph, trough_ph), phase
+    except Exception:
+        return 'MID', 0.0
+
+
 def _gates(stype, score, kdv_bal, kdv_dir,
            thresh, gate_rev, gate_cont, obi_conf, align_cont,
            obi_pressure, align, res_dir, sig_dir,
@@ -1092,6 +1105,9 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         hist_dk_fos_a = [0.0] * len(ps)
         if not signals_only:
             print(f"Pre-seeded from {len(ps)} session bars (no prior history)")
+
+    # Per-TF phase state for edge-detected multi-TF signals
+    last_tf_states = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
 
     # Micro layer: rolling 1s window across minute boundaries
     micro_window  = []   # list of 1s bar dicts
@@ -1507,6 +1523,49 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             print(f"     {mtf}")
             print(f"{bar}{Z}\n")
 
+        # ── Per-TF independent phase detection ───────────────────────────
+        tf_bars_map = [('5m', b5), ('15m', b15), ('1h', b1h), ('4h', b4h)]
+        # sb from final second in this minute (score direction for REV vs CONT)
+        tf_sb = final.get('score', 0.0)
+        tf_sb_dir = 1 if tf_sb >= 0 else -1
+        for tf_lbl, tf_bars in tf_bars_map:
+            tf_state_now, tf_phase = _tf_phase_state(tf_bars)
+            tf_state_prev = last_tf_states[tf_lbl]
+            if tf_state_now == 'MID' or tf_state_now == tf_state_prev:
+                last_tf_states[tf_lbl] = tf_state_now
+                continue
+            # Edge: transitioned into PEAK or TROUGH
+            last_tf_states[tf_lbl] = tf_state_now
+            tf_stype = _sig_type(tf_state_now, tf_sb_dir)
+            tf_dir   = 1 if tf_sb_dir > 0 else -1
+            tf_entry = final.get('price', 0.0)
+            # Cooldown check (same zone, same direction, within 3 min)
+            carrier_amp2 = closed_1m[-1]['high'] - closed_1m[-1]['low'] if closed_1m else 0.0
+            zone_thresh2 = max(carrier_amp2 * 0.5, tf_entry * 0.0015)
+            tf_cool = (last_sig_time is not None
+                       and last_sig_dir == tf_dir
+                       and (min_sec - last_sig_time) < 180
+                       and abs(tf_entry - last_sig_price) < zone_thresh2)
+            if tf_cool:
+                continue
+            sig_count      += 1
+            last_sig_time   = min_sec
+            last_sig_dir    = tf_dir
+            last_sig_price  = tf_entry
+            tf_cl, _, _, wa_note = _wall_absorption(
+                bids, asks, tf_entry, closed_1m, b5, b15, tf_dir > 0)
+            wa_tag   = f'wa={tf_cl}' if tf_cl else 'wa=X'
+            tf_conf  = f'ph={tf_phase:+.2f}+{wa_tag}'
+            tf_arrow = '▲' if tf_dir > 0 else '▼'
+            tf_side  = 'LONG' if tf_dir > 0 else 'SHORT'
+            tf_c     = G if tf_dir > 0 else R
+            tf_bar   = '━' * 50
+            print(f"\n{tf_c}{tf_bar}")
+            print(f"  [{tf_lbl}] {tf_arrow}  {tf_side}  ·  {tf_stype:<20}  [{sig_count}]")
+            print(f"     {_ts(min_sec)}  ·  ${tf_entry:>10,.2f}")
+            print(f"     {tf_conf}")
+            print(f"{tf_bar}{Z}\n")
+
         if kdv != 0: prev_kdv_global = kdv
 
         for b in tf1m:
@@ -1538,7 +1597,8 @@ class ScanState:
                  'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
-                 'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup')
+                 'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
+                 'last_tf_states')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1570,6 +1630,7 @@ class ScanState:
         self.last_align       = 0.0
         self.last_res_dir     = 0
         self.last_htf_sup     = False
+        self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
@@ -2076,6 +2137,61 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
 
         kdv_f = final.get('kdv', 0)
         if kdv_f != 0: state.prev_kdv_global = kdv_f
+
+        # ── Per-TF independent phase detection ───────────────────────────
+        tf_bars_map_i = [('5m', b5), ('15m', b15), ('1h', b1h), ('4h', b4h)]
+        tf_sb_i       = final.get('score', 0.0)
+        tf_sb_dir_i   = 1 if tf_sb_i >= 0 else -1
+        bids_i, asks_i = ob_by_sec.get(s1_secs[-1], ([], []))
+        for tf_lbl_i, tf_bars_i in tf_bars_map_i:
+            tf_state_now_i, tf_phase_i = _tf_phase_state(tf_bars_i)
+            tf_state_prev_i = state.last_tf_states[tf_lbl_i]
+            if tf_state_now_i == 'MID' or tf_state_now_i == tf_state_prev_i:
+                state.last_tf_states[tf_lbl_i] = tf_state_now_i
+                continue
+            state.last_tf_states[tf_lbl_i] = tf_state_now_i
+            tf_stype_i = _sig_type(tf_state_now_i, tf_sb_dir_i)
+            tf_dir_i   = 1 if tf_sb_dir_i > 0 else -1
+            tf_entry_i = final.get('price', 0.0)
+            carrier_amp_i = state.closed_1m[-1]['high'] - state.closed_1m[-1]['low'] \
+                            if state.closed_1m else 0.0
+            zone_thresh_i = max(carrier_amp_i * 0.5, tf_entry_i * 0.0015)
+            tf_cool_i = (state.last_sig_time is not None
+                         and state.last_sig_dir == tf_dir_i
+                         and (min_sec - state.last_sig_time) < 180
+                         and abs(tf_entry_i - state.last_sig_price) < zone_thresh_i)
+            if tf_cool_i:
+                continue
+            state.sig_count     += 1
+            state.last_sig_time  = min_sec
+            state.last_sig_dir   = tf_dir_i
+            state.last_sig_price = tf_entry_i
+            tf_cl_i, _, _, wa_note_i = _wall_absorption(
+                bids_i, asks_i, tf_entry_i, state.closed_1m, b5, b15, tf_dir_i > 0)
+            wa_tag_i  = f'wa={tf_cl_i}' if tf_cl_i else 'wa=X'
+            tf_conf_i = f'ph={tf_phase_i:+.2f}+{wa_tag_i}'
+            tf_sig = {
+                'n':      state.sig_count,
+                'dir':    tf_dir_i,
+                'stype':  tf_stype_i,
+                'tf':     tf_lbl_i,
+                'time':   _ts(min_sec),
+                'price':  tf_entry_i,
+                'confirm':tf_conf_i,
+                'min_sec':min_sec,
+            }
+            state.signals.append(tf_sig)
+            new_signals.append(tf_sig)
+            if signals_only:
+                tf_arrow_i = '▲' if tf_dir_i > 0 else '▼'
+                tf_side_i  = 'LONG' if tf_dir_i > 0 else 'SHORT'
+                tf_c_i     = G if tf_dir_i > 0 else R
+                tf_bar_i   = '━' * 50
+                print(f"\n{tf_c_i}{tf_bar_i}")
+                print(f"  [{tf_lbl_i}] {tf_arrow_i}  {tf_side_i}  ·  {tf_stype_i:<20}  [{state.sig_count}]")
+                print(f"     {_ts(min_sec)}  ·  ${tf_entry_i:>10,.2f}")
+                print(f"     {tf_conf_i}")
+                print(f"{tf_bar_i}{Z}\n")
 
         if (s1_secs[-1] >= min_sec + 60
                 and min_sec not in state.appended_min_ts):
