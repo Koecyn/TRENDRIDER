@@ -1118,13 +1118,6 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     prev_kdv_global = 0
     sig_count       = 0
 
-    # Cooldown: prevent stacking same-direction signals in the same price zone
-    last_sig_time   = None   # min_sec of last fired 1m signal
-    last_sig_dir    = 0
-    last_sig_price  = 0.0
-    # Per-TF cooldown — independent from 1m so 1m signals don't suppress TF signals
-    _tf_last = {'5m': (None, 0, 0.0), '15m': (None, 0, 0.0),
-                '1h': (None, 0, 0.0), '4h': (None, 0, 0.0)}
 
     # Per-closed-candle history for adaptive thresholds
     hist_scores  = []   # abs(score) at minute end
@@ -1362,29 +1355,15 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         # Gate check
         passed = False; fail_reason = ''; confirm_str = ''
         if cand_sec is not None:
-            # Cooldown: skip repeat signals in same direction & price zone
-            # Zone defined as within 50% of carrier amplitude from last signal price
-            carrier_amp = closed_1m[-1]['high'] - closed_1m[-1]['low'] if closed_1m else 0.0
-            zone_thresh = max(carrier_amp * 0.5, cand_entry * 0.0015)  # at least 0.15%
-            in_cooldown = (
-                last_sig_time is not None
-                and last_sig_dir == cand_dir
-                and (min_sec - last_sig_time) < 180           # within 3 minutes
-                and abs(cand_entry - last_sig_price) < zone_thresh
-            )
-            if in_cooldown:
-                fail_reason = f'cooldown({(min_sec - last_sig_time)//60}m,Δ${abs(cand_entry-last_sig_price):.0f})'
-            else:
-                kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
-                              (cand_dir < 0 and kdv_flipped_down)
-                # Use best OBI seen during the minute (most extreme in signal direction)
-                gate_obi = (best_obi_long  if cand_dir > 0 else
-                            best_obi_short if cand_dir < 0 else cand_obi)
-                passed, fail_reason = _gates(
-                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
-                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
-                    gate_obi, align, res_dir, cand_dir,
-                    at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
+            kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
+                          (cand_dir < 0 and kdv_flipped_down)
+            gate_obi = (best_obi_long  if cand_dir > 0 else
+                        best_obi_short if cand_dir < 0 else cand_obi)
+            passed, fail_reason = _gates(
+                cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
+                thresh, gate_rev, gate_cont, obi_conf, align_cont,
+                gate_obi, align, res_dir, cand_dir,
+                at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
             if passed:
                 confirm_str = fail_reason
                 fail_reason = ''
@@ -1470,9 +1449,6 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             t_off = cand_sec - min_sec
             if passed:
                 sig_count += 1
-                last_sig_time  = min_sec
-                last_sig_dir   = cand_dir
-                last_sig_price = cand_entry
                 conf = f' [{confirm_str}]' if confirm_str else ''
                 notes.append(f"[{sig_count}] *** {cand_stype} {lbl} @ {_ts(cand_sec)} "
                              f"(t+{t_off}s){conf}  ${cand_entry:,.2f} → ${cand_tgt:,.2f}")
@@ -1588,19 +1564,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             tf_stype = _sig_type(tf_state_now, tf_wf_dir if tf_wf_dir != 0 else tf_sb_dir)
             tf_dir   = 1 if tf_stype in ('TROUGH-REV', 'PEAK-CONT') else -1
             tf_entry = final.get('price', 0.0)
-            # TF-scaled cooldown — independent from 1m signals
-            _tf_cool_s = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400}
-            tf_last_t, tf_last_d, tf_last_p = _tf_last[tf_lbl]
-            carrier_amp2 = closed_1m[-1]['high'] - closed_1m[-1]['low'] if closed_1m else 0.0
-            zone_thresh2 = max(carrier_amp2 * 0.5, tf_entry * 0.0015)
-            tf_cool = (tf_last_t is not None
-                       and tf_last_d == tf_dir
-                       and (min_sec - tf_last_t) < _tf_cool_s[tf_lbl]
-                       and abs(tf_entry - tf_last_p) < zone_thresh2)
-            if tf_cool:
-                continue
             sig_count += 1
-            _tf_last[tf_lbl] = (min_sec, tf_dir, tf_entry)
             tf_cl, _, _, _ = _wall_absorption(
                 bids, asks, tf_entry, closed_1m, b5, b15, tf_dir > 0)
             wa_tag  = f'wa={tf_cl}' if tf_cl else 'wa=X'
@@ -1644,13 +1608,12 @@ class ScanState:
     __slots__ = ('closed_1m', 'accum', 'micro_accum', 'micro_window',
                  'hist_scores', 'hist_phases', 'hist_obi', 'hist_kdv_bals',
                  'hist_aligns', 'hist_signed_scores', 'hist_dk_ds', 'hist_dk_fos',
-                 'prev_kdv_global', 'last_sig_time',
-                 'last_sig_dir', 'last_sig_price', 'sig_count',
+                 'prev_kdv_global', 'sig_count',
                  'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
-                 'last_tf_states', 'tf_last_sig')
+                 'last_tf_states')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1667,9 +1630,6 @@ class ScanState:
         self.hist_dk_ds         = []   # decay score per closed minute
         self.hist_dk_fos        = []   # floor score per closed minute
         self.prev_kdv_global  = 0
-        self.last_sig_time    = None
-        self.last_sig_dir     = 0
-        self.last_sig_price   = 0.0
         self.sig_count        = 0
         self.last_sec         = 0
         self.tf1m = self.tf5m = self.tf15m = self.tf1h = self.tf4h = []
@@ -1683,8 +1643,6 @@ class ScanState:
         self.last_res_dir     = 0
         self.last_htf_sup     = False
         self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
-        self.tf_last_sig      = {'5m': (None, 0, 0.0), '15m': (None, 0, 0.0),
-                                 '1h': (None, 0, 0.0), '4h':  (None, 0, 0.0)}
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
@@ -2106,25 +2064,17 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
 
         passed=False; fail_reason=''; confirm_str=''
         if cand_sec is not None:
-            carrier_amp = state.closed_1m[-1]['high'] - state.closed_1m[-1]['low'] \
-                          if state.closed_1m else 0.0
-            zone_thresh = max(carrier_amp * 0.5, cand_entry * 0.0015)
-            in_cooldown = (state.last_sig_time is not None
-                           and state.last_sig_dir == cand_dir
-                           and (min_sec - state.last_sig_time) < 180
-                           and abs(cand_entry - state.last_sig_price) < zone_thresh)
-            if not in_cooldown:
-                kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
-                              (cand_dir < 0 and kdv_flipped_down)
-                gate_obi = (best_obi_long  if cand_dir > 0 else
-                            best_obi_short if cand_dir < 0 else cand_obi)
-                passed, fail_reason = _gates(
-                    cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
-                    thresh, gate_rev, gate_cont, obi_conf, align_cont,
-                    gate_obi, align, res_dir, cand_dir,
-                    at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
-                if passed:
-                    confirm_str = fail_reason; fail_reason = ''
+            kdv_flipped = (cand_dir > 0 and kdv_flipped_up) or \
+                          (cand_dir < 0 and kdv_flipped_down)
+            gate_obi = (best_obi_long  if cand_dir > 0 else
+                        best_obi_short if cand_dir < 0 else cand_obi)
+            passed, fail_reason = _gates(
+                cand_stype, cand_score, cand_kdvbal, cand_kdvdir,
+                thresh, gate_rev, gate_cont, obi_conf, align_cont,
+                gate_obi, align, res_dir, cand_dir,
+                at_sup, kdv_flipped, sc_gate=cand_sc_gate, at_res=at_res)
+            if passed:
+                confirm_str = fail_reason; fail_reason = ''
 
             # TROUGH-REV dk annotation + KNIFE minimum
             if passed and cand_stype == 'TROUGH-REV':
@@ -2155,10 +2105,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         state.hist_dk_fos.append(min_dk_fos)
 
         if passed:
-            state.sig_count     += 1
-            state.last_sig_time  = min_sec
-            state.last_sig_dir   = cand_dir
-            state.last_sig_price = cand_entry
+            state.sig_count += 1
             # Wall absorption annotation
             is_long_s = cand_dir > 0
             tf_cl_s, _, _, wa_note_s = _wall_absorption(
@@ -2197,7 +2144,6 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         tf_sb_i        = final.get('score', 0.0)
         tf_sb_dir_i    = 1 if tf_sb_i >= 0 else -1
         bids_i, asks_i = ob_by_sec.get(s1_secs[-1], ([], []))
-        _tf_cool_s_i   = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400}
         for tf_lbl_i, tf_bars_i in tf_bars_map_i:
             tf_state_now_i, tf_phase_i, tf_score_i, tf_wf_dir_i, tf_fail_i = \
                 _tf_phase_state(tf_bars_i, tf_lbl_i)
@@ -2214,18 +2160,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                                    tf_wf_dir_i if tf_wf_dir_i != 0 else tf_sb_dir_i)
             tf_dir_i   = 1 if tf_stype_i in ('TROUGH-REV', 'PEAK-CONT') else -1
             tf_entry_i = final.get('price', 0.0)
-            carrier_amp_i = state.closed_1m[-1]['high'] - state.closed_1m[-1]['low'] \
-                            if state.closed_1m else 0.0
-            zone_thresh_i = max(carrier_amp_i * 0.5, tf_entry_i * 0.0015)
-            tf_last_t_i, tf_last_d_i, tf_last_p_i = state.tf_last_sig[tf_lbl_i]
-            tf_cool_i = (tf_last_t_i is not None
-                         and tf_last_d_i == tf_dir_i
-                         and (min_sec - tf_last_t_i) < _tf_cool_s_i[tf_lbl_i]
-                         and abs(tf_entry_i - tf_last_p_i) < zone_thresh_i)
-            if tf_cool_i:
-                continue
             state.sig_count += 1
-            state.tf_last_sig[tf_lbl_i] = (min_sec, tf_dir_i, tf_entry_i)
             tf_cl_i, _, _, _ = _wall_absorption(
                 bids_i, asks_i, tf_entry_i, state.closed_1m, b5, b15, tf_dir_i > 0)
             wa_tag_i  = f'wa={tf_cl_i}' if tf_cl_i else 'wa=X'
