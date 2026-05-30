@@ -33,6 +33,8 @@ SUSTAIN_S    = 1    # fire on first qualifying second — predict, not follow
 SUSTAIN_FLIP = 1    # when KdV flips, 1 confirmed second is enough (the flip IS confirmation)
 PEAK_PH      =  0.75  # structural: top outer-quarter of -1..+1 wave cycle
 TROUGH_PH    = -0.75  # structural: bottom outer-quarter of -1..+1 wave cycle
+MIN_SHELF_RANGE = 40.0   # min $ gap between range floor and ceiling to qualify
+SHELF_TOUCH_PCT = 0.0008 # within 0.08% of shelf level = "touching it"
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m'
 
@@ -478,6 +480,39 @@ def _shelf_context(shelves, price):
         bias = 'L' if s['buy_ratio'] >= 0.55 else ('S' if s['buy_ratio'] <= 0.45 else '~')
         parts.append(f"res↑${s['level']:,.0f}({s['bars']}bar,{bias},{dist:.0f}Δ)")
     return '  '.join(parts)
+
+
+def _range_signal(shelves, price, last_range_state):
+    """Detect ranging oscillation signals.
+
+    Ranging = price is bracketed by an open support shelf below AND an open
+    resistance shelf above, with a gap >= MIN_SHELF_RANGE dollars.
+
+    Returns (direction, shelf_sup, shelf_res, range_dollar) or (0, None, None, 0).
+    direction: +1 = at support → LONG, -1 = at resistance → SHORT, 0 = no signal.
+    last_range_state: 'sup'|'res'|None — prevents re-firing same side until
+    price crosses to the other level.
+    """
+    open_below = [s for s in shelves if s['level'] < price and s['broken'] == 'open']
+    open_above = [s for s in shelves if s['level'] > price and s['broken'] == 'open']
+    if not open_below or not open_above:
+        return 0, None, None, 0
+
+    sup = open_below[-1]   # nearest below
+    res = open_above[0]    # nearest above
+    span = res['level'] - sup['level']
+    if span < MIN_SHELF_RANGE:
+        return 0, None, None, 0
+
+    # Touch: price within SHELF_TOUCH_PCT of the shelf level
+    at_sup = abs(price - sup['level']) / price <= SHELF_TOUCH_PCT
+    at_res = abs(price - res['level']) / price <= SHELF_TOUCH_PCT
+
+    if at_sup and last_range_state != 'sup':
+        return +1, sup, res, span
+    if at_res and last_range_state != 'res':
+        return -1, sup, res, span
+    return 0, None, None, 0
 
 
 def _wall_absorption(bids, asks, price, closed_1m, b5, b15, is_long, n=14):
@@ -1219,6 +1254,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     last_tf_states = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
     # 1m intrabar state — prevents re-firing same direction until phase returns to MID
     last_1m_state  = 'MID'
+    last_range_state = None   # 'sup'|'res' — last ranging side fired
 
     # Micro layer: rolling 1s window across minute boundaries
     micro_window  = []   # list of 1s bar dicts
@@ -1528,6 +1564,52 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                     notes_inline = f"sig:{cand_stype}/{'LONG' if cand_dir>0 else 'SHORT'} BLOCKED:{fail_now_str}"
                     cand_sec = None
 
+            # ── Ranging oscillation signal ─────────────────────────────────────
+            rng_dir, rng_sup, rng_res, rng_span = _range_signal(
+                session_shelves, p_close, last_range_state)
+            if rng_dir != 0:
+                side_r  = 'LONG' if rng_dir > 0 else 'SHORT'
+                arrow_r = '▲' if rng_dir > 0 else '▼'
+                c_r     = G if rng_dir > 0 else R
+                bar_r   = '━' * 50
+                sup_bias = ('L' if rng_sup['buy_ratio'] >= 0.55
+                            else 'S' if rng_sup['buy_ratio'] <= 0.45 else '~')
+                res_bias = ('L' if rng_res['buy_ratio'] >= 0.55
+                            else 'S' if rng_res['buy_ratio'] <= 0.45 else '~')
+                # Shelf bias confirms the bounce when sup=L (longs defend) or res=S (shorts defend)
+                touched_bias = sup_bias if rng_dir > 0 else res_bias
+                conf_r = 'hi-conf' if (rng_dir > 0 and sup_bias == 'L') or \
+                                      (rng_dir < 0 and res_bias == 'S') else \
+                         'lo-conf' if (rng_dir > 0 and sup_bias == 'S') or \
+                                      (rng_dir < 0 and res_bias == 'L') else 'mid'
+                t1mr= htf_ctx.get('trend_1m','ne')[:2]; t5mr= htf_ctx.get('trend_5m','ne')[:2]
+                t15r= htf_ctx.get('trend_15m','ne')[:2]; t1hr= htf_ctx.get('trend_1h','ne')[:2]
+                t4hr= htf_ctx.get('trend_4h','ne')[:2]
+                def _tr2r(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+                mtf_r = (f"1m{_tr2r(t1mr)}  5m{_tr2r(t5mr)}  15m{_tr2r(t15r)}"
+                         f"  1h{_tr2r(t1hr)}  4h{_tr2r(t4hr)}")
+                sig_count += 1
+                print(f"\n{c_r}{bar_r}")
+                print(f"  {arrow_r}  {side_r}  ·  {'RANGE '+side_r:<20}  [{sig_count}]  {conf_r}")
+                print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
+                print(f"     range ${rng_span:.0f}"
+                      f"  ·  sup ${rng_sup['level']:,.2f}({sup_bias},{rng_sup['bars']}bar)"
+                      f"  →  res ${rng_res['level']:,.2f}({res_bias},{rng_res['bars']}bar)")
+                print(f"     {mtf_r}")
+                print(f"{bar_r}{Z}\n")
+                last_range_state = 'sup' if rng_dir > 0 else 'res'
+            elif last_range_state is not None and session_shelves:
+                # Midpoint crossing: once price crosses mid, same side can fire again
+                open_b_r = [s for s in session_shelves
+                            if s['level'] < p_close and s['broken'] == 'open']
+                open_a_r = [s for s in session_shelves
+                            if s['level'] > p_close and s['broken'] == 'open']
+                if open_b_r and open_a_r:
+                    mid_r = (open_b_r[-1]['level'] + open_a_r[0]['level']) / 2
+                    if (last_range_state == 'sup' and p_close > mid_r) or \
+                       (last_range_state == 'res' and p_close < mid_r):
+                        last_range_state = None
+
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
                      'comp':comp,'itf':itf,'sb':sb,'micro_phase':micro_phase,
@@ -1697,7 +1779,8 @@ class ScanState:
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
-                 'last_tf_states', 'last_1m_state', 'session_shelves')
+                 'last_tf_states', 'last_1m_state', 'last_range_state',
+                 'session_shelves')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1728,6 +1811,7 @@ class ScanState:
         self.last_htf_sup     = False
         self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
         self.last_1m_state    = 'MID'
+        self.last_range_state = None   # 'sup'|'res' — last ranging side fired
         self.session_shelves  = []
 
 
@@ -2215,6 +2299,62 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
 
                     state.last_1m_state = state_now_i
                     cand_sec = None
+
+            # ── Ranging oscillation signal ─────────────────────────────────────
+            rng_dir_i, rng_sup_i, rng_res_i, rng_span_i = _range_signal(
+                state.session_shelves, p_close, state.last_range_state)
+            if rng_dir_i != 0:
+                side_ri  = 'LONG' if rng_dir_i > 0 else 'SHORT'
+                arrow_ri = '▲' if rng_dir_i > 0 else '▼'
+                c_ri     = G if rng_dir_i > 0 else R
+                bar_ri   = '━' * 50
+                sup_bias_i = ('L' if rng_sup_i['buy_ratio'] >= 0.55
+                              else 'S' if rng_sup_i['buy_ratio'] <= 0.45 else '~')
+                res_bias_i = ('L' if rng_res_i['buy_ratio'] >= 0.55
+                              else 'S' if rng_res_i['buy_ratio'] <= 0.45 else '~')
+                conf_ri = 'hi-conf' if (rng_dir_i > 0 and sup_bias_i == 'L') or \
+                                       (rng_dir_i < 0 and res_bias_i == 'S') else \
+                          'lo-conf' if (rng_dir_i > 0 and sup_bias_i == 'S') or \
+                                       (rng_dir_i < 0 and res_bias_i == 'L') else 'mid'
+                t1mri= htf_ctx.get('trend_1m','ne')[:2]; t5mri= htf_ctx.get('trend_5m','ne')[:2]
+                t15ri= htf_ctx.get('trend_15m','ne')[:2]; t1hri= htf_ctx.get('trend_1h','ne')[:2]
+                t4hri= htf_ctx.get('trend_4h','ne')[:2]
+                def _tr2ri(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+                mtf_ri = (f"1m{_tr2ri(t1mri)}  5m{_tr2ri(t5mri)}  15m{_tr2ri(t15ri)}"
+                          f"  1h{_tr2ri(t1hri)}  4h{_tr2ri(t4hri)}")
+                state.sig_count += 1
+                if signals_only:
+                    print(f"\n{c_ri}{bar_ri}")
+                    print(f"  {arrow_ri}  {side_ri}  ·  {'RANGE '+side_ri:<20}  [{state.sig_count}]  {conf_ri}")
+                    print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
+                    print(f"     range ${rng_span_i:.0f}"
+                          f"  ·  sup ${rng_sup_i['level']:,.2f}({sup_bias_i},{rng_sup_i['bars']}bar)"
+                          f"  →  res ${rng_res_i['level']:,.2f}({res_bias_i},{rng_res_i['bars']}bar)")
+                    print(f"     {mtf_ri}")
+                    print(f"{bar_ri}{Z}\n")
+                rng_sig_i = {
+                    'type': 'RANGE-' + side_ri,
+                    'dir':  rng_dir_i,
+                    'entry': p_close,
+                    'time':  _ts(sec),
+                    'span':  rng_span_i,
+                    'sup':   rng_sup_i['level'],
+                    'res':   rng_res_i['level'],
+                    'conf':  conf_ri,
+                }
+                state.signals.append(rng_sig_i)
+                new_signals.append(rng_sig_i)
+                state.last_range_state = 'sup' if rng_dir_i > 0 else 'res'
+            elif state.last_range_state is not None and state.session_shelves:
+                open_b_ri = [s for s in state.session_shelves
+                             if s['level'] < p_close and s['broken'] == 'open']
+                open_a_ri = [s for s in state.session_shelves
+                             if s['level'] > p_close and s['broken'] == 'open']
+                if open_b_ri and open_a_ri:
+                    mid_ri = (open_b_ri[-1]['level'] + open_a_ri[0]['level']) / 2
+                    if (state.last_range_state == 'sup' and p_close > mid_ri) or \
+                       (state.last_range_state == 'res' and p_close < mid_ri):
+                        state.last_range_state = None
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'kdv':kdv,
                      'kdv_bal':kdv_bal,'obi':obi_p,'micro_phase':micro_phase,
