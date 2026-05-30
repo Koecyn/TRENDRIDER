@@ -861,10 +861,18 @@ def _sig_type(state, direction):
 #   1h  → ≥0.40%          (≈$293) — hourly structure
 #   4h  → ≥0.80%          (≈$587) — daily block
 _TF_GATES = {
-    '5m':  {'min_bars': 12, 'peak_ph': 0.80, 'trough_ph': -0.80, 'min_amp_pct': 0.0010},
-    '15m': {'min_bars':  8, 'peak_ph': 0.84, 'trough_ph': -0.84, 'min_amp_pct': 0.0020},
-    '1h':  {'min_bars':  6, 'peak_ph': 0.87, 'trough_ph': -0.87, 'min_amp_pct': 0.0040},
-    '4h':  {'min_bars':  4, 'peak_ph': 0.90, 'trough_ph': -0.90, 'min_amp_pct': 0.0080},
+    # phase threshold: same 0.75 base as 1m, steps up only for higher TFs.
+    #   WF normalizes phase to -1..+1 regardless of TF, so the detection
+    #   threshold is comparable — the RANGE gate is what makes TFs vastly different.
+    # min_amp_pct: price H-L range in the window as % of price, scales with TF.
+    #   5m  → 0.10% (~$73)  — must show real 5m swing, not 1m micro-jitter
+    #   15m → 0.20% (~$147) — 15m structural move
+    #   1h  → 0.40% (~$293) — hourly block
+    #   4h  → 0.80% (~$587) — daily structure
+    '5m':  {'min_bars': 10, 'peak_ph': 0.75, 'trough_ph': -0.75, 'min_amp_pct': 0.0010},
+    '15m': {'min_bars':  7, 'peak_ph': 0.75, 'trough_ph': -0.75, 'min_amp_pct': 0.0020},
+    '1h':  {'min_bars':  5, 'peak_ph': 0.78, 'trough_ph': -0.78, 'min_amp_pct': 0.0040},
+    '4h':  {'min_bars':  3, 'peak_ph': 0.82, 'trough_ph': -0.82, 'min_amp_pct': 0.0080},
 }
 
 
@@ -1111,9 +1119,12 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     sig_count       = 0
 
     # Cooldown: prevent stacking same-direction signals in the same price zone
-    last_sig_time   = None   # min_sec of last fired signal
+    last_sig_time   = None   # min_sec of last fired 1m signal
     last_sig_dir    = 0
     last_sig_price  = 0.0
+    # Per-TF cooldown — independent from 1m so 1m signals don't suppress TF signals
+    _tf_last = {'5m': (None, 0, 0.0), '15m': (None, 0, 0.0),
+                '1h': (None, 0, 0.0), '4h': (None, 0, 0.0)}
 
     # Per-closed-candle history for adaptive thresholds
     hist_scores  = []   # abs(score) at minute end
@@ -1577,26 +1588,25 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             tf_stype = _sig_type(tf_state_now, tf_wf_dir if tf_wf_dir != 0 else tf_sb_dir)
             tf_dir   = 1 if tf_stype in ('TROUGH-REV', 'PEAK-CONT') else -1
             tf_entry = final.get('price', 0.0)
-            # TF-scaled cooldown: higher TFs get longer cooldown windows
+            # TF-scaled cooldown — independent from 1m signals
             _tf_cool_s = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400}
+            tf_last_t, tf_last_d, tf_last_p = _tf_last[tf_lbl]
             carrier_amp2 = closed_1m[-1]['high'] - closed_1m[-1]['low'] if closed_1m else 0.0
             zone_thresh2 = max(carrier_amp2 * 0.5, tf_entry * 0.0015)
-            tf_cool = (last_sig_time is not None
-                       and last_sig_dir == tf_dir
-                       and (min_sec - last_sig_time) < _tf_cool_s[tf_lbl]
-                       and abs(tf_entry - last_sig_price) < zone_thresh2)
+            tf_cool = (tf_last_t is not None
+                       and tf_last_d == tf_dir
+                       and (min_sec - tf_last_t) < _tf_cool_s[tf_lbl]
+                       and abs(tf_entry - tf_last_p) < zone_thresh2)
             if tf_cool:
                 continue
-            sig_count      += 1
-            last_sig_time   = min_sec
-            last_sig_dir    = tf_dir
-            last_sig_price  = tf_entry
+            sig_count += 1
+            _tf_last[tf_lbl] = (min_sec, tf_dir, tf_entry)
             tf_cl, _, _, _ = _wall_absorption(
                 bids, asks, tf_entry, closed_1m, b5, b15, tf_dir > 0)
             wa_tag  = f'wa={tf_cl}' if tf_cl else 'wa=X'
             g       = _TF_GATES[tf_lbl]
             tf_conf = (f'ph={tf_phase:+.3f}(≥{g["peak_ph"]:.2f})'
-                       f'  amp={tf_score*100:.3f}%(≥{g["min_amp_pct"]*100:.2f}%)'
+                       f'  rng={tf_score*100:.3f}%(≥{g["min_amp_pct"]*100:.2f}%)'
                        f'  {wa_tag}')
             tf_arrow = '▲' if tf_dir > 0 else '▼'
             tf_side  = 'LONG' if tf_dir > 0 else 'SHORT'
@@ -1640,7 +1650,7 @@ class ScanState:
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
-                 'last_tf_states')
+                 'last_tf_states', 'tf_last_sig')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -1673,6 +1683,8 @@ class ScanState:
         self.last_res_dir     = 0
         self.last_htf_sup     = False
         self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
+        self.tf_last_sig      = {'5m': (None, 0, 0.0), '15m': (None, 0, 0.0),
+                                 '1h': (None, 0, 0.0), '4h':  (None, 0, 0.0)}
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
@@ -2205,22 +2217,21 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             carrier_amp_i = state.closed_1m[-1]['high'] - state.closed_1m[-1]['low'] \
                             if state.closed_1m else 0.0
             zone_thresh_i = max(carrier_amp_i * 0.5, tf_entry_i * 0.0015)
-            tf_cool_i = (state.last_sig_time is not None
-                         and state.last_sig_dir == tf_dir_i
-                         and (min_sec - state.last_sig_time) < _tf_cool_s_i[tf_lbl_i]
-                         and abs(tf_entry_i - state.last_sig_price) < zone_thresh_i)
+            tf_last_t_i, tf_last_d_i, tf_last_p_i = state.tf_last_sig[tf_lbl_i]
+            tf_cool_i = (tf_last_t_i is not None
+                         and tf_last_d_i == tf_dir_i
+                         and (min_sec - tf_last_t_i) < _tf_cool_s_i[tf_lbl_i]
+                         and abs(tf_entry_i - tf_last_p_i) < zone_thresh_i)
             if tf_cool_i:
                 continue
-            state.sig_count     += 1
-            state.last_sig_time  = min_sec
-            state.last_sig_dir   = tf_dir_i
-            state.last_sig_price = tf_entry_i
+            state.sig_count += 1
+            state.tf_last_sig[tf_lbl_i] = (min_sec, tf_dir_i, tf_entry_i)
             tf_cl_i, _, _, _ = _wall_absorption(
                 bids_i, asks_i, tf_entry_i, state.closed_1m, b5, b15, tf_dir_i > 0)
             wa_tag_i  = f'wa={tf_cl_i}' if tf_cl_i else 'wa=X'
             g_i       = _TF_GATES[tf_lbl_i]
             tf_conf_i = (f'ph={tf_phase_i:+.3f}(≥{g_i["peak_ph"]:.2f})'
-                         f'  amp={tf_score_i*100:.3f}%(≥{g_i["min_amp_pct"]*100:.2f}%)'
+                         f'  rng={tf_score_i*100:.3f}%(≥{g_i["min_amp_pct"]*100:.2f}%)'
                          f'  {wa_tag_i}')
             tf_sig = {
                 'n':      state.sig_count,
