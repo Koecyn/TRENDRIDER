@@ -1436,6 +1436,15 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
             state_now = _micro_state(micro_phase, peak_ph, trough_ph)
 
+            # Stale-price suppression: WF oscillates freely on flat zero-volume bars.
+            # Suppress PEAK/TROUGH when the last 3+ closed minutes show no price movement.
+            if state_now != 'MID' and len(closed_1m) >= 3:
+                recent3 = closed_1m[-3:]
+                if (len(set(b['close'] for b in recent3)) == 1
+                        and sum(b['volume'] for b in recent3) < 1e-6
+                        and sum(p_vols) < 1e-6):
+                    state_now = 'MID'
+
             # Reset edge tracker when phase returns to MID
             if state_now == 'MID':
                 last_1m_state = 'MID'
@@ -2213,6 +2222,14 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
 
             sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
             state_now_i = _micro_state(micro_phase, peak_ph, trough_ph)
+
+            # Stale-price suppression: suppress phantom WF oscillations on flat zero-volume data
+            if state_now_i != 'MID' and len(state.closed_1m) >= 3:
+                recent3_i = state.closed_1m[-3:]
+                if (len(set(b['close'] for b in recent3_i)) == 1
+                        and sum(b['volume'] for b in recent3_i) < 1e-6
+                        and sum(p_vols) < 1e-6):
+                    state_now_i = 'MID'
 
             if state_now_i == 'MID':
                 state.last_1m_state = 'MID'
