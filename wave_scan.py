@@ -852,17 +852,49 @@ def _sig_type(state, direction):
         return 'TROUGH-REV' if direction > 0 else 'TROUGH-CONT'
     return 'MID'
 
-def _tf_phase_state(bars, peak_ph=PEAK_PH, trough_ph=TROUGH_PH):
-    """Run WF on TF bar array; return (state, phase). Needs ≥10 closed bars."""
-    if len(bars) < 10:
-        return 'MID', 0.0
-    closes = np.array([b['close'] for b in bars[-30:]], dtype=float)
+# Per-TF gate parameters.
+# Higher TFs require deeper phase extremes and larger amplitude-to-price waves
+# because each bar represents more accumulated market force.
+# min_amp_pct: wave amplitude_sum must be ≥ this fraction of current price.
+#   5m  → ≥0.10% of price (≈$73 on $73k BTC) — real 5m swing, not 1m noise
+#   15m → ≥0.20%          (≈$147) — 15m move
+#   1h  → ≥0.40%          (≈$293) — hourly structure
+#   4h  → ≥0.80%          (≈$587) — daily block
+_TF_GATES = {
+    '5m':  {'min_bars': 12, 'peak_ph': 0.80, 'trough_ph': -0.80, 'min_amp_pct': 0.0010},
+    '15m': {'min_bars':  8, 'peak_ph': 0.84, 'trough_ph': -0.84, 'min_amp_pct': 0.0020},
+    '1h':  {'min_bars':  6, 'peak_ph': 0.87, 'trough_ph': -0.87, 'min_amp_pct': 0.0040},
+    '4h':  {'min_bars':  4, 'peak_ph': 0.90, 'trough_ph': -0.90, 'min_amp_pct': 0.0080},
+}
+
+
+def _tf_phase_state(bars, tf_label):
+    """Run WF on TF bar array using TF-specific gates.
+    Returns (state, phase, range_pct, wf_dir, fail_reason).
+    range_pct = (high - low) / price over the window — actual price swing as %.
+    state='MID' means not at phase extreme or window price range too small for TF.
+    """
+    g = _TF_GATES[tf_label]
+    if len(bars) < g['min_bars']:
+        return 'MID', 0.0, 0.0, 0, f'bars={len(bars)}<{g["min_bars"]}'
+    window  = bars[-30:]
+    closes  = np.array([b['close'] for b in window], dtype=float)
+    highs   = np.array([b.get('high', b['close']) for b in window], dtype=float)
+    lows    = np.array([b.get('low',  b['close']) for b in window], dtype=float)
+    rng_pct = (highs.max() - lows.min()) / closes[-1] if closes[-1] > 0 else 0.0
     try:
-        wf    = WF.run(closes, entry=closes[-1], direction=1)
-        phase = wf['components'].get('micro', {}).get('phase', 0.0)
-        return _micro_state(phase, peak_ph, trough_ph), phase
-    except Exception:
-        return 'MID', 0.0
+        wf     = WF.run(closes, entry=closes[-1], direction=1)
+        comp   = wf['components']
+        itf    = wf['interference']
+        phase  = comp.get('micro', {}).get('phase', 0.0)
+        wf_dir = itf.get('direction', 0)
+        state  = _micro_state(phase, g['peak_ph'], g['trough_ph'])
+        if state != 'MID' and rng_pct < g['min_amp_pct']:
+            return 'MID', phase, rng_pct, wf_dir, \
+                   f'rng={rng_pct:.4f}<{g["min_amp_pct"]}'
+        return state, phase, rng_pct, wf_dir, ''
+    except Exception as e:
+        return 'MID', 0.0, 0.0, 0, f'err:{e}'
 
 
 def _gates(stype, score, kdv_bal, kdv_dir,
@@ -1524,27 +1556,34 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             print(f"{bar}{Z}\n")
 
         # ── Per-TF independent phase detection ───────────────────────────
+        # ── Per-TF independent phase detection ───────────────────────────
         tf_bars_map = [('5m', b5), ('15m', b15), ('1h', b1h), ('4h', b4h)]
-        # sb from final second in this minute (score direction for REV vs CONT)
-        tf_sb = final.get('score', 0.0)
+        tf_sb     = final.get('score', 0.0)
         tf_sb_dir = 1 if tf_sb >= 0 else -1
         for tf_lbl, tf_bars in tf_bars_map:
-            tf_state_now, tf_phase = _tf_phase_state(tf_bars)
+            tf_state_now, tf_phase, tf_score, tf_wf_dir, tf_fail = \
+                _tf_phase_state(tf_bars, tf_lbl)
             tf_state_prev = last_tf_states[tf_lbl]
-            if tf_state_now == 'MID' or tf_state_now == tf_state_prev:
+            # Always update prev so we track transitions even through gated bars
+            if tf_state_now != 'MID':
                 last_tf_states[tf_lbl] = tf_state_now
-                continue
-            # Edge: transitioned into PEAK or TROUGH
-            last_tf_states[tf_lbl] = tf_state_now
-            tf_stype = _sig_type(tf_state_now, tf_sb_dir)
-            tf_dir   = 1 if tf_sb_dir > 0 else -1
+            if tf_state_now == 'MID':
+                if not tf_fail:
+                    last_tf_states[tf_lbl] = 'MID'
+                continue                           # gated out or not at extreme
+            if tf_state_now == tf_state_prev:
+                continue                           # no edge — already in this state
+            # Edge: transitioned into PEAK or TROUGH, passed TF-specific gate
+            tf_stype = _sig_type(tf_state_now, tf_wf_dir if tf_wf_dir != 0 else tf_sb_dir)
+            tf_dir   = 1 if tf_stype in ('TROUGH-REV', 'PEAK-CONT') else -1
             tf_entry = final.get('price', 0.0)
-            # Cooldown check (same zone, same direction, within 3 min)
+            # TF-scaled cooldown: higher TFs get longer cooldown windows
+            _tf_cool_s = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400}
             carrier_amp2 = closed_1m[-1]['high'] - closed_1m[-1]['low'] if closed_1m else 0.0
             zone_thresh2 = max(carrier_amp2 * 0.5, tf_entry * 0.0015)
             tf_cool = (last_sig_time is not None
                        and last_sig_dir == tf_dir
-                       and (min_sec - last_sig_time) < 180
+                       and (min_sec - last_sig_time) < _tf_cool_s[tf_lbl]
                        and abs(tf_entry - last_sig_price) < zone_thresh2)
             if tf_cool:
                 continue
@@ -1552,10 +1591,13 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             last_sig_time   = min_sec
             last_sig_dir    = tf_dir
             last_sig_price  = tf_entry
-            tf_cl, _, _, wa_note = _wall_absorption(
+            tf_cl, _, _, _ = _wall_absorption(
                 bids, asks, tf_entry, closed_1m, b5, b15, tf_dir > 0)
-            wa_tag   = f'wa={tf_cl}' if tf_cl else 'wa=X'
-            tf_conf  = f'ph={tf_phase:+.2f}+{wa_tag}'
+            wa_tag  = f'wa={tf_cl}' if tf_cl else 'wa=X'
+            g       = _TF_GATES[tf_lbl]
+            tf_conf = (f'ph={tf_phase:+.3f}(≥{g["peak_ph"]:.2f})'
+                       f'  amp={tf_score*100:.3f}%(≥{g["min_amp_pct"]*100:.2f}%)'
+                       f'  {wa_tag}')
             tf_arrow = '▲' if tf_dir > 0 else '▼'
             tf_side  = 'LONG' if tf_dir > 0 else 'SHORT'
             tf_c     = G if tf_dir > 0 else R
@@ -2139,26 +2181,33 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         if kdv_f != 0: state.prev_kdv_global = kdv_f
 
         # ── Per-TF independent phase detection ───────────────────────────
-        tf_bars_map_i = [('5m', b5), ('15m', b15), ('1h', b1h), ('4h', b4h)]
-        tf_sb_i       = final.get('score', 0.0)
-        tf_sb_dir_i   = 1 if tf_sb_i >= 0 else -1
+        tf_bars_map_i  = [('5m', b5), ('15m', b15), ('1h', b1h), ('4h', b4h)]
+        tf_sb_i        = final.get('score', 0.0)
+        tf_sb_dir_i    = 1 if tf_sb_i >= 0 else -1
         bids_i, asks_i = ob_by_sec.get(s1_secs[-1], ([], []))
+        _tf_cool_s_i   = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400}
         for tf_lbl_i, tf_bars_i in tf_bars_map_i:
-            tf_state_now_i, tf_phase_i = _tf_phase_state(tf_bars_i)
+            tf_state_now_i, tf_phase_i, tf_score_i, tf_wf_dir_i, tf_fail_i = \
+                _tf_phase_state(tf_bars_i, tf_lbl_i)
             tf_state_prev_i = state.last_tf_states[tf_lbl_i]
-            if tf_state_now_i == 'MID' or tf_state_now_i == tf_state_prev_i:
+            if tf_state_now_i != 'MID':
                 state.last_tf_states[tf_lbl_i] = tf_state_now_i
+            if tf_state_now_i == 'MID':
+                if not tf_fail_i:
+                    state.last_tf_states[tf_lbl_i] = 'MID'
                 continue
-            state.last_tf_states[tf_lbl_i] = tf_state_now_i
-            tf_stype_i = _sig_type(tf_state_now_i, tf_sb_dir_i)
-            tf_dir_i   = 1 if tf_sb_dir_i > 0 else -1
+            if tf_state_now_i == tf_state_prev_i:
+                continue
+            tf_stype_i = _sig_type(tf_state_now_i,
+                                   tf_wf_dir_i if tf_wf_dir_i != 0 else tf_sb_dir_i)
+            tf_dir_i   = 1 if tf_stype_i in ('TROUGH-REV', 'PEAK-CONT') else -1
             tf_entry_i = final.get('price', 0.0)
             carrier_amp_i = state.closed_1m[-1]['high'] - state.closed_1m[-1]['low'] \
                             if state.closed_1m else 0.0
             zone_thresh_i = max(carrier_amp_i * 0.5, tf_entry_i * 0.0015)
             tf_cool_i = (state.last_sig_time is not None
                          and state.last_sig_dir == tf_dir_i
-                         and (min_sec - state.last_sig_time) < 180
+                         and (min_sec - state.last_sig_time) < _tf_cool_s_i[tf_lbl_i]
                          and abs(tf_entry_i - state.last_sig_price) < zone_thresh_i)
             if tf_cool_i:
                 continue
@@ -2166,10 +2215,13 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             state.last_sig_time  = min_sec
             state.last_sig_dir   = tf_dir_i
             state.last_sig_price = tf_entry_i
-            tf_cl_i, _, _, wa_note_i = _wall_absorption(
+            tf_cl_i, _, _, _ = _wall_absorption(
                 bids_i, asks_i, tf_entry_i, state.closed_1m, b5, b15, tf_dir_i > 0)
             wa_tag_i  = f'wa={tf_cl_i}' if tf_cl_i else 'wa=X'
-            tf_conf_i = f'ph={tf_phase_i:+.2f}+{wa_tag_i}'
+            g_i       = _TF_GATES[tf_lbl_i]
+            tf_conf_i = (f'ph={tf_phase_i:+.3f}(≥{g_i["peak_ph"]:.2f})'
+                         f'  amp={tf_score_i*100:.3f}%(≥{g_i["min_amp_pct"]*100:.2f}%)'
+                         f'  {wa_tag_i}')
             tf_sig = {
                 'n':      state.sig_count,
                 'dir':    tf_dir_i,
