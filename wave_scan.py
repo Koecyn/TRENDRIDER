@@ -540,9 +540,13 @@ def _range_signal(shelves, price, last_range_state):
     if span < MIN_SHELF_RANGE:
         return 0, None, None, 0
 
-    # Touch: price within SHELF_TOUCH_PCT of the shelf level
-    at_sup = abs(price - sup['level']) / price <= SHELF_TOUCH_PCT
-    at_res = abs(price - res['level']) / price <= SHELF_TOUCH_PCT
+    # Touch: price within SHELF_TOUCH_PCT of the shelf level, AND closer to that
+    # shelf than the other.  Mutual exclusion prevents simultaneous touch of both
+    # sides when the range is narrow relative to the touch threshold.
+    dist_sup = abs(price - sup['level'])
+    dist_res = abs(price - res['level'])
+    at_sup = dist_sup / price <= SHELF_TOUCH_PCT and dist_sup < dist_res
+    at_res = dist_res / price <= SHELF_TOUCH_PCT and dist_res < dist_sup
 
     if at_sup and last_range_state != 'sup':
         return +1, sup, res, span
@@ -1031,129 +1035,83 @@ def _wf_phase(bars, n=30):
         return 0.0
 
 
-def _observe_structural(price, prices_buf, vols_buf, takers_buf,
-                        obi, kdv_up, kdv_down, micro_bars=None):
+def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars):
     """
-    Label current second's order flow structure from observable patterns only.
+    Label current second's order flow structure using the rolling 1s window only.
+
+    micro_bars: rolling 120s list of 1s bar dicts — never resets at minute
+    boundaries, always has full history.  Returns 'MID' until 15 bars.
 
     Returns: 'PEAK' | 'TROUGH' | 'CONT_UP' | 'CONT_DOWN' | 'MID'
 
-    micro_bars: rolling 120s 1s-bar list — provides cross-minute price context.
-    Falls back to prices_buf when unavailable (first bars of session).
-
     Patterns:
-      PEAK      price at multi-bar high + buying EXHAUSTED (was dominating, now
-                flipped to selling) OR KdV just flipped down.
-                OBI or volume divergence provides secondary confirmation.
+      PEAK      price at structural high (both 12s and 45s window agree)
+                + buying EXHAUSTED: taker buy was >60% in prior window,
+                  now <40% — the flip IS the signal.
+                OR KdV just flipped down at a high.
 
-      TROUGH    price at multi-bar low  + selling EXHAUSTED (was dominating, now
-                flipped to buying) OR KdV just flipped up.
+      TROUGH    price at structural low + selling EXHAUSTED (flip to buying)
+                OR KdV just flipped up at a low.
 
-      CONT_UP   price pushing new highs + buying SUSTAINED (consistently >60%
-                taker buy across prior and current window) + OBI positive.
-                No momentum flip detected.
+      CONT_UP   price at 12s high + buying SUSTAINED in both windows + OBI pos.
+                No momentum flip.  Price wants to go higher.
 
-      CONT_DOWN price pushing new lows  + selling SUSTAINED + OBI negative.
+      CONT_DOWN price at 12s low  + selling SUSTAINED + OBI neg.
 
-      MID       price not at a structural extreme, or signals absent/mixed.
-
-    Key distinction PEAK vs CONT_UP: both occur at new highs.
-      PEAK  = buyers were in control, now sellers are taking over (flip).
-      CONT_UP = buyers have been and remain in control (no flip).
+      MID       no structural extreme, or signals absent/mixed.
     """
-    n = len(prices_buf)
-    if n < 3:
+    m = len(micro_bars)
+    if m < 15:
         return 'MID'
 
-    # Use micro_bars for cross-minute price/vol context when available.
-    # micro_bars resets at most every 120s; prices_buf resets every 60s.
-    # Without cross-minute context the first 5s of each minute has only 3-5
-    # data points, making "at_hi" fire on every active second.
-    if micro_bars and len(micro_bars) >= 10:
-        hist_p = [b['close'] for b in micro_bars]
-        hist_v = [b['volume'] for b in micro_bars]
-        hist_t = [b.get('taker_buy', b['volume'] * 0.5) for b in micro_bars]
-    else:
-        hist_p = list(prices_buf)
-        hist_v = list(vols_buf)
-        hist_t = list(takers_buf)
+    closes = [b['close']                          for b in micro_bars]
+    vols   = [b['volume']                         for b in micro_bars]
+    tbs    = [b.get('taker_buy', b['volume']*0.5) for b in micro_bars]
 
-    m = len(hist_p)
-
-    # Price position — require agreement at TWO lookbacks so single-tick spikes
-    # don't qualify.  Short (~12s) for intrabar responsiveness; long (~45s) for
-    # structural context.
+    # Price extremes — dual window prevents single-tick spikes from qualifying
     n_s = min(12, m)
     n_l = min(45, m)
-    at_hi_s = price >= max(hist_p[-n_s:])
-    at_lo_s = price <= min(hist_p[-n_s:])
-    at_hi_l = price >= max(hist_p[-n_l:])
-    at_lo_l = price <= min(hist_p[-n_l:])
-    at_hi   = at_hi_s and at_hi_l   # structural high: both windows agree
-    at_lo   = at_lo_s and at_lo_l   # structural low
+    at_hi_s = price >= max(closes[-n_s:])
+    at_lo_s = price <= min(closes[-n_s:])
+    at_hi   = at_hi_s and price >= max(closes[-n_l:])
+    at_lo   = at_lo_s and price <= min(closes[-n_l:])
 
-    # Taker buy ratio — now (last 3s) vs prior (4–12s ago).
-    # The CHANGE in ratio is the core signal, not a snapshot.
-    vol_now = sum(vols_buf[-3:])
-    tb_now  = sum(takers_buf[-3:])
+    # Taker buy ratio windows — always from the rolling bar list, never the
+    # per-minute buffer that resets to 1 entry at each minute boundary.
+    vol_now = sum(vols[-3:]);  tb_now = sum(tbs[-3:])
+    vol_pr  = sum(vols[-12:-3]); tb_pr = sum(tbs[-12:-3])
     tr_now  = tb_now / vol_now if vol_now > 1e-8 else 0.5
+    tr_pr   = tb_pr  / vol_pr  if vol_pr  > 1e-8 else 0.5
 
-    if m >= 12:
-        vol_pr = sum(hist_v[-12:-3])
-        tb_pr  = sum(hist_t[-12:-3])
-        tr_pr  = tb_pr / vol_pr if vol_pr > 1e-8 else 0.5
-    else:
-        tr_pr = tr_now
-
-    # Momentum change: the flip is the signal, not the current level alone
-    buy_flipped  = tr_pr > 0.60 and tr_now < 0.40   # was buying, now selling
-    sell_flipped = tr_pr < 0.40 and tr_now > 0.60   # was selling, now buying
-
-    # Sustained pressure: buyers/sellers have been in control, not just arrived
-    buy_now       = tr_now > 0.60
-    sell_now      = tr_now < 0.40
-    buy_sustained = buy_now  and tr_pr > 0.55
+    buy_flipped    = tr_pr > 0.60 and tr_now < 0.40   # was buying → now selling
+    sell_flipped   = tr_pr < 0.40 and tr_now > 0.60   # was selling → now buying
+    buy_now        = tr_now > 0.60
+    sell_now       = tr_now < 0.40
+    buy_sustained  = buy_now  and tr_pr > 0.55
     sell_sustained = sell_now and tr_pr < 0.45
 
     obi_pos = obi >  0.05
     obi_neg = obi < -0.05
 
-    # Volume divergence: volume declining as price reaches new extreme signals
-    # fading momentum — classic pre-reversal pattern.
-    if m >= 8:
-        vol_e = sum(hist_v[-8:-4])
-        vol_l = sum(hist_v[-4:])
-        vol_div = vol_e > 1e-8 and vol_l < vol_e * 0.50
-    else:
-        vol_div = False
+    # Volume divergence: volume dries up as price makes new extreme
+    vol_e = sum(vols[-8:-4]); vol_l = sum(vols[-4:])
+    vol_div = vol_e > 1e-8 and vol_l < vol_e * 0.50
 
     # ── PEAK ──────────────────────────────────────────────────────────────────
-    # Price at structural high + exhaustion of buying OR structural KdV flip
     if at_hi:
-        if kdv_down:                               # KdV momentum just turned down at a high
-            return 'PEAK'
-        if buy_flipped:                            # was buying, sellers just took over
-            return 'PEAK'
-        if sell_now and (obi_neg or vol_div):      # sell pressure confirmed by book or vol
-            return 'PEAK'
+        if kdv_down:                          return 'PEAK'   # KdV turned at high
+        if buy_flipped:                       return 'PEAK'   # buying exhausted
+        if sell_now and (obi_neg or vol_div): return 'PEAK'   # sell confirmed
 
     # ── TROUGH ────────────────────────────────────────────────────────────────
     if at_lo:
-        if kdv_up:                                 # KdV momentum just turned up at a low
-            return 'TROUGH'
-        if sell_flipped:                           # was selling, buyers just took over
-            return 'TROUGH'
-        if buy_now and (obi_pos or vol_div):       # buy pressure confirmed by book or vol
-            return 'TROUGH'
+        if kdv_up:                            return 'TROUGH'
+        if sell_flipped:                      return 'TROUGH'
+        if buy_now and (obi_pos or vol_div):  return 'TROUGH'
 
-    # ── CONT_UP ───────────────────────────────────────────────────────────────
-    # Short-term high (not necessarily structural) + buyers sustained + book confirms
-    if at_hi_s and buy_sustained and obi_pos and not kdv_down:
-        return 'CONT_UP'
-
-    # ── CONT_DOWN ─────────────────────────────────────────────────────────────
-    if at_lo_s and sell_sustained and obi_neg and not kdv_up:
-        return 'CONT_DOWN'
+    # ── CONT_UP / CONT_DOWN ───────────────────────────────────────────────────
+    if at_hi_s and buy_sustained and obi_pos and not kdv_down:  return 'CONT_UP'
+    if at_lo_s and sell_sustained and obi_neg and not kdv_up:   return 'CONT_DOWN'
 
     return 'MID'
 
@@ -1616,9 +1574,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
             # ── Pattern observation — order flow patterns at price extremes ───
             obs_label = _observe_structural(
-                p_close, p_closes, p_vols, p_tb,
-                obi_p, kdv_flipped_up, kdv_flipped_down,
-                micro_bars=micro_window)
+                p_close, obi_p, kdv_flipped_up, kdv_flipped_down, micro_window)
 
             if obs_label == 'MID':
                 last_1m_state = 'MID'
@@ -2323,11 +2279,9 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             )
             # ── Pattern observation — order flow patterns at price extremes ───
             # composite_phase_i kept for display only, not for state management.
-            # _observe_structural handles zero-volume naturally (tr_now→0.5→MID).
+            # _observe_structural uses the rolling micro_window — no minute resets.
             obs_label_i = _observe_structural(
-                p_close, p_closes, p_vols, p_tb,
-                obi_p, kdv_flipped_up, kdv_flipped_down,
-                micro_bars=state.micro_window)
+                p_close, obi_p, kdv_flipped_up, kdv_flipped_down, state.micro_window)
 
             if obs_label_i == 'MID':
                 state.last_1m_state = 'MID'
