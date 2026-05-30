@@ -31,8 +31,15 @@ from physics.signals import HydraulicAccumulator
 REPO         = os.path.dirname(__file__)
 SUSTAIN_S    = 1    # fire on first qualifying second — predict, not follow
 SUSTAIN_FLIP = 1    # when KdV flips, 1 confirmed second is enough (the flip IS confirmation)
-PEAK_PH      =  0.75  # structural: top outer-quarter of -1..+1 wave cycle
-TROUGH_PH    = -0.75  # structural: bottom outer-quarter of -1..+1 wave cycle
+PEAK_PH      =  0.75  # fallback per-TF threshold (used only when composite unavailable)
+TROUGH_PH    = -0.75
+# Composite multi-TF phase weights — same as physics/resonance._TF_WEIGHTS.
+# composite = Σ(w_tf * phase_tf) ranges -1..+1.
+# +1.0 means EVERY timeframe has its wave at the crest simultaneously.
+# -1.0 means EVERY timeframe has its wave at the trough simultaneously.
+# The adaptive peak_ph/trough_ph thresholds from _thresholds() are stored against
+# composite values so they self-calibrate to the composite scale over time.
+_COMP_W = {'1m': 0.05, '5m': 0.10, '15m': 0.20, '1h': 0.30, '4h': 0.35}
 MIN_SHELF_RANGE = 40.0   # min $ gap between range floor and ceiling to qualify
 SHELF_TOUCH_PCT = 0.0008 # within 0.08% of shelf level = "touching it"
 
@@ -983,6 +990,18 @@ _TF_GATES = {
 }
 
 
+def _wf_phase(bars, n=30):
+    """Return WF micro-component phase for bars[-n:].  0.0 on any failure."""
+    if len(bars) < 10:
+        return 0.0
+    try:
+        closes = np.array([b['close'] for b in bars[-n:]], dtype=float)
+        return WF.run(closes, entry=float(closes[-1]),
+                      direction=1)['components'].get('micro', {}).get('phase', 0.0)
+    except Exception:
+        return 0.0
+
+
 def _tf_phase_state(bars, tf_label):
     """Run WF on TF bar array using TF-specific gates.
     Returns (state, phase, range_pct, wf_dir, fail_reason).
@@ -1294,6 +1313,13 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         except Exception:
             res_dir=0; align=0.0; dissonance=False
 
+        # TF phases for composite — stable each minute (closed bars only).
+        # micro_phase (1m) varies per-second and is blended in the inner loop.
+        _tf_ph_5m  = _wf_phase(b5)
+        _tf_ph_15m = _wf_phase(b15)
+        _tf_ph_1h  = _wf_phase(b1h)
+        _tf_ph_4h  = _wf_phase(b4h)
+
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
 
         cand_sec    = None
@@ -1434,7 +1460,17 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             prev_itype = itype
 
             sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
-            state_now = _micro_state(micro_phase, peak_ph, trough_ph)
+
+            # Composite multi-TF phase: +1.0 = ALL timeframes at their crest together.
+            # 1m weight is small — its micro cycle alone cannot trigger a signal.
+            composite_phase = (
+                _COMP_W['1m']  * micro_phase  +
+                _COMP_W['5m']  * _tf_ph_5m    +
+                _COMP_W['15m'] * _tf_ph_15m   +
+                _COMP_W['1h']  * _tf_ph_1h    +
+                _COMP_W['4h']  * _tf_ph_4h
+            )
+            state_now = _micro_state(composite_phase, peak_ph, trough_ph)
 
             # Stale-price suppression: WF oscillates freely on flat zero-volume bars.
             # Suppress PEAK/TROUGH when the last 3+ closed minutes show no price movement.
@@ -1622,6 +1658,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             final = {'sec':sec,'price':p_close,'score':f_sc,'wf_dir':wf_dir,
                      'kdv':kdv,'kdv_bal':kdv_bal,'wh':wh,'itype':itype,
                      'comp':comp,'itf':itf,'sb':sb,'micro_phase':micro_phase,
+                     'composite_phase':composite_phase,
                      'sustain':sustain_count,'obi':obi_p,
                      'micro_sc':micro_sc,'micro_ph':micro_ph,'micro_kdv':micro_kdv}
 
@@ -1633,7 +1670,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
         # Record completed-minute stats for next minute's thresholds
         hist_scores.append(abs(final['score']))
-        hist_phases.append(final['micro_phase'])
+        hist_phases.append(final['composite_phase'])   # composite calibrates threshold to multi-TF scale
         hist_obi.append(final['obi'])
         hist_kdv_bals.append(final['kdv_bal'])
         hist_aligns.append(align)
@@ -1658,7 +1695,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         t1h = htf_ctx.get('trend_1h', 'ne')[:2]
         t4h = htf_ctx.get('trend_4h', 'ne')[:2]
 
-        state_now = _micro_state(final['micro_phase'], peak_ph, trough_ph)
+        state_now = _micro_state(final.get('composite_phase', final['micro_phase']), peak_ph, trough_ph)
 
         notes = []
         # notes_inline is set inside the inner loop when a signal fires or is blocked
@@ -1688,7 +1725,8 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         obi_str  = f"{obi_f:+.2f}"
 
         col = Y if notes else Z
-        state_now_f = _micro_state(final['micro_phase'], peak_ph, trough_ph)
+        comp_ph_f   = final.get('composite_phase', 0.0)
+        state_now_f = _micro_state(comp_ph_f, peak_ph, trough_ph)
         state_col = (C if state_now_f == 'PEAK' else
                      G if state_now_f == 'TROUGH' else W)
 
@@ -1696,6 +1734,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
         mph_f  = final.get('micro_ph',  0.0)
         msc_str = f"{msc_f:>+6.3f}" if msc_f != 0.0 else "  ---  "
         mph_str = _ph(mph_f)
+        cph_str = f"{comp_ph_f:+.3f}"   # composite phase shown in wave table
         dec_str = KnifeDecayBuffer.compact(min_dk_state, min_dk_ds, min_dk_fos)
         dec_col = (G if min_dk_state >= KnifeDecayBuffer.FLOCK  else
                    C if min_dk_state >= KnifeDecayBuffer.DWATCH else
@@ -1712,7 +1751,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                   f"{_ph(mi.get('phase',0)):>2} {_ph(sh_.get('phase',0)):>2} "
                   f"{_ph(ca.get('phase',0)):>2} {_ph(ma.get('phase',0)):>2}  "
                   f"{t1m} {t5m} {t15} {t1h} {t4h}  "
-                  f"{kdv_str}  {obi_str}  {msc_str}  {mph_str}  {itype:4}  "
+                  f"{kdv_str}  {obi_str}  {msc_str}  {mph_str}  {cph_str}  {itype:4}  "
                   f"{state_col}{state_now_f:6}{col}  {dec_col}{dec_str}{col}  {note_str}{Z}")
 
         # ── Per-TF independent phase detection ───────────────────────────
@@ -2110,6 +2149,12 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
         state.last_res_dir = res_dir
         state.last_htf_sup = at_sup
 
+        # TF phases for composite — stable each minute (closed bars only)
+        _tf_ph_5m_i  = _wf_phase(b5)
+        _tf_ph_15m_i = _wf_phase(b15)
+        _tf_ph_1h_i  = _wf_phase(b1h)
+        _tf_ph_4h_i  = _wf_phase(b4h)
+
         p_opens=[]; p_closes=[]; p_vols=[]; p_tb=[]
         cand_sec=None; cand_score=0.0; cand_dir=0
         cand_stype='MID'; cand_entry=0.0; cand_tgt=0.0
@@ -2221,7 +2266,15 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             prev_sb = sb
 
             sustain_needed = SUSTAIN_FLIP if (kdv_flipped_up or kdv_flipped_down) else SUSTAIN_S
-            state_now_i = _micro_state(micro_phase, peak_ph, trough_ph)
+
+            composite_phase_i = (
+                _COMP_W['1m']  * micro_phase   +
+                _COMP_W['5m']  * _tf_ph_5m_i   +
+                _COMP_W['15m'] * _tf_ph_15m_i  +
+                _COMP_W['1h']  * _tf_ph_1h_i   +
+                _COMP_W['4h']  * _tf_ph_4h_i
+            )
+            state_now_i = _micro_state(composite_phase_i, peak_ph, trough_ph)
 
             # Stale-price suppression: suppress phantom WF oscillations on flat zero-volume data
             if state_now_i != 'MID' and len(state.closed_1m) >= 3:
@@ -2375,6 +2428,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
 
             final = {'sec':sec,'price':p_close,'score':f_sc,'kdv':kdv,
                      'kdv_bal':kdv_bal,'obi':obi_p,'micro_phase':micro_phase,
+                     'composite_phase':composite_phase_i,
                      'micro_sc':micro_sc,'micro_ph':micro_ph,'micro_kdv':micro_kdv}
 
         if not final:
@@ -2385,7 +2439,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             continue
 
         state.hist_scores.append(abs(final['score']))
-        state.hist_phases.append(final['micro_phase'])
+        state.hist_phases.append(final['composite_phase'])   # composite calibrates threshold
         state.hist_obi.append(final['obi'])
         state.hist_kdv_bals.append(final['kdv_bal'])
         state.hist_aligns.append(align)
