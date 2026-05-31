@@ -1036,32 +1036,19 @@ def _wf_phase(bars, n=30):
 
 
 def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
-                        bars_5m=None):
+                        bars_5m=None, bars_1m=None):
     """
-    Label current second's order flow structure.
+    Window = the timeframe = 60 1s-bars (1m).
+    Prior context from the last closed 1m candle (bars_1m[-1]).
 
-    micro_bars : rolling 120s 1s-bar list — never resets at minute boundaries.
-    res_dir    : resonance direction from multi-TF physics (+1/-1/0).
-    bars_5m    : recent 5m candle bars — used for 5m-level CONT detection.
+    PEAK/TROUGH = ORDER FLOW REVERSAL at the local 1m high/low.
+    Fires whenever reversal indicators trigger at the local extreme —
+    regardless of whether that extreme is above/below the prior candle.
 
-    Returns one of:
-      'PEAK'     — price at genuine NEW 2m high + buying exhaustion
-      'TROUGH'   — price at genuine NEW 2m low  + selling exhaustion
-      'CONT_UP'  — trend continuation up: price at new 2m high, buying sustained
-      'CONT_DOWN'— trend continuation down: price at new 2m low, selling sustained
-      'RANGE_HI' — price at 1m high but BELOW 2m high (lower-high = ranging)
-      'RANGE_LO' — price at 1m low  but ABOVE 2m low  (higher-low = ranging)
-      'MID'      — no meaningful structure
+    CONT_UP/DOWN = genuine new extreme (>= prior candle) + no reversal.
+    RANGE_HI/LO  = lower-high / higher-low (< prior candle) + no reversal.
 
-    Window discipline — nothing uses arbitrary sub-second counts:
-      1m window = last 60 1s-bars (rolling 1-minute candle)
-      2m window = full micro_bars up to 120 1s-bars
-      5m window = bars_5m[-1] vs bars_5m[-2] (two completed 5m candles)
-
-    PEAK/TROUGH require price at the 2m high/low (genuine structural extreme).
-    RANGE_HI/RANGE_LO require price at the 1m high/low but BELOW/ABOVE the 2m
-    extreme — the market is making lower-highs or higher-lows, i.e., ranging.
-    CONT_UP/DOWN also require the 2m extreme, so they never fire inside a range.
+    Returns: 'PEAK' | 'TROUGH' | 'CONT_UP' | 'CONT_DOWN' | 'RANGE_HI' | 'RANGE_LO' | 'MID'
     """
     m = len(micro_bars)
     if m < 15:
@@ -1071,42 +1058,48 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     vols   = [b['volume']                         for b in micro_bars]
     tbs    = [b.get('taker_buy', b['volume']*0.5) for b in micro_bars]
 
-    # ── Range / position: 1m and 2m rolling windows ──────────────────────────
-    n1  = min(60, m)    # 1m rolling window (candle)
-    n2  = m             # 2m rolling window (full micro_bars)
+    n1 = min(60, m)  # 1m window = THE timeframe
 
-    hi_s = max(closes[-n1:]); lo_s = min(closes[-n1:])   # 1m high/low
-    hi_l = max(closes[-n2:]); lo_l = min(closes[-n2:])   # 2m high/low
-    range_l = hi_l - lo_l
+    hi_s     = max(closes[-n1:])
+    lo_s     = min(closes[-n1:])
+    range_1m = hi_s - lo_s
 
-    if range_l < price * 0.0003:
+    if range_1m < price * 0.0003:
         return 'MID'
 
-    pct_pos = (price - lo_l) / range_l   # 0.0 = 2m bottom, 1.0 = 2m top
+    # ── Prior 1m candle reference ─────────────────────────────────────────────
+    if bars_1m and len(bars_1m) >= 1:
+        prior       = bars_1m[-1]
+        prior_hi    = prior['high']
+        prior_lo    = prior['low']
+        vol_pr      = prior['volume']
+        tb_pr_total = prior['taker_buy']
+        tr_pr       = tb_pr_total / vol_pr if vol_pr > 1e-8 else 0.5
+        v_pr        = (prior['close'] - prior['open']) / 60.0
+    else:
+        # Warmup: no closed candle yet — use mid-1m split as fallback
+        n_half      = n1 // 2
+        vol_pr      = sum(vols[-n1:-n_half]) if n1 > n_half else 0.0
+        tb_pr_total = sum(tbs[-n1:-n_half])  if n1 > n_half else 0.0
+        tr_pr       = tb_pr_total / vol_pr if vol_pr > 1e-8 else 0.5
+        v_pr        = (closes[-n_half] - closes[-n1]) / max(n1 - n_half, 1) if n1 > n_half else 0.0
+        prior_hi    = hi_s
+        prior_lo    = lo_s
 
-    # ── Structural position flags ─────────────────────────────────────────────
-    # Genuine extremes: at BOTH the 1m AND 2m high/low.
-    at_hi = (price >= hi_s and price >= hi_l and pct_pos >= 0.65)
-    at_lo = (price <= lo_s and price <= lo_l and pct_pos <= 0.35)
+    # ── Structural position ───────────────────────────────────────────────────
+    at_hi  = price >= hi_s   # price is at the local 1m high
+    at_lo  = price <= lo_s   # price is at the local 1m low
+    new_hi = hi_s >= prior_hi  # genuine new high vs prior candle (for CONT/RANGE split)
+    new_lo = lo_s <= prior_lo  # genuine new low vs prior candle
 
-    # Range extremes: at 1m high/low but NOT the 2m extreme → lower-high / higher-low.
-    # pct_pos threshold relaxed slightly (0.55 / 0.45) vs genuine extremes.
-    at_range_hi = (not at_hi and price >= hi_s and price < hi_l and pct_pos >= 0.55)
-    at_range_lo = (not at_lo and price <= lo_s and price > lo_l and pct_pos <= 0.45)
-
-    # ── Taker ratio: full 1m window vs previous 1m window ────────────────────
-    vol_now = sum(vols[-n1:]);        tb_now = sum(tbs[-n1:])
-    n_prev  = n2 - n1
-    vol_pr  = sum(vols[:n_prev]) if n_prev > 0 else 0.0
-    tb_pr   = sum(tbs[:n_prev])  if n_prev > 0 else 0.0
-
+    # ── Taker ratio: current 1m vs prior 1m candle ───────────────────────────
+    vol_now = sum(vols[-n1:])
+    tb_now  = sum(tbs[-n1:])
     tr_now  = tb_now / vol_now if vol_now > 1e-8 else 0.5
-    tr_pr   = tb_pr  / vol_pr  if vol_pr  > 1e-8 else 0.5
+    dtr     = tr_now - tr_pr
 
-    dtr     = tr_now - tr_pr   # momentum change: negative = buyers → sellers
-
-    buy_flipped    = dtr < -0.25 and tr_now < 0.45
-    sell_flipped   = dtr >  0.25 and tr_now > 0.55
+    buy_flipped    = dtr < -0.25 and tr_now < 0.45   # was buying, now selling
+    sell_flipped   = dtr >  0.25 and tr_now > 0.55   # was selling, now buying
     buy_now        = tr_now > 0.60
     sell_now       = tr_now < 0.40
     buy_sustained  = tr_now > 0.55 and tr_pr > 0.55
@@ -1115,74 +1108,72 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     obi_pos     = obi >  0.05;  obi_neg     = obi < -0.05
     obi_str_pos = obi >  0.20;  obi_str_neg = obi < -0.20
 
-    # Volume divergence: second half of 1m candle lighter than first half
+    # Volume divergence: second half of 1m window lighter than first
     n_half  = n1 // 2
     vol_fst = sum(vols[-n1:-n_half]) if n1 > n_half else 0.0
     vol_lst = sum(vols[-n_half:])    if n_half > 0   else 0.0
     vol_div = vol_fst > 1e-8 and vol_lst < vol_fst * 0.50
 
-    # ── Velocity over the full 1m and previous 1m windows ────────────────────
-    v_now = (closes[-1] - closes[-n1]) / (n1 - 1)       if n1  > 1 else 0.0
-    v_pr  = (closes[-n1] - closes[0])  / max(n_prev, 1) if n_prev > 0 else 0.0
-
+    # ── Velocity ─────────────────────────────────────────────────────────────
+    v_now       = (closes[-1] - closes[-n1]) / (n1 - 1) if n1 > 1 else 0.0
     vel_cont_up = v_now > 0.02 and v_pr > 0.02
     vel_cont_dn = v_now < -0.02 and v_pr < -0.02
     vel_up      = v_now >  0.10
     vel_dn      = v_now < -0.10
 
-    # ── 5m candle indicators (two completed 5m bars) ─────────────────────────
+    # ── 5m candle indicators ─────────────────────────────────────────────────
     v5_cont_up = v5_cont_dn = False
     if bars_5m and len(bars_5m) >= 2:
         b5c = bars_5m[-1];  b5p = bars_5m[-2]
-        v5c = (b5c['close'] - b5c['open']) / 300.0
-        v5p = (b5p['close'] - b5p['open']) / 300.0
+        v5c  = (b5c['close'] - b5c['open']) / 300.0
+        v5p  = (b5p['close'] - b5p['open']) / 300.0
         tr5c = b5c['taker_buy'] / b5c['volume'] if b5c['volume'] > 1e-8 else 0.5
         v5_cont_up = v5c > 0.01 and v5p > 0.01 and tr5c > 0.55
         v5_cont_dn = v5c < -0.01 and v5p < -0.01 and tr5c < 0.45
 
-    # ── PEAK — genuine structural high (at 2m high + exhaustion) ─────────────
     if at_hi:
-        if kdv_down and not obi_str_pos:       return 'PEAK'
-        if buy_flipped:                         return 'PEAK'
-        if sell_now and obi_neg:                return 'PEAK'
-        if sell_now and vol_div:                return 'PEAK'
-        if sell_now and res_dir == -1:          return 'PEAK'
+        # ── PEAK: order flow reversal at local high (new OR lower high) ───────
+        if kdv_down and not obi_str_pos:  return 'PEAK'
+        if buy_flipped:                    return 'PEAK'
+        if sell_now and obi_neg:           return 'PEAK'
+        if sell_now and vol_div:           return 'PEAK'
+        if sell_now and res_dir == -1:     return 'PEAK'
 
-    # ── TROUGH — genuine structural low (at 2m low + exhaustion) ─────────────
+        # No reversal — classify by whether this high extends beyond prior candle
+        if new_hi:
+            # ── CONT_UP: genuine new high + trend continues ────────────────
+            if not kdv_down:
+                if buy_sustained and not obi_str_neg:     return 'CONT_UP'
+                if vel_cont_up and (buy_now or obi_pos):  return 'CONT_UP'
+                if vel_up and obi_pos:                    return 'CONT_UP'
+                if v5_cont_up and not obi_str_neg:        return 'CONT_UP'
+        else:
+            # ── RANGE_HI: lower-high + no reversal ────────────────────────
+            if sell_now:   return 'RANGE_HI'
+            if vol_div:    return 'RANGE_HI'
+            if obi_neg:    return 'RANGE_HI'
+
     if at_lo:
-        if kdv_up and not obi_str_neg:         return 'TROUGH'
-        if sell_flipped:                        return 'TROUGH'
-        if buy_now and obi_pos:                 return 'TROUGH'
-        if buy_now and vol_div:                 return 'TROUGH'
-        if buy_now and res_dir == +1:           return 'TROUGH'
+        # ── TROUGH: order flow reversal at local low (new OR higher low) ─────
+        if kdv_up and not obi_str_neg:    return 'TROUGH'
+        if sell_flipped:                   return 'TROUGH'
+        if buy_now and obi_pos:            return 'TROUGH'
+        if buy_now and vol_div:            return 'TROUGH'
+        if buy_now and res_dir == +1:      return 'TROUGH'
 
-    # ── RANGE_HI — lower-high: at 1m high but below 2m high (ranging) ────────
-    # The market tried to extend but couldn't reach the prior 2m high.
-    if at_range_hi:
-        if sell_now or buy_flipped or vol_div:  return 'RANGE_HI'
-        if kdv_down and not obi_str_pos:        return 'RANGE_HI'
-        if obi_neg:                             return 'RANGE_HI'
-
-    # ── RANGE_LO — higher-low: at 1m low but above 2m low (ranging) ──────────
-    if at_range_lo:
-        if buy_now or sell_flipped or vol_div:  return 'RANGE_LO'
-        if kdv_up and not obi_str_neg:          return 'RANGE_LO'
-        if obi_pos:                             return 'RANGE_LO'
-
-    # ── CONT_UP — trend continuation up (must reach genuine 2m high) ─────────
-    # Requires price >= hi_l so it never fires inside a range (lower-high).
-    if price >= hi_s and price >= hi_l and not kdv_down:
-        if buy_sustained and not obi_str_neg:           return 'CONT_UP'
-        if vel_cont_up and (buy_now or obi_pos):         return 'CONT_UP'
-        if vel_up and obi_pos:                           return 'CONT_UP'
-        if v5_cont_up and not obi_str_neg:               return 'CONT_UP'
-
-    # ── CONT_DOWN — trend continuation down (must reach genuine 2m low) ───────
-    if price <= lo_s and price <= lo_l and not kdv_up:
-        if sell_sustained and not obi_str_pos:          return 'CONT_DOWN'
-        if vel_cont_dn and (sell_now or obi_neg):        return 'CONT_DOWN'
-        if vel_dn and obi_neg:                           return 'CONT_DOWN'
-        if v5_cont_dn and not obi_str_pos:               return 'CONT_DOWN'
+        # No reversal — classify by whether this low extends beyond prior candle
+        if new_lo:
+            # ── CONT_DOWN: genuine new low + trend continues ───────────────
+            if not kdv_up:
+                if sell_sustained and not obi_str_pos:    return 'CONT_DOWN'
+                if vel_cont_dn and (sell_now or obi_neg): return 'CONT_DOWN'
+                if vel_dn and obi_neg:                    return 'CONT_DOWN'
+                if v5_cont_dn and not obi_str_pos:        return 'CONT_DOWN'
+        else:
+            # ── RANGE_LO: higher-low + no reversal ────────────────────────
+            if buy_now:    return 'RANGE_LO'
+            if vol_div:    return 'RANGE_LO'
+            if obi_pos:    return 'RANGE_LO'
 
     return 'MID'
 
@@ -1560,7 +1551,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
 
             # ── Micro layer: 1s rolling window physics ───────────────────────
             micro_window.append(bar1s)
-            if len(micro_window) > 120: micro_window = micro_window[-120:]
+            if len(micro_window) > 60: micro_window = micro_window[-60:]
             micro_sc = 0.0; micro_ph = 0.0; micro_kdv = 0
             if len(micro_window) >= 15:
                 mc = np.array([b['close']  for b in micro_window], dtype=float)
@@ -1656,7 +1647,8 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             # ── Pattern observation — order flow patterns at price extremes ───
             obs_label = _observe_structural(
                 p_close, obi_p, kdv_flipped_up, kdv_flipped_down,
-                micro_window, res_dir=res_dir, bars_5m=b5)
+                micro_window, res_dir=res_dir, bars_5m=b5,
+                bars_1m=closed_1m)
 
             if obs_label == 'MID':
                 last_1m_state = 'MID'
@@ -2353,8 +2345,8 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
 
             # Micro layer
             state.micro_window.append(bar1s)
-            if len(state.micro_window) > 120:
-                state.micro_window = state.micro_window[-120:]
+            if len(state.micro_window) > 60:
+                state.micro_window = state.micro_window[-60:]
             micro_sc=0.0; micro_ph=0.0; micro_kdv=0
             if len(state.micro_window) >= 15:
                 mc = np.array([b['close']  for b in state.micro_window], dtype=float)
@@ -2436,7 +2428,8 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             # _observe_structural uses the rolling micro_window — no minute resets.
             obs_label_i = _observe_structural(
                 p_close, obi_p, kdv_flipped_up, kdv_flipped_down,
-                state.micro_window, res_dir=res_dir, bars_5m=b5)
+                state.micro_window, res_dir=res_dir, bars_5m=b5,
+                bars_1m=state.closed_1m)
 
             if obs_label_i == 'MID':
                 state.last_1m_state = 'MID'
