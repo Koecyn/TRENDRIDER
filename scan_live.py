@@ -221,6 +221,7 @@ def main():
                     'signals':      state.signals,
                     'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'new_this_run': len(new_sigs),
+                    'live':         getattr(state, 'live', {}),
                 }
                 SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
                 if state.closed_1m:

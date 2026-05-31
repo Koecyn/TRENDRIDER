@@ -1094,6 +1094,19 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     vel_up      = v_now >  0.10
     vel_dn      = v_now < -0.10
 
+    # Short-window velocity (10s) — discriminates wall absorption from wall holding.
+    # >+0.5 $/s: price running hard through ask wall → continuation, not reversal.
+    # <-2.0 $/s: price in freefall → don't call TROUGH on bid wall (it won't hold).
+    n_short      = min(10, m)
+    v_short      = (closes[-1] - closes[-n_short]) / max(n_short - 1, 1) if n_short > 1 else 0.0
+    vel_strong_up = v_short >  0.5
+    vel_strong_dn = v_short < -2.0
+
+    # Micro window (15s) — local extremes for pullbacks inside the 60s range.
+    n_micro  = min(15, m)
+    hi_micro = max(closes[-n_micro:])
+    lo_micro = min(closes[-n_micro:])
+
     # ── Order book signals (available on 100% of bars) ───────────────────────
     def _ob_stats(bar):
         bids, asks = bar.get('ob', ([], []))
@@ -1150,9 +1163,17 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
 
     if at_hi:
         # ── PEAK: OB reversal signals at local high ───────────────────────────
-        # spread_compressed without OBI fires everywhere in thin books — require
-        # matching OBI direction. asks_loaded requires obi_neg confirmation.
-        reversal = (ask_wall_at_price or
+        # ask_wall_at_price only fires PEAK when velocity is NOT strongly up:
+        # vel_strong_up means the wall is being absorbed (price running through it)
+        # → that's continuation, not reversal.
+        # vel_strong_up: price running hard through the level — no reversal is possible.
+        # All OB reversal signals require the wall to be HOLDING, not being consumed.
+        if vel_strong_up:
+            if new_hi:   return 'CONT_UP'   # wall absorption = continuation
+            return 'MID'
+
+        ask_wall_holding = ask_wall_at_price and not vel_strong_up
+        reversal = (ask_wall_holding or
                     (asks_loaded and obi_neg) or
                     (spread_compressed and obi_neg) or
                     spread_exploding or
@@ -1172,7 +1193,7 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
             if obi_neg:  return 'RANGE_HI'
 
     if at_lo:
-        # ── TROUGH: OB reversal signals at local low ──────────────────────────
+        # ── TROUGH: OB reversal signals at local low ��─────────────────────────
         # spread_compressed without OBI fires everywhere — require matching OBI.
         # bids_loaded requires obi_pos (knife-catching bids alone don't reverse).
         reversal = (bid_wall_at_price or
@@ -1195,6 +1216,19 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
         else:
             # ── RANGE_LO: higher-low + no reversal ────────────────────────
             if obi_pos:  return 'RANGE_LO'
+
+    # ── Micro-reversal: small pullback not at the 60s extreme ─────────────────
+    # Detects the local min/max within a 15s window — captures the $10-20 pullbacks
+    # inside a larger trend that the 60s-window path misses.
+    if price <= lo_micro and not at_lo:
+        # At 15s local low: bid wall providing support (not in freefall)
+        if bid_wall_at_price and not vel_strong_dn:
+            return 'TROUGH'
+
+    if price >= hi_micro and not at_hi:
+        # At 15s local high: ask wall holding (not being absorbed by momentum)
+        if ask_wall_at_price and not vel_strong_up:
+            return 'PEAK'
 
     return 'MID'
 
@@ -1685,6 +1719,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                         _fire_obs = True
                         _last_cont_up_px  = p_close
                         _last_peak_px     = p_close        # PEAK can't fire at this same level
+                        _last_trough_px   = float('inf')   # new high → next pullback is a fresh micro-trough
                         _last_range_hi_px =  float('inf')  # trending up — range ref invalid
                         _last_range_lo_px = -float('inf')
                 elif obs_label == 'CONT_DOWN':
@@ -1692,6 +1727,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                         _fire_obs = True
                         _last_cont_dn_px  = p_close
                         _last_trough_px   = p_close        # TROUGH can't fire at this same level
+                        _last_peak_px     = -float('inf')  # new low → next bounce is a fresh micro-peak
                         _last_range_hi_px =  float('inf')  # trending down — range ref invalid
                         _last_range_lo_px = -float('inf')
                 elif obs_label == 'PEAK':
@@ -1998,7 +2034,7 @@ class ScanState:
                  'last_cont_up_px', 'last_cont_dn_px',
                  'last_peak_px', 'last_trough_px',
                  'last_range_hi_px', 'last_range_lo_px',
-                 'last_range_state', 'session_shelves')
+                 'last_range_state', 'session_shelves', 'live')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -2037,6 +2073,7 @@ class ScanState:
         self.last_range_lo_px = -float('inf')   # RANGE_LO: fires when price > this
         self.last_range_state = None   # 'sup'|'res' — last ranging side fired
         self.session_shelves  = []
+        self.live             = {}     # current-second indicator snapshot for JSON output
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
@@ -2463,6 +2500,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                         _fire_i = True
                         state.last_cont_up_px  = p_close
                         state.last_peak_px     = p_close        # PEAK can't fire at this same level
+                        state.last_trough_px   = float('inf')   # new high → next pullback is a fresh micro-trough
                         state.last_range_hi_px =  float('inf')  # trending — range ref invalid
                         state.last_range_lo_px = -float('inf')
                 elif obs_label_i == 'CONT_DOWN':
@@ -2470,6 +2508,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                         _fire_i = True
                         state.last_cont_dn_px  = p_close
                         state.last_trough_px   = p_close        # TROUGH can't fire at this same level
+                        state.last_peak_px     = -float('inf')  # new low → next bounce is a fresh micro-peak
                         state.last_range_hi_px =  float('inf')  # trending — range ref invalid
                         state.last_range_lo_px = -float('inf')
                 elif obs_label_i == 'PEAK':
@@ -2628,6 +2667,34 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                      'kdv_bal':kdv_bal,'obi':obi_p,'micro_phase':micro_phase,
                      'composite_phase':composite_phase_i,
                      'micro_sc':micro_sc,'micro_ph':micro_ph,'micro_kdv':micro_kdv}
+
+            # ── Live indicator snapshot for JSON output ───────────────────────
+            _mw = state.micro_window
+            _nv = min(10, len(_mw))
+            _v10 = ((_mw[-1]['close'] - _mw[-_nv]['close']) / max(_nv - 1, 1)
+                    if _nv > 1 else 0.0)
+            _bids_l, _asks_l = ob_by_sec.get(sec, ([], []))
+            _conc_l = _ob_conc(_bids_l, _asks_l, p_close) if _bids_l and _asks_l else 0.0
+            _spr_l  = _ob_spr(_bids_l, _asks_l) if _bids_l and _asks_l else 0.0
+            state.live = {
+                'price':         p_close,
+                'phase':         state.last_1m_state,
+                'dk':            min_dk_lbl,
+                'vel':           round(_v10, 4),
+                'obi':           round(obi_p, 4),
+                'obi_need':      round(obi_conf, 4),
+                'score':         round(f_sc, 4),
+                'score_need':    round(thresh, 4),
+                'kdv_bal':       round(kdv_bal, 4),
+                'kdv_need_rev':  round(gate_rev, 4),
+                'kdv_need_cont': round(gate_cont, 4),
+                'decay_sc':      round(min_dk_ds, 4),
+                'floor_sc':      round(min_dk_fos, 4),
+                'conc':          round(float(_conc_l), 4),
+                'spr':           round(float(_spr_l), 4),
+                'align_need':    round(align_cont, 4),
+                'micro_ph':      round(micro_phase, 4),
+            }
 
         if not final:
             if (s1_secs[-1] >= min_sec + 60
