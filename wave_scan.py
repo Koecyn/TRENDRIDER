@@ -1035,23 +1035,30 @@ def _wf_phase(bars, n=30):
         return 0.0
 
 
-def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0):
+def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
+                        bars_5m=None):
     """
     Label current second's order flow structure.
 
     micro_bars : rolling 120s 1s-bar list — never resets at minute boundaries.
     res_dir    : resonance direction from multi-TF physics (+1/-1/0).
+    bars_5m    : recent 5m candle bars — used for 5m-level CONT detection.
 
     Returns: 'PEAK' | 'TROUGH' | 'CONT_UP' | 'CONT_DOWN' | 'MID'
 
-    PEAK      price in top portion of the recent range, dual-window high,
-              + buying exhausted (was >60% taker-buy, now <40%) OR KdV flipped
-              down while OBI isn't blocking.
-    TROUGH    price in bottom portion of range, dual-window low,
-              + selling exhausted (flip to buying) OR KdV flipped up.
-    CONT_UP   price at 12s high, buying sustained, OBI positive, no KdV down.
-              Cross-TF: res_dir not bearish.
-    CONT_DOWN price at 12s low, selling sustained, OBI negative, no KdV up.
+    All indicator windows align to TIMEFRAME boundaries — never arbitrary seconds.
+    1m window  = last 60 1s-bars (the rolling 1-minute candle)
+    2m window  = full micro_bars (120 1s-bars = 2 completed rolling minutes)
+    5m window  = bars_5m[-1] and bars_5m[-2] (two completed 5m candles)
+
+    PEAK      price at top of 1m range (also 2m high), buying flow exhausted
+              over the full 1m candle (TR dropped ≥25% vs prior 1m), or KdV flip.
+    TROUGH    price at bottom of 1m range, selling exhausted (TR rose ≥25%),
+              or KdV flip.
+    CONT_UP   price at 1m high, buying sustained across both rolling 1m bars,
+              velocity positive over the 1m window, no KdV bearish flip.
+              5m path: velocity positive across two consecutive 5m candles.
+    CONT_DOWN symmetric — selling sustained, negative velocity, no KdV bullish flip.
     MID       no meaningful structure.
     """
     m = len(micro_bars)
@@ -1062,58 +1069,76 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0):
     vols   = [b['volume']                         for b in micro_bars]
     tbs    = [b.get('taker_buy', b['volume']*0.5) for b in micro_bars]
 
-    n_s = min(12, m)
-    n_l = min(45, m)
-    hi_s = max(closes[-n_s:]); lo_s = min(closes[-n_s:])
-    hi_l = max(closes[-n_l:]); lo_l = min(closes[-n_l:])
+    # ── Range / position: use full 1m and 2m windows ─────────────────────────
+    n1  = min(60, m)    # 1m rolling window
+    n2  = m             # 2m rolling window (all of micro_bars)
+
+    hi_s = max(closes[-n1:]); lo_s = min(closes[-n1:])   # 1m high/low
+    hi_l = max(closes[-n2:]); lo_l = min(closes[-n2:])   # 2m high/low
     range_l = hi_l - lo_l
 
-    # No meaningful structure below 0.03% price movement (~$22 on $73k BTC).
-    # Flat/dead markets generate spurious "at extreme" signals without this.
     if range_l < price * 0.0003:
         return 'MID'
 
-    # Where is price within the 45s range?  0.0 = at bottom, 1.0 = at top.
     pct_pos = (price - lo_l) / range_l
 
-    # Structural extreme: dual-window agreement AND price must be in the
-    # upper/lower portion of the range.  This blocks "PEAK" calls when price
-    # just ticked up from a trough — even if it's the 45s max, if it's still
-    # near the bottom of the range it isn't a structural high.
+    # Structural extreme: at the 1m high/low AND the 2m high/low AND
+    # in the upper/lower portion of the 2m range.
     at_hi = (price >= hi_s and price >= hi_l and pct_pos >= 0.65)
     at_lo = (price <= lo_s and price <= lo_l and pct_pos <= 0.35)
 
-    # Taker buy ratio: rolling windows from micro_bars only
-    vol_now = sum(vols[-3:]);    tb_now = sum(tbs[-3:])
-    vol_pr  = sum(vols[-12:-3]); tb_pr  = sum(tbs[-12:-3])
+    # ── Taker ratio: full 1m window vs previous 1m window ────────────────────
+    # tr_now = taker buy ratio over the last 60 1s-bars (current 1m candle)
+    # tr_pr  = taker buy ratio over the 60 bars before that (prior 1m candle)
+    vol_now = sum(vols[-n1:]);        tb_now = sum(tbs[-n1:])
+    n_prev  = n2 - n1
+    vol_pr  = sum(vols[:n_prev]) if n_prev > 0 else 0.0
+    tb_pr   = sum(tbs[:n_prev])  if n_prev > 0 else 0.0
+
     tr_now  = tb_now / vol_now if vol_now > 1e-8 else 0.5
     tr_pr   = tb_pr  / vol_pr  if vol_pr  > 1e-8 else 0.5
 
-    buy_flipped    = tr_pr > 0.60 and tr_now < 0.40   # was buying → now selling
-    sell_flipped   = tr_pr < 0.40 and tr_now > 0.60   # was selling → now buying
+    dtr     = tr_now - tr_pr   # momentum change: negative = buyers → sellers
+
+    buy_flipped    = dtr < -0.25 and tr_now < 0.45   # was buying → now selling
+    sell_flipped   = dtr >  0.25 and tr_now > 0.55   # was selling → now buying
     buy_now        = tr_now > 0.60
     sell_now       = tr_now < 0.40
-    buy_sustained  = buy_now  and tr_pr > 0.55
-    sell_sustained = sell_now and tr_pr < 0.45
+    buy_sustained  = tr_now > 0.55 and tr_pr > 0.55   # buying across both 1m bars
+    sell_sustained = tr_now < 0.45 and tr_pr < 0.45   # selling across both 1m bars
 
     obi_pos     = obi >  0.05;  obi_neg     = obi < -0.05
     obi_str_pos = obi >  0.20;  obi_str_neg = obi < -0.20
 
-    vol_e = sum(vols[-8:-4]); vol_l_w = sum(vols[-4:])
-    vol_div = vol_e > 1e-8 and vol_l_w < vol_e * 0.50
+    # Volume divergence: second half of 1m candle lighter than first half
+    n_half  = n1 // 2
+    vol_fst = sum(vols[-n1:-n_half]) if n1 > n_half else 0.0
+    vol_lst = sum(vols[-n_half:])    if n_half > 0   else 0.0
+    vol_div = vol_fst > 1e-8 and vol_lst < vol_fst * 0.50
 
-    # Velocity: $/s over two 5-second windows.
-    # vel_cont_* = BOTH windows moving same direction = sustained directional move.
-    # vel_up/vel_dn = significant single-window speed ($0.10/s ≈ $6/min).
-    n5  = min(5, m - 1)
-    n10 = min(10, m - 1)
-    vel_now = (closes[-1] - closes[-(n5 + 1)]) / n5       if n5  > 0 else 0.0
-    vel_pr  = (closes[-(n5 + 1)] - closes[-(n10 + 1)]) / (n10 - n5) \
-              if n10 > n5 else 0.0
-    vel_cont_up = vel_now > 0.02 and vel_pr > 0.02   # both windows rising
-    vel_cont_dn = vel_now < -0.02 and vel_pr < -0.02  # both windows falling
-    vel_up      = vel_now >  0.10                      # strong upward push
-    vel_dn      = vel_now < -0.10                      # strong downward push
+    # ── Velocity: $/s over the full 1m window and the previous 1m window ─────
+    # v_now = net price change per second across the last 60 1s-bars
+    # v_pr  = net price change per second across the 60 bars before that
+    v_now = (closes[-1] - closes[-n1]) / (n1 - 1)       if n1  > 1 else 0.0
+    v_pr  = (closes[-n1] - closes[0])  / max(n_prev, 1) if n_prev > 0 else 0.0
+
+    vel_cont_up = v_now > 0.02 and v_pr > 0.02    # both 1m windows rising
+    vel_cont_dn = v_now < -0.02 and v_pr < -0.02   # both 1m windows falling
+    vel_up      = v_now >  0.10                     # strong 1m upward velocity
+    vel_dn      = v_now < -0.10                     # strong 1m downward velocity
+
+    # ── 5m candle indicators (two completed 5m bars) ─────────────────────────
+    v5_cont_up = v5_cont_dn = False
+    if bars_5m and len(bars_5m) >= 2:
+        b5c = bars_5m[-1];  b5p = bars_5m[-2]
+        v5c = (b5c['close'] - b5c['open']) / 300.0
+        v5p = (b5p['close'] - b5p['open']) / 300.0
+        tr5c = b5c['taker_buy'] / b5c['volume'] if b5c['volume'] > 1e-8 else 0.5
+        tr5p = b5p['taker_buy'] / b5p['volume'] if b5p['volume'] > 1e-8 else 0.5
+        # velocity positive across both 5m candles AND buying dominated
+        v5_cont_up = v5c > 0.01 and v5p > 0.01 and tr5c > 0.55
+        # velocity negative across both 5m candles AND selling dominated
+        v5_cont_dn = v5c < -0.01 and v5p < -0.01 and tr5c < 0.45
 
     # ── PEAK ──────────────────────────────────────────────────────────────────
     if at_hi:
@@ -1132,20 +1157,19 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0):
         if buy_now and res_dir == +1:           return 'TROUGH'
 
     # ── CONT_UP ───────────────────────────────────────────────────────────────
-    # Price at 12s high with no KdV bearish flip. Three paths:
-    #   1. Taker buy ratio sustained (classic order-flow continuation)
-    #   2. Velocity positive both windows + taker/OBI confirmation (momentum continuation)
-    #   3. Strong upward velocity with positive OBI (velocity continuation)
+    # Price at 1m high, no KdV bearish flip. Paths use candle-level indicators.
     if price >= hi_s and not kdv_down:
-        if buy_sustained and not obi_str_neg:          return 'CONT_UP'
-        if vel_cont_up and (buy_now or obi_pos):        return 'CONT_UP'
-        if vel_up and obi_pos:                          return 'CONT_UP'
+        if buy_sustained and not obi_str_neg:           return 'CONT_UP'
+        if vel_cont_up and (buy_now or obi_pos):         return 'CONT_UP'
+        if vel_up and obi_pos:                           return 'CONT_UP'
+        if v5_cont_up and not obi_str_neg:               return 'CONT_UP'
 
     # ── CONT_DOWN ─────────────────────────────────────────────────────────────
     if price <= lo_s and not kdv_up:
         if sell_sustained and not obi_str_pos:          return 'CONT_DOWN'
         if vel_cont_dn and (sell_now or obi_neg):        return 'CONT_DOWN'
-        if vel_dn and obi_neg:                          return 'CONT_DOWN'
+        if vel_dn and obi_neg:                           return 'CONT_DOWN'
+        if v5_cont_dn and not obi_str_pos:               return 'CONT_DOWN'
 
     return 'MID'
 
@@ -1420,8 +1444,16 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     # Per-TF phase state for edge-detected multi-TF signals
     last_tf_states = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
     last_1m_state  = 'MID'
-    mid_streak     = 0         # consecutive MID seconds; clears last_1m_state at 3
     last_range_state = None    # 'sup'|'res' — last ranging side fired
+    # Price-level dedup for all four structural labels.
+    # Each label fires only when price reaches a genuinely new level in its
+    # direction — prevents same-price rapid re-fires when OBI/TR oscillates.
+    # On reversal (TROUGH/PEAK) the opposite-direction trackers reset so the
+    # next continuation move fires fresh from whatever level it starts.
+    _last_cont_up_px = -float('inf')  # CONT_UP: fires when price > this
+    _last_cont_dn_px =  float('inf')  # CONT_DOWN: fires when price < this
+    _last_peak_px    = -float('inf')  # PEAK: fires when price > this
+    _last_trough_px  =  float('inf')  # TROUGH: fires when price < this
 
     # Micro layer: rolling 1s window across minute boundaries
     micro_window  = []   # list of 1s bar dicts
@@ -1609,51 +1641,76 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
             # ── Pattern observation — order flow patterns at price extremes ───
             obs_label = _observe_structural(
                 p_close, obi_p, kdv_flipped_up, kdv_flipped_down,
-                micro_window, res_dir=res_dir)
+                micro_window, res_dir=res_dir, bars_5m=b5)
 
             if obs_label == 'MID':
-                mid_streak += 1
-                if mid_streak >= 3:
-                    last_1m_state = 'MID'
+                last_1m_state = 'MID'
             else:
-                mid_streak = 0
-            if obs_label not in ('MID',) and obs_label != last_1m_state:
-                last_1m_state = obs_label
-                obs_dir   = +1 if obs_label in ('TROUGH', 'CONT_UP') else -1
-                side_o    = 'LONG' if obs_dir > 0 else 'SHORT'
-                arrow_o   = '▲' if obs_dir > 0 else '▼'
-                c_o       = G if obs_dir > 0 else R
-                bar_o     = '━' * 50
+                # All four labels use price-level dedup: each fires only when
+                # price reaches a genuinely new level in its structural direction.
+                # This removes same-price oscillation noise without blocking any
+                # legitimate new extreme.  On each reversal (TROUGH/PEAK) the
+                # opposite-side trackers reset so the next leg starts fresh.
+                _fire_obs = False
+                if obs_label == 'CONT_UP':
+                    if p_close > _last_cont_up_px:
+                        _fire_obs = True
+                        _last_cont_up_px = p_close
+                elif obs_label == 'CONT_DOWN':
+                    if p_close < _last_cont_dn_px:
+                        _fire_obs = True
+                        _last_cont_dn_px = p_close
+                elif obs_label == 'PEAK':
+                    if p_close > _last_peak_px:
+                        _fire_obs = True
+                        _last_peak_px    = p_close
+                        _last_trough_px  =  float('inf')   # reset opposite
+                        _last_cont_dn_px =  float('inf')   # down leg starts fresh after peak
+                elif obs_label == 'TROUGH':
+                    if p_close < _last_trough_px:
+                        _fire_obs = True
+                        _last_trough_px  = p_close
+                        _last_peak_px    = -float('inf')   # reset opposite
+                        _last_cont_up_px = -float('inf')   # up leg starts fresh after trough
 
-                vol3_o  = sum(p_vols[-3:])
-                tb3_o   = sum(p_tb[-3:])
-                tb_r_o  = tb3_o / vol3_o if vol3_o > 1e-8 else 0.5
-                tb_pct_o = f"taker {tb_r_o*100:.0f}%"
-                kdv_ev_o = ('kdv↑' if kdv_flipped_up else
-                            'kdv↓' if kdv_flipped_down else
-                            f'kdv={kdv_bal:+.1f}')
-                dk_o     = KnifeDecayBuffer.compact(min_dk_state, min_dk_ds, min_dk_fos)
-                shelf_o  = _shelf_context(session_shelves, p_close)
-                t1mo= htf_ctx.get('trend_1m','ne')[:2]
-                t5mo= htf_ctx.get('trend_5m','ne')[:2]
-                t15o= htf_ctx.get('trend_15m','ne')[:2]
-                t1ho= htf_ctx.get('trend_1h','ne')[:2]
-                t4ho= htf_ctx.get('trend_4h','ne')[:2]
-                def _tr2o(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
-                mtf_o = (f"1m{_tr2o(t1mo)}  5m{_tr2o(t5mo)}  15m{_tr2o(t15o)}"
-                         f"  1h{_tr2o(t1ho)}  4h{_tr2o(t4ho)}")
+                if _fire_obs:
+                    last_1m_state = obs_label
+                    obs_dir   = +1 if obs_label in ('TROUGH', 'CONT_UP') else -1
+                    side_o    = 'LONG' if obs_dir > 0 else 'SHORT'
+                    arrow_o   = '▲' if obs_dir > 0 else '▼'
+                    c_o       = G if obs_dir > 0 else R
+                    bar_o     = '━' * 50
 
-                sig_count += 1
-                notes_inline = (f"[{sig_count}] {obs_label} {side_o} @ {_ts(sec)}"
-                                f"  ${p_close:,.2f}")
-                print(f"\n{c_o}{bar_o}")
-                print(f"  {arrow_o}  {side_o}  ·  {obs_label:<20}  [{sig_count}]")
-                print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
-                print(f"     {tb_pct_o}  ·  obi={obi_p:+.3f}  ·  {kdv_ev_o}")
-                print(f"     cph={composite_phase:+.3f}  ·  {mtf_o}")
-                if dk_o:    print(f"     {dk_o}")
-                if shelf_o: print(f"     {shelf_o}")
-                print(f"{bar_o}{Z}\n")
+                    _n1o    = min(60, len(micro_window))
+                    vol3_o  = sum(b['volume'] for b in micro_window[-_n1o:])
+                    tb3_o   = sum(b.get('taker_buy', b['volume']*0.5) for b in micro_window[-_n1o:])
+                    tb_r_o  = tb3_o / vol3_o if vol3_o > 1e-8 else 0.5
+                    tb_pct_o = f"taker {tb_r_o*100:.0f}% (1m)"
+                    kdv_ev_o = ('kdv↑' if kdv_flipped_up else
+                                'kdv↓' if kdv_flipped_down else
+                                f'kdv={kdv_bal:+.1f}')
+                    dk_o     = KnifeDecayBuffer.compact(min_dk_state, min_dk_ds, min_dk_fos)
+                    shelf_o  = _shelf_context(session_shelves, p_close)
+                    t1mo= htf_ctx.get('trend_1m','ne')[:2]
+                    t5mo= htf_ctx.get('trend_5m','ne')[:2]
+                    t15o= htf_ctx.get('trend_15m','ne')[:2]
+                    t1ho= htf_ctx.get('trend_1h','ne')[:2]
+                    t4ho= htf_ctx.get('trend_4h','ne')[:2]
+                    def _tr2o(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+                    mtf_o = (f"1m{_tr2o(t1mo)}  5m{_tr2o(t5mo)}  15m{_tr2o(t15o)}"
+                             f"  1h{_tr2o(t1ho)}  4h{_tr2o(t4ho)}")
+
+                    sig_count += 1
+                    notes_inline = (f"[{sig_count}] {obs_label} {side_o} @ {_ts(sec)}"
+                                    f"  ${p_close:,.2f}")
+                    print(f"\n{c_o}{bar_o}")
+                    print(f"  {arrow_o}  {side_o}  ·  {obs_label:<20}  [{sig_count}]")
+                    print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
+                    print(f"     {tb_pct_o}  ·  obi={obi_p:+.3f}  ·  {kdv_ev_o}")
+                    print(f"     cph={composite_phase:+.3f}  ·  {mtf_o}")
+                    if dk_o:    print(f"     {dk_o}")
+                    if shelf_o: print(f"     {shelf_o}")
+                    print(f"{bar_o}{Z}\n")
 
             # ── Ranging oscillation signal ─────────────────────────────────────
             rng_dir, rng_sup, rng_res, rng_span = _range_signal(
@@ -1873,7 +1930,9 @@ class ScanState:
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
-                 'last_tf_states', 'last_1m_state', 'mid_streak',
+                 'last_tf_states', 'last_1m_state',
+                 'last_cont_up_px', 'last_cont_dn_px',
+                 'last_peak_px', 'last_trough_px',
                  'last_range_state', 'session_shelves')
 
     def __init__(self):
@@ -1905,7 +1964,10 @@ class ScanState:
         self.last_htf_sup     = False
         self.last_tf_states   = {'5m': 'MID', '15m': 'MID', '1h': 'MID', '4h': 'MID'}
         self.last_1m_state    = 'MID'
-        self.mid_streak       = 0
+        self.last_cont_up_px  = -float('inf')
+        self.last_cont_dn_px  =  float('inf')
+        self.last_peak_px     = -float('inf')
+        self.last_trough_px   =  float('inf')
         self.last_range_state = None   # 'sup'|'res' — last ranging side fired
         self.session_shelves  = []
 
@@ -2322,61 +2384,81 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             # _observe_structural uses the rolling micro_window — no minute resets.
             obs_label_i = _observe_structural(
                 p_close, obi_p, kdv_flipped_up, kdv_flipped_down,
-                state.micro_window, res_dir=res_dir)
+                state.micro_window, res_dir=res_dir, bars_5m=b5)
 
             if obs_label_i == 'MID':
-                state.mid_streak += 1
-                if state.mid_streak >= 3:
-                    state.last_1m_state = 'MID'
+                state.last_1m_state = 'MID'
             else:
-                state.mid_streak = 0
-            if obs_label_i not in ('MID',) and obs_label_i != state.last_1m_state:
-                state.last_1m_state = obs_label_i
-                obs_dir_i  = +1 if obs_label_i in ('TROUGH', 'CONT_UP') else -1
-                side_oi    = 'LONG' if obs_dir_i > 0 else 'SHORT'
-                arrow_oi   = '▲' if obs_dir_i > 0 else '▼'
-                c_oi       = G if obs_dir_i > 0 else R
-                bar_oi     = '━' * 50
+                _fire_i = False
+                if obs_label_i == 'CONT_UP':
+                    if p_close > state.last_cont_up_px:
+                        _fire_i = True
+                        state.last_cont_up_px = p_close
+                elif obs_label_i == 'CONT_DOWN':
+                    if p_close < state.last_cont_dn_px:
+                        _fire_i = True
+                        state.last_cont_dn_px = p_close
+                elif obs_label_i == 'PEAK':
+                    if p_close > state.last_peak_px:
+                        _fire_i = True
+                        state.last_peak_px    = p_close
+                        state.last_trough_px  =  float('inf')
+                        state.last_cont_dn_px =  float('inf')
+                elif obs_label_i == 'TROUGH':
+                    if p_close < state.last_trough_px:
+                        _fire_i = True
+                        state.last_trough_px  = p_close
+                        state.last_peak_px    = -float('inf')
+                        state.last_cont_up_px = -float('inf')
 
-                vol3_oi = sum(p_vols[-3:])
-                tb3_oi  = sum(p_tb[-3:])
-                tb_r_oi = tb3_oi / vol3_oi if vol3_oi > 1e-8 else 0.5
-                kdv_ev_oi = ('kdv↑' if kdv_flipped_up else
-                             'kdv↓' if kdv_flipped_down else
-                             f'kdv={kdv_bal:+.1f}')
-                shelf_oi = _shelf_context(state.session_shelves, p_close)
-                t1moi= htf_ctx.get('trend_1m','ne')[:2]
-                t5moi= htf_ctx.get('trend_5m','ne')[:2]
-                t15oi= htf_ctx.get('trend_15m','ne')[:2]
-                t1hoi= htf_ctx.get('trend_1h','ne')[:2]
-                t4hoi= htf_ctx.get('trend_4h','ne')[:2]
-                def _tr2oi(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
-                mtf_oi = (f"1m{_tr2oi(t1moi)}  5m{_tr2oi(t5moi)}  15m{_tr2oi(t15oi)}"
-                          f"  1h{_tr2oi(t1hoi)}  4h{_tr2oi(t4hoi)}")
+                if _fire_i:
+                    state.last_1m_state = obs_label_i
+                    obs_dir_i  = +1 if obs_label_i in ('TROUGH', 'CONT_UP') else -1
+                    side_oi    = 'LONG' if obs_dir_i > 0 else 'SHORT'
+                    arrow_oi   = '▲' if obs_dir_i > 0 else '▼'
+                    c_oi       = G if obs_dir_i > 0 else R
+                    bar_oi     = '━' * 50
 
-                state.sig_count += 1
-                sig_i = {
-                    'n':      state.sig_count,
-                    'dir':    obs_dir_i,
-                    'label':  obs_label_i,
-                    'time':   _ts(sec),
-                    'price':  p_close,
-                    'taker':  round(tb_r_oi, 3),
-                    'obi':    round(obi_p, 3),
-                    'kdv':    kdv_ev_oi,
-                    'cph':    round(composite_phase_i, 3),
-                    'min_sec': min_sec,
-                }
-                state.signals.append(sig_i)
-                new_signals.append(sig_i)
+                    _n1oi   = min(60, len(state.micro_window))
+                    vol3_oi = sum(b['volume'] for b in state.micro_window[-_n1oi:])
+                    tb3_oi  = sum(b.get('taker_buy', b['volume']*0.5) for b in state.micro_window[-_n1oi:])
+                    tb_r_oi = tb3_oi / vol3_oi if vol3_oi > 1e-8 else 0.5
+                    kdv_ev_oi = ('kdv↑' if kdv_flipped_up else
+                                 'kdv↓' if kdv_flipped_down else
+                                 f'kdv={kdv_bal:+.1f}')
+                    shelf_oi = _shelf_context(state.session_shelves, p_close)
+                    t1moi= htf_ctx.get('trend_1m','ne')[:2]
+                    t5moi= htf_ctx.get('trend_5m','ne')[:2]
+                    t15oi= htf_ctx.get('trend_15m','ne')[:2]
+                    t1hoi= htf_ctx.get('trend_1h','ne')[:2]
+                    t4hoi= htf_ctx.get('trend_4h','ne')[:2]
+                    def _tr2oi(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
+                    mtf_oi = (f"1m{_tr2oi(t1moi)}  5m{_tr2oi(t5moi)}  15m{_tr2oi(t15oi)}"
+                              f"  1h{_tr2oi(t1hoi)}  4h{_tr2oi(t4hoi)}")
 
-                if signals_only:
-                    print(f"\n{c_oi}{bar_oi}")
-                    print(f"  {arrow_oi}  {side_oi}  ·  {obs_label_i:<20}  [{state.sig_count}]")
-                    print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
-                    print(f"     taker {tb_r_oi*100:.0f}%  ·  obi={obi_p:+.3f}  ·  {kdv_ev_oi}")
-                    print(f"     cph={composite_phase_i:+.3f}  ·  {mtf_oi}")
-                    if shelf_oi: print(f"     {shelf_oi}")
+                    state.sig_count += 1
+                    sig_i = {
+                        'n':      state.sig_count,
+                        'dir':    obs_dir_i,
+                        'label':  obs_label_i,
+                        'time':   _ts(sec),
+                        'price':  p_close,
+                        'taker':  round(tb_r_oi, 3),
+                        'obi':    round(obi_p, 3),
+                        'kdv':    kdv_ev_oi,
+                        'cph':    round(composite_phase_i, 3),
+                        'min_sec': min_sec,
+                    }
+                    state.signals.append(sig_i)
+                    new_signals.append(sig_i)
+
+                    if signals_only:
+                        print(f"\n{c_oi}{bar_oi}")
+                        print(f"  {arrow_oi}  {side_oi}  ·  {obs_label_i:<20}  [{state.sig_count}]")
+                        print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
+                        print(f"     taker {tb_r_oi*100:.0f}%  ·  obi={obi_p:+.3f}  ·  {kdv_ev_oi}")
+                        print(f"     cph={composite_phase_i:+.3f}  ·  {mtf_oi}")
+                        if shelf_oi: print(f"     {shelf_oi}")
                     print(f"{bar_oi}{Z}\n")
 
             # ── Ranging oscillation signal ─────────────────────────────────────
