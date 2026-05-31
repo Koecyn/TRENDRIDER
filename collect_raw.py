@@ -30,6 +30,7 @@ TMP_IDX   = REPO / '.git' / 'data_push.idx'
 
 DATA_BRANCH   = 'data/raw'
 GIT_TREE_PATH = 'data/raw/BTCUSDT_LIVE.jsonl.gz'
+SESSIONS_BRANCH_PREFIX = 'data/sessions/'   # archive — one branch per session, never overwritten
 
 WS_URL = ('wss://stream.binance.us:9443/stream'
           '?streams=btcusdt@depth20@100ms/btcusdt@aggTrade')
@@ -80,6 +81,43 @@ def _clear_git_locks():
     (git_dir / 'index.lock').unlink(missing_ok=True)
 
 
+def _archive_session():
+    """Push final snapshot to a dated session branch — never force-pushed, never deleted."""
+    if not GZ_FILE.exists() or GZ_FILE.stat().st_size == 0:
+        return
+    try:
+        label = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+        arc_branch = f'{SESSIONS_BRANCH_PREFIX}{label}'
+        arc_path   = f'data/raw/BTCUSDT_LIVE.jsonl.gz'
+        env_gc  = {**os.environ, 'GIT_NO_AUTO_GC': '1', 'GIT_INDEX_FILE': str(TMP_IDX)}
+        env_obj = {**os.environ, 'GIT_NO_AUTO_GC': '1'}
+        TMP_IDX.unlink(missing_ok=True)
+        r = _run('git', 'hash-object', '-w', str(GZ_FILE), env=env_obj)
+        blob = r.stdout.strip()
+        if not blob:
+            return
+        _run('git', 'update-index', '--add', '--cacheinfo', f'100644,{blob},{arc_path}', env=env_gc)
+        r = _run('git', 'write-tree', env=env_gc)
+        tree = r.stdout.strip()
+        TMP_IDX.unlink(missing_ok=True)
+        if not tree:
+            return
+        env_no_gc = {k: v for k, v in env_gc.items() if k != 'GIT_INDEX_FILE'}
+        r = _run('git', 'commit-tree', tree, '-m', f'session {label}', env=env_no_gc)
+        commit = r.stdout.strip()
+        if not commit:
+            return
+        r = _run('git', 'push', 'origin', f'{commit}:refs/heads/{arc_branch}')
+        if r.returncode == 0:
+            log(f'archive → {arc_branch}', G)
+        else:
+            log(f'archive push failed: {r.stderr.strip()[:120]}', R)
+        for sha in (blob, tree, commit):
+            _del_obj(sha)
+    except Exception as e:
+        log(f'archive error: {e}', R)
+
+
 def _git_push_worker():
     """Dedicated thread: drains _push_queue and pushes to GitHub.
 
@@ -92,6 +130,9 @@ def _git_push_worker():
     while True:
         gz_path = _push_queue.get()   # blocks until a snapshot is queued
         if gz_path is None:
+            # Session ending — archive the final snapshot to a dated branch.
+            # data/raw is a rolling force-push; data/sessions/* accumulates forever.
+            _archive_session()
             break
         blob = tree = commit = ''
         try:
