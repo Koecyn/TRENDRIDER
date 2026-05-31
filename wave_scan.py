@@ -1685,6 +1685,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                         _last_peak_px     = p_close
                         _last_trough_px   =  float('inf')  # reset opposite
                         _last_cont_dn_px  =  float('inf')  # down leg starts fresh after peak
+                        _last_cont_up_px  = p_close        # CONT_UP must exceed this peak
                         _last_range_hi_px = p_close        # next RANGE_HI must be below this peak
                 elif obs_label == 'TROUGH':
                     if p_close < _last_trough_px:
@@ -1692,15 +1693,18 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                         _last_trough_px   = p_close
                         _last_peak_px     = -float('inf')  # reset opposite
                         _last_cont_up_px  = -float('inf')  # up leg starts fresh after trough
+                        _last_cont_dn_px  = p_close        # CONT_DOWN must go below this trough
                         _last_range_lo_px = p_close        # next RANGE_LO must be above this trough
                 elif obs_label == 'RANGE_HI':
                     if p_close < _last_range_hi_px:        # lower-high confirms range
                         _fire_obs = True
                         _last_range_hi_px = p_close
+                        _last_cont_up_px  = p_close        # CONT_UP must exceed this range high
                 elif obs_label == 'RANGE_LO':
                     if p_close > _last_range_lo_px:        # higher-low confirms range
                         _fire_obs = True
                         _last_range_lo_px = p_close
+                        _last_cont_dn_px  = p_close        # CONT_DOWN must go below this range low
 
                 if _fire_obs:
                     last_1m_state = obs_label
@@ -2456,6 +2460,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                         state.last_peak_px     = p_close
                         state.last_trough_px   =  float('inf')  # reset opposite
                         state.last_cont_dn_px  =  float('inf')  # down leg starts fresh after peak
+                        state.last_cont_up_px  = p_close        # CONT_UP must exceed this peak
                         state.last_range_hi_px = p_close        # next RANGE_HI must be below this peak
                 elif obs_label_i == 'TROUGH':
                     if p_close < state.last_trough_px:
@@ -2463,15 +2468,18 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                         state.last_trough_px   = p_close
                         state.last_peak_px     = -float('inf')  # reset opposite
                         state.last_cont_up_px  = -float('inf')  # up leg starts fresh after trough
+                        state.last_cont_dn_px  = p_close        # CONT_DOWN must go below this trough
                         state.last_range_lo_px = p_close        # next RANGE_LO must be above this trough
                 elif obs_label_i == 'RANGE_HI':
                     if p_close < state.last_range_hi_px:        # lower-high confirms range
                         _fire_i = True
                         state.last_range_hi_px = p_close
+                        state.last_cont_up_px  = p_close        # CONT_UP must exceed this range high
                 elif obs_label_i == 'RANGE_LO':
                     if p_close > state.last_range_lo_px:        # higher-low confirms range
                         _fire_i = True
                         state.last_range_lo_px = p_close
+                        state.last_cont_dn_px  = p_close        # CONT_DOWN must go below this range low
 
                 if _fire_i:
                     state.last_1m_state = obs_label_i
