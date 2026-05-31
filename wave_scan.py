@@ -1150,8 +1150,12 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
 
     if at_hi:
         # ── PEAK: OB reversal signals at local high ───────────────────────────
-        reversal = (ask_wall_at_price or asks_loaded or
-                    spread_compressed or spread_exploding or
+        # spread_compressed without OBI fires everywhere in thin books — require
+        # matching OBI direction. asks_loaded requires obi_neg confirmation.
+        reversal = (ask_wall_at_price or
+                    (asks_loaded and obi_neg) or
+                    (spread_compressed and obi_neg) or
+                    spread_exploding or
                     (kdv_down and not obi_str_pos))
         if reversal:
             return 'PEAK'
@@ -1160,17 +1164,21 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
         if new_hi:
             # ── CONT_UP: genuine new high + trend continues ────────────────
             if not kdv_down:
-                if obi_pos or bids_loaded or asks_thinned:  return 'CONT_UP'
-                if vel_cont_up and obi_pos:                  return 'CONT_UP'
-                if vel_up and obi_pos:                       return 'CONT_UP'
+                if obi_pos and (bids_loaded or asks_thinned):   return 'CONT_UP'
+                if vel_cont_up and obi_pos:                      return 'CONT_UP'
+                if vel_up and not ask_wall_at_price:             return 'CONT_UP'
         else:
             # ── RANGE_HI: lower-high + no reversal ────────────────────────
-            if obi_neg or asks_loaded:  return 'RANGE_HI'
+            if obi_neg:  return 'RANGE_HI'
 
     if at_lo:
         # ── TROUGH: OB reversal signals at local low ──────────────────────────
-        reversal = (bid_wall_at_price or bids_loaded or
-                    spread_compressed or spread_exploding or
+        # spread_compressed without OBI fires everywhere — require matching OBI.
+        # bids_loaded requires obi_pos (knife-catching bids alone don't reverse).
+        reversal = (bid_wall_at_price or
+                    (bids_loaded and obi_pos) or
+                    (spread_compressed and obi_pos) or
+                    spread_exploding or
                     (kdv_up and not obi_str_neg))
         if reversal:
             return 'TROUGH'
@@ -1178,13 +1186,15 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
         # No reversal — classify by whether this low extends beyond prior candle
         if new_lo:
             # ── CONT_DOWN: genuine new low + trend continues ───────────────
+            # OBI stays positive in thin-book downtrends (limit buyers stack bids
+            # while market sellers hit them) — use velocity as the primary signal.
             if not kdv_up:
-                if obi_neg or asks_loaded or bids_thinned:  return 'CONT_DOWN'
-                if vel_cont_dn and obi_neg:                  return 'CONT_DOWN'
-                if vel_dn and obi_neg:                       return 'CONT_DOWN'
+                if obi_neg and (asks_loaded or bids_thinned):   return 'CONT_DOWN'
+                if vel_cont_dn and obi_neg:                      return 'CONT_DOWN'
+                if vel_dn and not bid_wall_at_price:             return 'CONT_DOWN'
         else:
             # ── RANGE_LO: higher-low + no reversal ────────────────────────
-            if obi_pos or bids_loaded:  return 'RANGE_LO'
+            if obi_pos:  return 'RANGE_LO'
 
     return 'MID'
 
@@ -1674,12 +1684,14 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                     if p_close > _last_cont_up_px:
                         _fire_obs = True
                         _last_cont_up_px  = p_close
+                        _last_peak_px     = p_close        # PEAK can't fire at this same level
                         _last_range_hi_px =  float('inf')  # trending up — range ref invalid
                         _last_range_lo_px = -float('inf')
                 elif obs_label == 'CONT_DOWN':
                     if p_close < _last_cont_dn_px:
                         _fire_obs = True
                         _last_cont_dn_px  = p_close
+                        _last_trough_px   = p_close        # TROUGH can't fire at this same level
                         _last_range_hi_px =  float('inf')  # trending down — range ref invalid
                         _last_range_lo_px = -float('inf')
                 elif obs_label == 'PEAK':
@@ -2450,12 +2462,14 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                     if p_close > state.last_cont_up_px:
                         _fire_i = True
                         state.last_cont_up_px  = p_close
+                        state.last_peak_px     = p_close        # PEAK can't fire at this same level
                         state.last_range_hi_px =  float('inf')  # trending — range ref invalid
                         state.last_range_lo_px = -float('inf')
                 elif obs_label_i == 'CONT_DOWN':
                     if p_close < state.last_cont_dn_px:
                         _fire_i = True
                         state.last_cont_dn_px  = p_close
+                        state.last_trough_px   = p_close        # TROUGH can't fire at this same level
                         state.last_range_hi_px =  float('inf')  # trending — range ref invalid
                         state.last_range_lo_px = -float('inf')
                 elif obs_label_i == 'PEAK':
