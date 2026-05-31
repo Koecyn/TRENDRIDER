@@ -1044,22 +1044,24 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     res_dir    : resonance direction from multi-TF physics (+1/-1/0).
     bars_5m    : recent 5m candle bars — used for 5m-level CONT detection.
 
-    Returns: 'PEAK' | 'TROUGH' | 'CONT_UP' | 'CONT_DOWN' | 'MID'
+    Returns one of:
+      'PEAK'     — price at genuine NEW 2m high + buying exhaustion
+      'TROUGH'   — price at genuine NEW 2m low  + selling exhaustion
+      'CONT_UP'  — trend continuation up: price at new 2m high, buying sustained
+      'CONT_DOWN'— trend continuation down: price at new 2m low, selling sustained
+      'RANGE_HI' — price at 1m high but BELOW 2m high (lower-high = ranging)
+      'RANGE_LO' — price at 1m low  but ABOVE 2m low  (higher-low = ranging)
+      'MID'      — no meaningful structure
 
-    All indicator windows align to TIMEFRAME boundaries — never arbitrary seconds.
-    1m window  = last 60 1s-bars (the rolling 1-minute candle)
-    2m window  = full micro_bars (120 1s-bars = 2 completed rolling minutes)
-    5m window  = bars_5m[-1] and bars_5m[-2] (two completed 5m candles)
+    Window discipline — nothing uses arbitrary sub-second counts:
+      1m window = last 60 1s-bars (rolling 1-minute candle)
+      2m window = full micro_bars up to 120 1s-bars
+      5m window = bars_5m[-1] vs bars_5m[-2] (two completed 5m candles)
 
-    PEAK      price at top of 1m range (also 2m high), buying flow exhausted
-              over the full 1m candle (TR dropped ≥25% vs prior 1m), or KdV flip.
-    TROUGH    price at bottom of 1m range, selling exhausted (TR rose ≥25%),
-              or KdV flip.
-    CONT_UP   price at 1m high, buying sustained across both rolling 1m bars,
-              velocity positive over the 1m window, no KdV bearish flip.
-              5m path: velocity positive across two consecutive 5m candles.
-    CONT_DOWN symmetric — selling sustained, negative velocity, no KdV bullish flip.
-    MID       no meaningful structure.
+    PEAK/TROUGH require price at the 2m high/low (genuine structural extreme).
+    RANGE_HI/RANGE_LO require price at the 1m high/low but BELOW/ABOVE the 2m
+    extreme — the market is making lower-highs or higher-lows, i.e., ranging.
+    CONT_UP/DOWN also require the 2m extreme, so they never fire inside a range.
     """
     m = len(micro_bars)
     if m < 15:
@@ -1069,9 +1071,9 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     vols   = [b['volume']                         for b in micro_bars]
     tbs    = [b.get('taker_buy', b['volume']*0.5) for b in micro_bars]
 
-    # ── Range / position: use full 1m and 2m windows ─────────────────────────
-    n1  = min(60, m)    # 1m rolling window
-    n2  = m             # 2m rolling window (all of micro_bars)
+    # ── Range / position: 1m and 2m rolling windows ──────────────────────────
+    n1  = min(60, m)    # 1m rolling window (candle)
+    n2  = m             # 2m rolling window (full micro_bars)
 
     hi_s = max(closes[-n1:]); lo_s = min(closes[-n1:])   # 1m high/low
     hi_l = max(closes[-n2:]); lo_l = min(closes[-n2:])   # 2m high/low
@@ -1080,16 +1082,19 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     if range_l < price * 0.0003:
         return 'MID'
 
-    pct_pos = (price - lo_l) / range_l
+    pct_pos = (price - lo_l) / range_l   # 0.0 = 2m bottom, 1.0 = 2m top
 
-    # Structural extreme: at the 1m high/low AND the 2m high/low AND
-    # in the upper/lower portion of the 2m range.
+    # ── Structural position flags ─────────────────────────────────────────────
+    # Genuine extremes: at BOTH the 1m AND 2m high/low.
     at_hi = (price >= hi_s and price >= hi_l and pct_pos >= 0.65)
     at_lo = (price <= lo_s and price <= lo_l and pct_pos <= 0.35)
 
+    # Range extremes: at 1m high/low but NOT the 2m extreme → lower-high / higher-low.
+    # pct_pos threshold relaxed slightly (0.55 / 0.45) vs genuine extremes.
+    at_range_hi = (not at_hi and price >= hi_s and price < hi_l and pct_pos >= 0.55)
+    at_range_lo = (not at_lo and price <= lo_s and price > lo_l and pct_pos <= 0.45)
+
     # ── Taker ratio: full 1m window vs previous 1m window ────────────────────
-    # tr_now = taker buy ratio over the last 60 1s-bars (current 1m candle)
-    # tr_pr  = taker buy ratio over the 60 bars before that (prior 1m candle)
     vol_now = sum(vols[-n1:]);        tb_now = sum(tbs[-n1:])
     n_prev  = n2 - n1
     vol_pr  = sum(vols[:n_prev]) if n_prev > 0 else 0.0
@@ -1100,12 +1105,12 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
 
     dtr     = tr_now - tr_pr   # momentum change: negative = buyers → sellers
 
-    buy_flipped    = dtr < -0.25 and tr_now < 0.45   # was buying → now selling
-    sell_flipped   = dtr >  0.25 and tr_now > 0.55   # was selling → now buying
+    buy_flipped    = dtr < -0.25 and tr_now < 0.45
+    sell_flipped   = dtr >  0.25 and tr_now > 0.55
     buy_now        = tr_now > 0.60
     sell_now       = tr_now < 0.40
-    buy_sustained  = tr_now > 0.55 and tr_pr > 0.55   # buying across both 1m bars
-    sell_sustained = tr_now < 0.45 and tr_pr < 0.45   # selling across both 1m bars
+    buy_sustained  = tr_now > 0.55 and tr_pr > 0.55
+    sell_sustained = tr_now < 0.45 and tr_pr < 0.45
 
     obi_pos     = obi >  0.05;  obi_neg     = obi < -0.05
     obi_str_pos = obi >  0.20;  obi_str_neg = obi < -0.20
@@ -1116,16 +1121,14 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     vol_lst = sum(vols[-n_half:])    if n_half > 0   else 0.0
     vol_div = vol_fst > 1e-8 and vol_lst < vol_fst * 0.50
 
-    # ── Velocity: $/s over the full 1m window and the previous 1m window ─────
-    # v_now = net price change per second across the last 60 1s-bars
-    # v_pr  = net price change per second across the 60 bars before that
+    # ── Velocity over the full 1m and previous 1m windows ────────────────────
     v_now = (closes[-1] - closes[-n1]) / (n1 - 1)       if n1  > 1 else 0.0
     v_pr  = (closes[-n1] - closes[0])  / max(n_prev, 1) if n_prev > 0 else 0.0
 
-    vel_cont_up = v_now > 0.02 and v_pr > 0.02    # both 1m windows rising
-    vel_cont_dn = v_now < -0.02 and v_pr < -0.02   # both 1m windows falling
-    vel_up      = v_now >  0.10                     # strong 1m upward velocity
-    vel_dn      = v_now < -0.10                     # strong 1m downward velocity
+    vel_cont_up = v_now > 0.02 and v_pr > 0.02
+    vel_cont_dn = v_now < -0.02 and v_pr < -0.02
+    vel_up      = v_now >  0.10
+    vel_dn      = v_now < -0.10
 
     # ── 5m candle indicators (two completed 5m bars) ─────────────────────────
     v5_cont_up = v5_cont_dn = False
@@ -1134,13 +1137,10 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
         v5c = (b5c['close'] - b5c['open']) / 300.0
         v5p = (b5p['close'] - b5p['open']) / 300.0
         tr5c = b5c['taker_buy'] / b5c['volume'] if b5c['volume'] > 1e-8 else 0.5
-        tr5p = b5p['taker_buy'] / b5p['volume'] if b5p['volume'] > 1e-8 else 0.5
-        # velocity positive across both 5m candles AND buying dominated
         v5_cont_up = v5c > 0.01 and v5p > 0.01 and tr5c > 0.55
-        # velocity negative across both 5m candles AND selling dominated
         v5_cont_dn = v5c < -0.01 and v5p < -0.01 and tr5c < 0.45
 
-    # ── PEAK ──────────────────────────────────────────────────────────────────
+    # ── PEAK — genuine structural high (at 2m high + exhaustion) ─────────────
     if at_hi:
         if kdv_down and not obi_str_pos:       return 'PEAK'
         if buy_flipped:                         return 'PEAK'
@@ -1148,7 +1148,7 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
         if sell_now and vol_div:                return 'PEAK'
         if sell_now and res_dir == -1:          return 'PEAK'
 
-    # ── TROUGH ────────────────────────────────────────────────────────────────
+    # ── TROUGH — genuine structural low (at 2m low + exhaustion) ─────────────
     if at_lo:
         if kdv_up and not obi_str_neg:         return 'TROUGH'
         if sell_flipped:                        return 'TROUGH'
@@ -1156,16 +1156,29 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
         if buy_now and vol_div:                 return 'TROUGH'
         if buy_now and res_dir == +1:           return 'TROUGH'
 
-    # ── CONT_UP ───────────────────────────────────────────────────────────────
-    # Price at 1m high, no KdV bearish flip. Paths use candle-level indicators.
-    if price >= hi_s and not kdv_down:
+    # ── RANGE_HI — lower-high: at 1m high but below 2m high (ranging) ────────
+    # The market tried to extend but couldn't reach the prior 2m high.
+    if at_range_hi:
+        if sell_now or buy_flipped or vol_div:  return 'RANGE_HI'
+        if kdv_down and not obi_str_pos:        return 'RANGE_HI'
+        if obi_neg:                             return 'RANGE_HI'
+
+    # ── RANGE_LO — higher-low: at 1m low but above 2m low (ranging) ──────────
+    if at_range_lo:
+        if buy_now or sell_flipped or vol_div:  return 'RANGE_LO'
+        if kdv_up and not obi_str_neg:          return 'RANGE_LO'
+        if obi_pos:                             return 'RANGE_LO'
+
+    # ── CONT_UP — trend continuation up (must reach genuine 2m high) ─────────
+    # Requires price >= hi_l so it never fires inside a range (lower-high).
+    if price >= hi_s and price >= hi_l and not kdv_down:
         if buy_sustained and not obi_str_neg:           return 'CONT_UP'
         if vel_cont_up and (buy_now or obi_pos):         return 'CONT_UP'
         if vel_up and obi_pos:                           return 'CONT_UP'
         if v5_cont_up and not obi_str_neg:               return 'CONT_UP'
 
-    # ── CONT_DOWN ─────────────────────────────────────────────────────────────
-    if price <= lo_s and not kdv_up:
+    # ── CONT_DOWN — trend continuation down (must reach genuine 2m low) ───────
+    if price <= lo_s and price <= lo_l and not kdv_up:
         if sell_sustained and not obi_str_pos:          return 'CONT_DOWN'
         if vel_cont_dn and (sell_now or obi_neg):        return 'CONT_DOWN'
         if vel_dn and obi_neg:                           return 'CONT_DOWN'
@@ -1450,10 +1463,12 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
     # direction — prevents same-price rapid re-fires when OBI/TR oscillates.
     # On reversal (TROUGH/PEAK) the opposite-direction trackers reset so the
     # next continuation move fires fresh from whatever level it starts.
-    _last_cont_up_px = -float('inf')  # CONT_UP: fires when price > this
-    _last_cont_dn_px =  float('inf')  # CONT_DOWN: fires when price < this
-    _last_peak_px    = -float('inf')  # PEAK: fires when price > this
-    _last_trough_px  =  float('inf')  # TROUGH: fires when price < this
+    _last_cont_up_px  = -float('inf')  # CONT_UP: fires when price > this
+    _last_cont_dn_px  =  float('inf')  # CONT_DOWN: fires when price < this
+    _last_peak_px     = -float('inf')  # PEAK: fires when price > this
+    _last_trough_px   =  float('inf')  # TROUGH: fires when price < this
+    _last_range_hi_px =  float('inf')  # RANGE_HI: fires when price < this (lower-high)
+    _last_range_lo_px = -float('inf')  # RANGE_LO: fires when price > this (higher-low)
 
     # Micro layer: rolling 1s window across minute boundaries
     micro_window  = []   # list of 1s bar dicts
@@ -1655,27 +1670,41 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                 if obs_label == 'CONT_UP':
                     if p_close > _last_cont_up_px:
                         _fire_obs = True
-                        _last_cont_up_px = p_close
+                        _last_cont_up_px  = p_close
+                        _last_range_hi_px =  float('inf')  # trending up — range ref invalid
+                        _last_range_lo_px = -float('inf')
                 elif obs_label == 'CONT_DOWN':
                     if p_close < _last_cont_dn_px:
                         _fire_obs = True
-                        _last_cont_dn_px = p_close
+                        _last_cont_dn_px  = p_close
+                        _last_range_hi_px =  float('inf')  # trending down — range ref invalid
+                        _last_range_lo_px = -float('inf')
                 elif obs_label == 'PEAK':
                     if p_close > _last_peak_px:
                         _fire_obs = True
-                        _last_peak_px    = p_close
-                        _last_trough_px  =  float('inf')   # reset opposite
-                        _last_cont_dn_px =  float('inf')   # down leg starts fresh after peak
+                        _last_peak_px     = p_close
+                        _last_trough_px   =  float('inf')  # reset opposite
+                        _last_cont_dn_px  =  float('inf')  # down leg starts fresh after peak
+                        _last_range_hi_px = p_close        # next RANGE_HI must be below this peak
                 elif obs_label == 'TROUGH':
                     if p_close < _last_trough_px:
                         _fire_obs = True
-                        _last_trough_px  = p_close
-                        _last_peak_px    = -float('inf')   # reset opposite
-                        _last_cont_up_px = -float('inf')   # up leg starts fresh after trough
+                        _last_trough_px   = p_close
+                        _last_peak_px     = -float('inf')  # reset opposite
+                        _last_cont_up_px  = -float('inf')  # up leg starts fresh after trough
+                        _last_range_lo_px = p_close        # next RANGE_LO must be above this trough
+                elif obs_label == 'RANGE_HI':
+                    if p_close < _last_range_hi_px:        # lower-high confirms range
+                        _fire_obs = True
+                        _last_range_hi_px = p_close
+                elif obs_label == 'RANGE_LO':
+                    if p_close > _last_range_lo_px:        # higher-low confirms range
+                        _fire_obs = True
+                        _last_range_lo_px = p_close
 
                 if _fire_obs:
                     last_1m_state = obs_label
-                    obs_dir   = +1 if obs_label in ('TROUGH', 'CONT_UP') else -1
+                    obs_dir   = +1 if obs_label in ('TROUGH', 'CONT_UP', 'RANGE_LO') else -1
                     side_o    = 'LONG' if obs_dir > 0 else 'SHORT'
                     arrow_o   = '▲' if obs_dir > 0 else '▼'
                     c_o       = G if obs_dir > 0 else R
@@ -1700,6 +1729,21 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                     mtf_o = (f"1m{_tr2o(t1mo)}  5m{_tr2o(t5mo)}  15m{_tr2o(t15o)}"
                              f"  1h{_tr2o(t1ho)}  4h{_tr2o(t4ho)}")
 
+                    # Range tightening metric — only for RANGE_HI/RANGE_LO
+                    range_tight_o = ''
+                    if obs_label in ('RANGE_HI', 'RANGE_LO'):
+                        _mw_o  = micro_window
+                        _mm    = len(_mw_o)
+                        _nc1   = min(60, _mm)
+                        _cls_o = [b['close'] for b in _mw_o]
+                        _r1_o  = max(_cls_o[-_nc1:]) - min(_cls_o[-_nc1:])  # 1m range
+                        _r2_o  = max(_cls_o)         - min(_cls_o)           # 2m range
+                        if _r2_o > 1e-8:
+                            _ratio = _r1_o / _r2_o
+                            _tight_pct = int((1.0 - _ratio) * 100)
+                            _tight_str = f"tight +{_tight_pct}%" if _tight_pct >= 0 else f"expand +{-_tight_pct}%"
+                            range_tight_o = f"range: {_tight_str}  (1m=${_r1_o:.2f}  2m=${_r2_o:.2f})"
+
                     sig_count += 1
                     notes_inline = (f"[{sig_count}] {obs_label} {side_o} @ {_ts(sec)}"
                                     f"  ${p_close:,.2f}")
@@ -1708,6 +1752,7 @@ def scan(mins_limit=96, session_idx=0, signals_only=False):
                     print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
                     print(f"     {tb_pct_o}  ·  obi={obi_p:+.3f}  ·  {kdv_ev_o}")
                     print(f"     cph={composite_phase:+.3f}  ·  {mtf_o}")
+                    if range_tight_o: print(f"     {range_tight_o}")
                     if dk_o:    print(f"     {dk_o}")
                     if shelf_o: print(f"     {shelf_o}")
                     print(f"{bar_o}{Z}\n")
@@ -1933,6 +1978,7 @@ class ScanState:
                  'last_tf_states', 'last_1m_state',
                  'last_cont_up_px', 'last_cont_dn_px',
                  'last_peak_px', 'last_trough_px',
+                 'last_range_hi_px', 'last_range_lo_px',
                  'last_range_state', 'session_shelves')
 
     def __init__(self):
@@ -1968,6 +2014,8 @@ class ScanState:
         self.last_cont_dn_px  =  float('inf')
         self.last_peak_px     = -float('inf')
         self.last_trough_px   =  float('inf')
+        self.last_range_hi_px =  float('inf')   # RANGE_HI: fires when price < this
+        self.last_range_lo_px = -float('inf')   # RANGE_LO: fires when price > this
         self.last_range_state = None   # 'sup'|'res' — last ranging side fired
         self.session_shelves  = []
 
@@ -2393,27 +2441,41 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 if obs_label_i == 'CONT_UP':
                     if p_close > state.last_cont_up_px:
                         _fire_i = True
-                        state.last_cont_up_px = p_close
+                        state.last_cont_up_px  = p_close
+                        state.last_range_hi_px =  float('inf')  # trending — range ref invalid
+                        state.last_range_lo_px = -float('inf')
                 elif obs_label_i == 'CONT_DOWN':
                     if p_close < state.last_cont_dn_px:
                         _fire_i = True
-                        state.last_cont_dn_px = p_close
+                        state.last_cont_dn_px  = p_close
+                        state.last_range_hi_px =  float('inf')  # trending — range ref invalid
+                        state.last_range_lo_px = -float('inf')
                 elif obs_label_i == 'PEAK':
                     if p_close > state.last_peak_px:
                         _fire_i = True
-                        state.last_peak_px    = p_close
-                        state.last_trough_px  =  float('inf')
-                        state.last_cont_dn_px =  float('inf')
+                        state.last_peak_px     = p_close
+                        state.last_trough_px   =  float('inf')  # reset opposite
+                        state.last_cont_dn_px  =  float('inf')  # down leg starts fresh after peak
+                        state.last_range_hi_px = p_close        # next RANGE_HI must be below this peak
                 elif obs_label_i == 'TROUGH':
                     if p_close < state.last_trough_px:
                         _fire_i = True
-                        state.last_trough_px  = p_close
-                        state.last_peak_px    = -float('inf')
-                        state.last_cont_up_px = -float('inf')
+                        state.last_trough_px   = p_close
+                        state.last_peak_px     = -float('inf')  # reset opposite
+                        state.last_cont_up_px  = -float('inf')  # up leg starts fresh after trough
+                        state.last_range_lo_px = p_close        # next RANGE_LO must be above this trough
+                elif obs_label_i == 'RANGE_HI':
+                    if p_close < state.last_range_hi_px:        # lower-high confirms range
+                        _fire_i = True
+                        state.last_range_hi_px = p_close
+                elif obs_label_i == 'RANGE_LO':
+                    if p_close > state.last_range_lo_px:        # higher-low confirms range
+                        _fire_i = True
+                        state.last_range_lo_px = p_close
 
                 if _fire_i:
                     state.last_1m_state = obs_label_i
-                    obs_dir_i  = +1 if obs_label_i in ('TROUGH', 'CONT_UP') else -1
+                    obs_dir_i  = +1 if obs_label_i in ('TROUGH', 'CONT_UP', 'RANGE_LO') else -1
                     side_oi    = 'LONG' if obs_dir_i > 0 else 'SHORT'
                     arrow_oi   = '▲' if obs_dir_i > 0 else '▼'
                     c_oi       = G if obs_dir_i > 0 else R
@@ -2435,6 +2497,24 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                     def _tr2oi(t): return {'up':'↑','do':'↓','ne':'─'}.get(t[:2],'─')
                     mtf_oi = (f"1m{_tr2oi(t1moi)}  5m{_tr2oi(t5moi)}  15m{_tr2oi(t15oi)}"
                               f"  1h{_tr2oi(t1hoi)}  4h{_tr2oi(t4hoi)}")
+
+                    # Range tightening metric — only for RANGE_HI/RANGE_LO
+                    range_tight_oi = ''
+                    if obs_label_i in ('RANGE_HI', 'RANGE_LO'):
+                        _mw_oi  = state.micro_window
+                        _mm_oi  = len(_mw_oi)
+                        _nc1_oi = min(60, _mm_oi)
+                        _cls_oi = [b['close'] for b in _mw_oi]
+                        _r1_oi  = max(_cls_oi[-_nc1_oi:]) - min(_cls_oi[-_nc1_oi:])
+                        _r2_oi  = max(_cls_oi)            - min(_cls_oi)
+                        if _r2_oi > 1e-8:
+                            _ratio_oi   = _r1_oi / _r2_oi
+                            _tight_pct_oi = int((1.0 - _ratio_oi) * 100)
+                            _tight_str_oi = (f"tight +{_tight_pct_oi}%"
+                                             if _tight_pct_oi >= 0
+                                             else f"expand +{-_tight_pct_oi}%")
+                            range_tight_oi = (f"range: {_tight_str_oi}"
+                                              f"  (1m=${_r1_oi:.2f}  2m=${_r2_oi:.2f})")
 
                     state.sig_count += 1
                     sig_i = {
@@ -2458,6 +2538,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                         print(f"     {_ts(sec)}  ·  ${p_close:>10,.2f}")
                         print(f"     taker {tb_r_oi*100:.0f}%  ·  obi={obi_p:+.3f}  ·  {kdv_ev_oi}")
                         print(f"     cph={composite_phase_i:+.3f}  ·  {mtf_oi}")
+                        if range_tight_oi: print(f"     {range_tight_oi}")
                         if shelf_oi: print(f"     {shelf_oi}")
                     print(f"{bar_oi}{Z}\n")
 
