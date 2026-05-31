@@ -1041,9 +1041,9 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     Window = the timeframe = 60 1s-bars (1m).
     Prior context from the last closed 1m candle (bars_1m[-1]).
 
-    PEAK/TROUGH = ORDER FLOW REVERSAL at the local 1m high/low.
-    Fires whenever reversal indicators trigger at the local extreme —
-    regardless of whether that extreme is above/below the prior candle.
+    PEAK/TROUGH = ORDER BOOK REVERSAL at the local 1m high/low.
+    OB-based signals: wall proximity, spread compression/explosion, side loading.
+    KdV + OBI are secondary (both exist on 100% of bars — no trades required).
 
     CONT_UP/DOWN = genuine new extreme (>= prior candle) + no reversal.
     RANGE_HI/LO  = lower-high / higher-low (< prior candle) + no reversal.
@@ -1054,9 +1054,7 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     if m < 15:
         return 'MID'
 
-    closes = [b['close']                          for b in micro_bars]
-    vols   = [b['volume']                         for b in micro_bars]
-    tbs    = [b.get('taker_buy', b['volume']*0.5) for b in micro_bars]
+    closes = [b['close'] for b in micro_bars]
 
     n1 = min(60, m)  # 1m window = THE timeframe
 
@@ -1069,111 +1067,124 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
 
     # ── Prior 1m candle reference ─────────────────────────────────────────────
     if bars_1m and len(bars_1m) >= 1:
-        prior       = bars_1m[-1]
-        prior_hi    = prior['high']
-        prior_lo    = prior['low']
-        vol_pr      = prior['volume']
-        tb_pr_total = prior['taker_buy']
-        tr_pr       = tb_pr_total / vol_pr if vol_pr > 1e-8 else 0.5
-        v_pr        = (prior['close'] - prior['open']) / 60.0
+        prior    = bars_1m[-1]
+        prior_hi = prior['high']
+        prior_lo = prior['low']
+        v_pr     = (prior['close'] - prior['open']) / 60.0
     else:
-        # Warmup: no closed candle yet — use mid-1m split as fallback
-        n_half      = n1 // 2
-        vol_pr      = sum(vols[-n1:-n_half]) if n1 > n_half else 0.0
-        tb_pr_total = sum(tbs[-n1:-n_half])  if n1 > n_half else 0.0
-        tr_pr       = tb_pr_total / vol_pr if vol_pr > 1e-8 else 0.5
-        v_pr        = (closes[-n_half] - closes[-n1]) / max(n1 - n_half, 1) if n1 > n_half else 0.0
-        prior_hi    = hi_s
-        prior_lo    = lo_s
+        n_half   = n1 // 2
+        v_pr     = (closes[-n_half] - closes[-n1]) / max(n1 - n_half, 1) if n1 > n_half else 0.0
+        prior_hi = hi_s
+        prior_lo = lo_s
 
     # ── Structural position ───────────────────────────────────────────────────
-    at_hi  = price >= hi_s   # price is at the local 1m high
-    at_lo  = price <= lo_s   # price is at the local 1m low
-    new_hi = hi_s >= prior_hi  # genuine new high vs prior candle (for CONT/RANGE split)
-    new_lo = lo_s <= prior_lo  # genuine new low vs prior candle
+    at_hi  = price >= hi_s
+    at_lo  = price <= lo_s
+    new_hi = hi_s >= prior_hi
+    new_lo = lo_s <= prior_lo
 
-    # ── Taker ratio: current 1m vs prior 1m candle ───────────────────────────
-    vol_now = sum(vols[-n1:])
-    tb_now  = sum(tbs[-n1:])
-    tr_now  = tb_now / vol_now if vol_now > 1e-8 else 0.5
-    dtr     = tr_now - tr_pr
-
-    buy_flipped    = dtr < -0.25 and tr_now < 0.45   # was buying, now selling
-    sell_flipped   = dtr >  0.25 and tr_now > 0.55   # was selling, now buying
-    buy_now        = tr_now > 0.60
-    sell_now       = tr_now < 0.40
-    buy_sustained  = tr_now > 0.55 and tr_pr > 0.55
-    sell_sustained = tr_now < 0.45 and tr_pr < 0.45
-
+    # ── OBI thresholds ───────────────────────────────────────────────────────
     obi_pos     = obi >  0.05;  obi_neg     = obi < -0.05
     obi_str_pos = obi >  0.20;  obi_str_neg = obi < -0.20
 
-    # Volume divergence: second half of 1m window lighter than first
-    n_half  = n1 // 2
-    vol_fst = sum(vols[-n1:-n_half]) if n1 > n_half else 0.0
-    vol_lst = sum(vols[-n_half:])    if n_half > 0   else 0.0
-    vol_div = vol_fst > 1e-8 and vol_lst < vol_fst * 0.50
-
-    # ── Velocity ─────────────────────────────────────────────────────────────
+    # ── Velocity (pure price — no trades needed) ─────────────────────────────
     v_now       = (closes[-1] - closes[-n1]) / (n1 - 1) if n1 > 1 else 0.0
     vel_cont_up = v_now > 0.02 and v_pr > 0.02
     vel_cont_dn = v_now < -0.02 and v_pr < -0.02
     vel_up      = v_now >  0.10
     vel_dn      = v_now < -0.10
 
-    # ── 5m candle indicators ─────────────────────────────────────────────────
-    v5_cont_up = v5_cont_dn = False
-    if bars_5m and len(bars_5m) >= 2:
-        b5c = bars_5m[-1];  b5p = bars_5m[-2]
-        v5c  = (b5c['close'] - b5c['open']) / 300.0
-        v5p  = (b5p['close'] - b5p['open']) / 300.0
-        tr5c = b5c['taker_buy'] / b5c['volume'] if b5c['volume'] > 1e-8 else 0.5
-        v5_cont_up = v5c > 0.01 and v5p > 0.01 and tr5c > 0.55
-        v5_cont_dn = v5c < -0.01 and v5p < -0.01 and tr5c < 0.45
+    # ── Order book signals (available on 100% of bars) ───────────────────────
+    def _ob_stats(bar):
+        bids, asks = bar.get('ob', ([], []))
+        if not bids or not asks:
+            return None
+        best_bid = bids[0][0];  best_ask = asks[0][0]
+        spread   = best_ask - best_bid
+        bid_tot  = sum(q for _, q in bids)
+        ask_tot  = sum(q for _, q in asks)
+        big_bid  = max(bids, key=lambda x: x[1])
+        big_ask  = max(asks, key=lambda x: x[1])
+        return {
+            'spread':      spread,
+            'bid_tot':     bid_tot,     'ask_tot':     ask_tot,
+            'big_bid_qty': big_bid[1],  'big_bid_px':  big_bid[0],
+            'big_ask_qty': big_ask[1],  'big_ask_px':  big_ask[0],
+        }
+
+    cur  = _ob_stats(micro_bars[-1])
+    prev = _ob_stats(micro_bars[-min(10, m)])
+    if cur is None:
+        return 'MID'
+
+    # Wall = large resting order within ~$15 of price at $75k
+    WALL_QTY  = 0.15
+    WALL_DIST = price * 0.0002
+
+    ask_wall_at_price = (cur['big_ask_qty'] >= WALL_QTY and
+                         0 <= cur['big_ask_px'] - price <= WALL_DIST)
+    bid_wall_at_price = (cur['big_bid_qty'] >= WALL_QTY and
+                         0 <= price - cur['big_bid_px'] <= WALL_DIST)
+
+    # Spread compression / explosion vs recent baseline
+    recent_spreads = []
+    for b in micro_bars[-n1:]:
+        st = _ob_stats(b)
+        if st is not None:
+            recent_spreads.append(st['spread'])
+    if len(recent_spreads) > 5:
+        avg_spread = sum(recent_spreads[:-5]) / len(recent_spreads[:-5])
+    elif recent_spreads:
+        avg_spread = recent_spreads[0]
+    else:
+        avg_spread = 10.0
+
+    spread_compressed = cur['spread'] < avg_spread * 0.15 and cur['spread'] < 1.0
+    spread_exploding  = cur['spread'] > avg_spread * 2.0  and cur['spread'] > 5.0
+
+    # Side loading: total qty jumped or thinned vs 10 bars ago
+    asks_loaded  = prev is not None and cur['ask_tot'] > prev['ask_tot'] * 1.25
+    bids_loaded  = prev is not None and cur['bid_tot'] > prev['bid_tot'] * 1.25
+    asks_thinned = prev is not None and cur['ask_tot'] < prev['ask_tot'] * 0.75
+    bids_thinned = prev is not None and cur['bid_tot'] < prev['bid_tot'] * 0.75
 
     if at_hi:
-        # ── PEAK: order flow reversal at local high (new OR lower high) ───────
-        if kdv_down and not obi_str_pos:  return 'PEAK'
-        if buy_flipped:                    return 'PEAK'
-        if sell_now and obi_neg:           return 'PEAK'
-        if sell_now and vol_div:           return 'PEAK'
-        if sell_now and res_dir == -1:     return 'PEAK'
+        # ── PEAK: OB reversal signals at local high ───────────────────────────
+        reversal = (ask_wall_at_price or asks_loaded or
+                    spread_compressed or spread_exploding or
+                    (kdv_down and not obi_str_pos))
+        if reversal:
+            return 'PEAK'
 
         # No reversal — classify by whether this high extends beyond prior candle
         if new_hi:
             # ── CONT_UP: genuine new high + trend continues ────────────────
             if not kdv_down:
-                if buy_sustained and not obi_str_neg:     return 'CONT_UP'
-                if vel_cont_up and (buy_now or obi_pos):  return 'CONT_UP'
-                if vel_up and obi_pos:                    return 'CONT_UP'
-                if v5_cont_up and not obi_str_neg:        return 'CONT_UP'
+                if obi_pos or bids_loaded or asks_thinned:  return 'CONT_UP'
+                if vel_cont_up and obi_pos:                  return 'CONT_UP'
+                if vel_up and obi_pos:                       return 'CONT_UP'
         else:
             # ── RANGE_HI: lower-high + no reversal ────────────────────────
-            if sell_now:   return 'RANGE_HI'
-            if vol_div:    return 'RANGE_HI'
-            if obi_neg:    return 'RANGE_HI'
+            if obi_neg or asks_loaded:  return 'RANGE_HI'
 
     if at_lo:
-        # ── TROUGH: order flow reversal at local low (new OR higher low) ─────
-        if kdv_up and not obi_str_neg:    return 'TROUGH'
-        if sell_flipped:                   return 'TROUGH'
-        if buy_now and obi_pos:            return 'TROUGH'
-        if buy_now and vol_div:            return 'TROUGH'
-        if buy_now and res_dir == +1:      return 'TROUGH'
+        # ── TROUGH: OB reversal signals at local low ──────────────────────────
+        reversal = (bid_wall_at_price or bids_loaded or
+                    spread_compressed or spread_exploding or
+                    (kdv_up and not obi_str_neg))
+        if reversal:
+            return 'TROUGH'
 
         # No reversal — classify by whether this low extends beyond prior candle
         if new_lo:
             # ── CONT_DOWN: genuine new low + trend continues ───────────────
             if not kdv_up:
-                if sell_sustained and not obi_str_pos:    return 'CONT_DOWN'
-                if vel_cont_dn and (sell_now or obi_neg): return 'CONT_DOWN'
-                if vel_dn and obi_neg:                    return 'CONT_DOWN'
-                if v5_cont_dn and not obi_str_pos:        return 'CONT_DOWN'
+                if obi_neg or asks_loaded or bids_thinned:  return 'CONT_DOWN'
+                if vel_cont_dn and obi_neg:                  return 'CONT_DOWN'
+                if vel_dn and obi_neg:                       return 'CONT_DOWN'
         else:
             # ── RANGE_LO: higher-low + no reversal ────────────────────────
-            if buy_now:    return 'RANGE_LO'
-            if vol_div:    return 'RANGE_LO'
-            if obi_pos:    return 'RANGE_LO'
+            if obi_pos or bids_loaded:  return 'RANGE_LO'
 
     return 'MID'
 
