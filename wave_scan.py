@@ -1056,6 +1056,16 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
 
     closes = [b['close'] for b in micro_bars]
 
+    # OB mid prices — available every ~2s via D records (100% bar coverage).
+    # Use for velocity so gates work even when trades are sparse.
+    mids = []
+    for b in micro_bars:
+        ob = b.get('ob', ([], []))
+        if ob and ob[0] and ob[1]:
+            mids.append((ob[0][0][0] + ob[1][0][0]) / 2.0)
+        else:
+            mids.append(b['close'])
+
     n1 = min(60, m)  # 1m window = THE timeframe
 
     hi_s     = max(closes[-n1:])
@@ -1073,7 +1083,7 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
         v_pr     = (prior['close'] - prior['open']) / 60.0
     else:
         n_half   = n1 // 2
-        v_pr     = (closes[-n_half] - closes[-n1]) / max(n1 - n_half, 1) if n1 > n_half else 0.0
+        v_pr     = (mids[-n_half] - mids[-n1]) / max(n1 - n_half, 1) if n1 > n_half else 0.0
         prior_hi = hi_s
         prior_lo = lo_s
 
@@ -1087,18 +1097,18 @@ def _observe_structural(price, obi, kdv_up, kdv_down, micro_bars, res_dir=0,
     obi_pos     = obi >  0.05;  obi_neg     = obi < -0.05
     obi_str_pos = obi >  0.20;  obi_str_neg = obi < -0.20
 
-    # ── Velocity (pure price — no trades needed) ─────────────────────────────
-    v_now       = (closes[-1] - closes[-n1]) / (n1 - 1) if n1 > 1 else 0.0
+    # ── Velocity from OB mid — continuous at every bar regardless of trade density ──
+    v_now       = (mids[-1] - mids[-n1]) / (n1 - 1) if n1 > 1 else 0.0
     vel_cont_up = v_now > 0.02 and v_pr > 0.02
     vel_cont_dn = v_now < -0.02 and v_pr < -0.02
     vel_up      = v_now >  0.10
     vel_dn      = v_now < -0.10
 
-    # Short-window velocity (10s) — discriminates wall absorption from wall holding.
+    # Short-window velocity (10s) from OB mid.
     # >+0.5 $/s: price running hard through ask wall → continuation, not reversal.
     # <-2.0 $/s: price in freefall → don't call TROUGH on bid wall (it won't hold).
-    n_short      = min(10, m)
-    v_short      = (closes[-1] - closes[-n_short]) / max(n_short - 1, 1) if n_short > 1 else 0.0
+    n_short       = min(10, m)
+    v_short       = (mids[-1] - mids[-n_short]) / max(n_short - 1, 1) if n_short > 1 else 0.0
     vel_strong_up = v_short >  0.5
     vel_strong_dn = v_short < -2.0
 
