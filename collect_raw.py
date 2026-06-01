@@ -246,6 +246,9 @@ def _scan_loop(seed_bars=None):
         state          = _ws.ScanState()
         last_push_time = 0.0
 
+        import ob_direction as _obd
+        ob_tracker = _obd.OBDirection(exchange='binance_us')
+
         # Seed directly from exchange bars — no deque needed for startup
         log('scanner: seeding from exchange bars…', Y)
         _ws.scan_incremental(state, raw_lines=[], signals_only=True,
@@ -272,6 +275,7 @@ def _scan_loop(seed_bars=None):
 
                 new_sigs = _ws.scan_incremental(state, raw_lines=snapshot,
                                                  signals_only=True)
+                ob_state = ob_tracker.update(snapshot)
 
                 now = time.time()
                 if new_sigs or (now - last_push_time >= SIG_PUSH_S):
@@ -329,6 +333,7 @@ def _scan_loop(seed_bars=None):
                             }
                     except Exception:
                         pass
+                    live['ob_dir'] = ob_state
                     summary = {
                         'signal_count': state.sig_count,
                         'signals':      state.signals,
@@ -348,7 +353,14 @@ def _scan_loop(seed_bars=None):
                         res  = f'res={state.last_res_dir}@{state.last_align:.2f}'
                         htf  = f'htf={len(state.tf5m)}x5m/{len(state.tf1h)}x1h'
                         sup  = ' SUP' if state.last_htf_sup else ''
+                        ob   = ob_state
+                        ob_line = (f"ob={ob['direction']}@{ob['confidence']:.2f}  "
+                                   f"score={ob['score']}  near={ob['near_imbal']}  "
+                                   f"obi5={ob['obi_l5']}")
+                        if ob['accuracy'] is not None:
+                            ob_line += f"  acc={ob['accuracy']:.1%}({ob['trades_scored']})"
                         log(f'push ok | ${px:,.2f}  {ph}  ds={ds}  fos={fos}  score={sc}  {res}  {htf}{sup}  bars={bars}', Y)
+                        log(f'         {ob_line}', Y)
                     last_push_time = time.time()
 
             except Exception:
