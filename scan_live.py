@@ -222,6 +222,12 @@ def main():
                     'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'new_this_run': len(new_sigs),
                     'live':         getattr(state, 'live', {}),
+                    'timeframes': {
+                        'tf5m':  (state.tf5m[-30:]  if getattr(state, 'tf5m',  None) else []),
+                        'tf15m': (state.tf15m[-20:] if getattr(state, 'tf15m', None) else []),
+                        'tf1h':  (state.tf1h[-12:]  if getattr(state, 'tf1h',  None) else []),
+                        'tf4h':  (state.tf4h[-6:]   if getattr(state, 'tf4h',  None) else []),
+                    },
                 }
                 SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
                 if state.closed_1m:
