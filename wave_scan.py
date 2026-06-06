@@ -2255,13 +2255,15 @@ def _swing_update(hist: dict, bars: list) -> tuple:
     ext   = hist['swing_extreme']
 
     if hist['wave_dir'] == 1:
+        # Upswing: project where peak lands, then project the NEXT trough from that peak
         proj_peak   = round(max(ext, start + proj_up_amp), 2)
-        proj_trough = round(start, 2)
-        wave_amp    = round(ext - start, 2)
+        proj_trough = round(proj_peak - proj_dn_amp, 2)
+        wave_amp    = round(proj_up_amp, 2)
     else:
+        # Downswing: project where trough lands, then project the NEXT peak from that trough
         proj_trough = round(min(ext, start - proj_dn_amp), 2)
-        proj_peak   = round(start, 2)
-        wave_amp    = round(start - ext, 2)
+        proj_peak   = round(proj_trough + proj_up_amp, 2)
+        wave_amp    = round(proj_dn_amp, 2)
 
     return (proj_peak, proj_trough,
             round(atr, 2), round(atr_up, 2), round(atr_dn, 2),
