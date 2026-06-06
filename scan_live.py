@@ -258,15 +258,6 @@ def main():
                         'lows':     getattr(kb, 'lows', []),
                     }
 
-                # ── history arrays (last 30 bars each) ──────────────────
-                history = {
-                    'obi':   [round(x,4) for x in getattr(state, 'hist_obi',      [])[-30:]],
-                    'score': [round(x,4) for x in getattr(state, 'hist_scores',    [])[-30:]],
-                    'kdv':   [round(x,4) for x in getattr(state, 'hist_kdv_bals',  [])[-30:]],
-                    'align': [round(x,4) for x in getattr(state, 'hist_aligns',    [])[-30:]],
-                    'n_bars': len(getattr(state, 'hist_scores', [])),
-                }
-
                 summary = {
                     'signal_count': n,
                     'signals':      state.signals,
@@ -277,7 +268,6 @@ def main():
                     'shelves':      getattr(state, 'session_shelves', []),
                     'knife':        knife_data,
                     'ob_depth':     ob_depth,
-                    'history':      history,
                     'timeframes': {
                         'tf5m':  (state.tf5m[-30:]  if getattr(state, 'tf5m',  None) else []),
                         'tf15m': (state.tf15m[-20:] if getattr(state, 'tf15m', None) else []),
