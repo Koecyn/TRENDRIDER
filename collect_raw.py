@@ -169,6 +169,9 @@ def _dashboard(state, tfs, recent_signals):
         proj_trough = lv.get('proj_trough',   0.0)
         wave_amp    = lv.get('wave_amp',      0.0)
         wave_dir    = lv.get('wave_dir',      0)
+        atr_tf      = lv.get('atr',          0.0)
+        atr_up_tf   = lv.get('atr_up',       0.0)
+        atr_dn_tf   = lv.get('atr_dn',       0.0)
         kdv_bal     = lv.get('kdv_bal',       0.0)
         kdv_rev     = lv.get('kdv_need_rev',  0.0)
         kdv_con     = lv.get('kdv_need_cont', 0.0)
@@ -204,9 +207,11 @@ def _dashboard(state, tfs, recent_signals):
             f'  ph={phase:+.3f}'
             f'  vel={vel_tf:+.1f}'
         )
+        atr_s = (f'  atr=${atr_tf:,.0f}(↑${atr_up_tf:,.0f} ↓${atr_dn_tf:,.0f})'
+                 if atr_tf > 0 else '')
         rows.append(
             f'       {dir_s} pk=${proj_peak:,.0f}  tr=${proj_trough:,.0f}'
-            f'  amp=${wave_amp:,.0f}'
+            f'  amp=${wave_amp:,.0f}{atr_s}'
         )
         rows.append(
             f'       kdv={kdv_bal:.3f}(rv={kdv_rev:.3f} cn={kdv_con:.3f})'

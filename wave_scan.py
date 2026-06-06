@@ -2104,11 +2104,10 @@ class ScanState:
         self.tf_hists  = {
             tf: {'scores': [], 'phases': [], 'obi': [], 'kdv_bals': [],
                  'last_ts': 0, 'thresh': 0.0,
-                 # swing projection state
-                 'wave_dir':      0,     # +1 up / -1 down / 0 unknown
-                 'swing_start':   0.0,   # price where current swing began
-                 'swing_extreme': 0.0,   # running high (up) or low (down) of this swing
-                 'prev_amps':     [],    # amplitudes of recent completed swings
+                 'wave_dir':      0,    # +1 up / -1 down / 0 unknown
+                 'swing_start':   0.0, # price at start of current swing (confirmed trough or peak)
+                 'swing_extreme': 0.0, # running high (upswing) or low (downswing)
+                 'prev_amps':     [],  # completed swing amplitudes — improves proj with each cycle
                 }
             for tf in _TFS
         }
@@ -2116,10 +2115,13 @@ class ScanState:
         self.tf_live   = {
             tf: {'score': 0.0, 'phase': 0.0, 'kdv_bal': 0.0, 'obi': 0.0,
                  'thresh': 0.0,
-                 'proj_peak':   0.0,   # projected peak price (from trough + avg amp)
-                 'proj_trough': 0.0,   # projected trough price (from peak - avg amp)
-                 'wave_amp':    0.0,   # current/recent wave amplitude in $
-                 'wave_dir':    0,     # +1 up / -1 down
+                 'proj_peak':   0.0,  # projected peak: swing_start + atr_up (snaps to running high)
+                 'proj_trough': 0.0,  # projected trough: swing_start - atr_dn (snaps to running low)
+                 'wave_amp':    0.0,  # distance moved so far in current swing
+                 'wave_dir':    0,
+                 'atr':         0.0,  # average true range
+                 'atr_up':      0.0,  # avg upward ATR component (expected bounce)
+                 'atr_dn':      0.0,  # avg downward ATR component (expected drop)
                  'obi_need': 0.0, 'kdv_need_rev': 0.0, 'kdv_need_cont': 0.0,
                  'align_need': 0.0, 'vel': 0.0}
             for tf in _TFS
@@ -2156,26 +2158,54 @@ def _run_tf_physics(bars: list, accum) -> dict:
 
 def _swing_update(hist: dict, bars: list) -> tuple:
     """
-    Track swing direction and amplitude per TF.  Returns (proj_peak, proj_trough, wave_amp, wave_dir).
+    Multi-method swing projection per TF.  Three independent amplitude estimates
+    are averaged to produce the final proj_peak / proj_trough:
 
-    proj_peak   — projected peak price: trough_start + avg_amplitude.
-                  Snaps up to the actual running high when price exceeds the projection.
-    proj_trough — projected trough price: peak_start - avg_amplitude.
-                  Snaps down to the actual running low when price drops below projection.
+      1. Completed-swing history (prev_amps): average of all confirmed swing
+         amplitudes so far — improves every time direction flips.
+      2. ATR directional split: atr_up = avg(high − max(open, prev_close)),
+         atr_dn = avg(max(open, prev_close) − low) over last 14 bars.
+         Captures the fraction of each bar that runs up vs down.
+      3. Bar-range baseline: avg high-low range of the window — simple fallback
+         that is always available and grounds the other two.
 
-    Amplitude history grows from completed swings (direction flips) so the
-    projection improves with each cycle.  Falls back to the current bar-range
-    until the first flip is detected.
+    All three are averaged together (equal weight when all present; degrades
+    gracefully as data accumulates).  The final projection snaps to the actual
+    running extreme whenever price exceeds it, so it always shows the
+    best-known target.
+
+    Returns (proj_peak, proj_trough, atr, atr_up, atr_dn, wave_dir, wave_amp)
     """
     if len(bars) < 4:
         rng = max(b['high'] for b in bars) - min(b['low'] for b in bars)
-        mid = bars[-1]['close']
-        return mid + rng, mid - rng, rng, 0
+        mid = bars[-1]['close'] if bars else 0.0
+        return mid + rng, mid - rng, rng, rng * 0.5, rng * 0.5, 0, rng
 
     highs = np.array([b['high'] for b in bars])
     lows  = np.array([b['low']  for b in bars])
-    n     = max(len(bars) // 3, 1)
 
+    # ── Method 2: ATR directional split over last 14 bars ────────────────
+    n_atr = min(14, len(bars) - 1)
+    trs, ups, dns = [], [], []
+    for i in range(len(bars) - n_atr, len(bars)):
+        b  = bars[i]
+        pc = bars[i - 1]['close']
+        trs.append(max(b['high'] - b['low'],
+                       abs(b['high'] - pc),
+                       abs(b['low']  - pc)))
+        ups.append(b['high'] - min(b['open'], pc))
+        dns.append(max(b['open'], pc) - b['low'])
+
+    atr    = float(np.mean(trs)) if trs else 0.0
+    atr_up = float(np.mean(ups)) if ups else atr * 0.5
+    atr_dn = float(np.mean(dns)) if dns else atr * 0.5
+
+    # ── Method 3: bar-range baseline ─────────────────────────────────────
+    bar_ranges = highs - lows
+    range_amp  = float(np.mean(bar_ranges)) * max(len(bars) // 4, 1)
+
+    # ── Direction detection ───────────────────────────────────────────────
+    n = max(len(bars) // 3, 1)
     if (np.max(highs[-n:]) > np.max(highs[:n]) and
             np.min(lows[-n:]) > np.min(lows[:n])):
         new_dir = 1
@@ -2191,12 +2221,11 @@ def _swing_update(hist: dict, bars: list) -> tuple:
     price    = float(bars[-1]['close'])
 
     if prev_dir == 0:
-        # First call — initialise from current price
         hist['wave_dir']      = new_dir
         hist['swing_start']   = price
         hist['swing_extreme'] = price
     elif new_dir != prev_dir:
-        # Direction flipped → completed swing
+        # Direction flip — record completed swing amplitude
         amp = abs(hist['swing_extreme'] - hist['swing_start'])
         if amp > 0:
             hist['prev_amps'].append(amp)
@@ -2206,28 +2235,37 @@ def _swing_update(hist: dict, bars: list) -> tuple:
         hist['swing_extreme'] = cur_high if new_dir == 1 else cur_low
         hist['wave_dir']      = new_dir
     else:
-        # Same direction — extend running extreme
         if new_dir == 1:
             hist['swing_extreme'] = max(hist['swing_extreme'], cur_high)
         else:
             hist['swing_extreme'] = min(hist['swing_extreme'], cur_low)
 
-    avg_amp = float(np.mean(hist['prev_amps'])) if hist['prev_amps'] \
-              else float(np.max(highs) - np.min(lows))
+    # ── Method 1: completed-swing history ────────────────────────────────
+    hist_amp = float(np.mean(hist['prev_amps'])) if hist['prev_amps'] else None
+
+    # ── Average all available methods ────────────────────────────────────
+    # Up projection: swing-history amp, ATR-up, range baseline
+    # Down projection: swing-history amp, ATR-dn, range baseline
+    up_candidates  = [v for v in [hist_amp, atr_up, range_amp] if v is not None and v > 0]
+    dn_candidates  = [v for v in [hist_amp, atr_dn, range_amp] if v is not None and v > 0]
+    proj_up_amp    = float(np.mean(up_candidates)) if up_candidates else atr_up or range_amp
+    proj_dn_amp    = float(np.mean(dn_candidates)) if dn_candidates else atr_dn or range_amp
 
     start = hist['swing_start']
     ext   = hist['swing_extreme']
 
     if hist['wave_dir'] == 1:
-        # Upswing: proj_peak snaps to running high, at minimum projects from start
-        proj_peak   = max(ext, start + avg_amp)
-        proj_trough = start          # where we bounced from
+        proj_peak   = round(max(ext, start + proj_up_amp), 2)
+        proj_trough = round(start, 2)
+        wave_amp    = round(ext - start, 2)
     else:
-        # Downswing: proj_trough snaps to running low
-        proj_trough = min(ext, start - avg_amp)
-        proj_peak   = start          # where we rolled over from
+        proj_trough = round(min(ext, start - proj_dn_amp), 2)
+        proj_peak   = round(start, 2)
+        wave_amp    = round(start - ext, 2)
 
-    return round(proj_peak, 2), round(proj_trough, 2), round(avg_amp, 2), hist['wave_dir']
+    return (proj_peak, proj_trough,
+            round(atr, 2), round(atr_up, 2), round(atr_dn, 2),
+            hist['wave_dir'], wave_amp)
 
 
 def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
@@ -2254,7 +2292,7 @@ def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
     hist['peak_ph']  = thr[1]
     hist['trough_ph']= thr[2]
 
-    proj_peak, proj_trough, wave_amp, wave_dir = _swing_update(hist, snap)
+    proj_peak, proj_trough, atr, atr_up, atr_dn, wave_dir, wave_amp = _swing_update(hist, snap)
     _vb = bars[-6:] if len(bars) >= 6 else bars
     state.tf_live[tf] = {
         'score':         ph['score'],
@@ -2266,6 +2304,9 @@ def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
         'proj_trough':   proj_trough,
         'wave_amp':      wave_amp,
         'wave_dir':      wave_dir,
+        'atr':           atr,
+        'atr_up':        atr_up,
+        'atr_dn':        atr_dn,
         'obi_need':      thr[3],
         'kdv_need_rev':  thr[4],
         'kdv_need_cont': thr[5],
@@ -2357,7 +2398,7 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         hist['trough_ph'] = thr[2]
         if bars:
             ph_last = _run_tf_physics(bars[-win:], state.tf_accums[tf])
-            proj_peak, proj_trough, wave_amp, wave_dir = _swing_update(
+            proj_peak, proj_trough, atr, atr_up, atr_dn, wave_dir, wave_amp = _swing_update(
                 state.tf_hists[tf], bars[-win:] if len(bars) >= win else bars)
             _vb = bars[-6:] if len(bars) >= 6 else bars
             state.tf_live[tf] = {
@@ -2370,6 +2411,9 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
                 'proj_trough':   proj_trough,
                 'wave_amp':      wave_amp,
                 'wave_dir':      wave_dir,
+                'atr':           atr,
+                'atr_up':        atr_up,
+                'atr_dn':        atr_dn,
                 'obi_need':      thr[3],
                 'kdv_need_rev':  thr[4],
                 'kdv_need_cont': thr[5],
