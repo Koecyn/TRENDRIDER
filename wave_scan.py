@@ -2849,6 +2849,40 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 'micro_ph':      round(micro_phase, 4),
             }
 
+            # ── Per-second tf_live updates for 1m and 5m ─────────────────────
+            # 1m: physics already computed this second — just copy into tf_live.
+            # Threshold stays frozen from last 1m bar close.
+            _lv1 = state.tf_live['1m']
+            _lv1['score']   = round(f_sc, 4)
+            _lv1['phase']   = round(micro_phase, 4)
+            _lv1['kdv_bal'] = round(kdv_bal, 4)
+            _lv1['obi']     = round(obi_p, 4)
+
+            # 5m: build partial 5m bar from seconds in current 5m window,
+            # including the latest second in s1_by_sec (active, may be partial).
+            # Run 5m-scale physics on complete_5m_bars + partial_5m_bar.
+            _win5s = (sec // 300) * 300
+            _secs5 = sorted(s for s in s1_by_sec if _win5s <= s)
+            if _secs5:
+                _bars5s = [s1_by_sec[s] for s in _secs5]
+                _p5 = {
+                    'ts':        _win5s * 1000,
+                    'open':      _bars5s[0]['open'],
+                    'high':      max(b['high'] for b in _bars5s),
+                    'low':       min(b['low']  for b in _bars5s),
+                    'close':     _bars5s[-1]['close'],
+                    'volume':    sum(b['volume'] for b in _bars5s),
+                    'taker_buy': sum(b.get('taker_buy', b['volume'] * 0.5) for b in _bars5s),
+                }
+                _win5m = [b for b in state.tf5m if b['ts'] < _win5s * 1000][-29:] + [_p5]
+                if len(_win5m) >= 5:
+                    _ph5 = _run_tf_physics(_win5m, state.tf_accums['5m'])
+                    _lv5 = state.tf_live['5m']
+                    _lv5['score']   = round(_ph5['score'],   4)
+                    _lv5['phase']   = round(_ph5['phase'],   4)
+                    _lv5['kdv_bal'] = round(_ph5['kdv_bal'], 4)
+                    _lv5['obi']     = round(_ph5['obi'],     4)
+
         if not final:
             if (s1_secs[-1] >= min_sec + 60
                     and min_sec not in state.appended_min_ts):
