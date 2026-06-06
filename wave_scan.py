@@ -2154,13 +2154,20 @@ def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
     hist['trough_ph']= thr[2]
 
     state.tf_live[tf] = {
-        'score':    ph['score'],
-        'phase':    ph['phase'],
-        'kdv_bal':  ph['kdv_bal'],
-        'obi':      ph['obi'],
-        'thresh':   thr[0],
-        'peak_ph':  thr[1],
-        'trough_ph':thr[2],
+        'score':         ph['score'],
+        'phase':         ph['phase'],
+        'kdv_bal':       ph['kdv_bal'],
+        'obi':           ph['obi'],
+        'thresh':        thr[0],
+        'peak_ph':       thr[1],
+        'trough_ph':     thr[2],
+        'obi_need':      thr[3],
+        'kdv_need_rev':  thr[4],
+        'kdv_need_cont': thr[5],
+        'align_need':    thr[6],
+        'vel':           round((bars[-1]['close'] - bars[-6]['close'])
+                               / max(len(bars[-6:]) - 1, 1), 4)
+                         if len(bars) >= 2 else 0.0,
     }
 
 
@@ -2247,9 +2254,20 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         if bars:
             ph_last = _run_tf_physics(bars[-win:], state.tf_accums[tf])
             state.tf_live[tf] = {
-                'score':    ph_last['score'],  'phase':   ph_last['phase'],
-                'kdv_bal':  ph_last['kdv_bal'],'obi':     ph_last['obi'],
-                'thresh':   thr[0], 'peak_ph': thr[1], 'trough_ph': thr[2],
+                'score':         ph_last['score'],
+                'phase':         ph_last['phase'],
+                'kdv_bal':       ph_last['kdv_bal'],
+                'obi':           ph_last['obi'],
+                'thresh':        thr[0],
+                'peak_ph':       thr[1],
+                'trough_ph':     thr[2],
+                'obi_need':      thr[3],
+                'kdv_need_rev':  thr[4],
+                'kdv_need_cont': thr[5],
+                'align_need':    thr[6],
+                'vel':           round((bars[-1]['close'] - bars[-6]['close'])
+                                       / max(len(bars[-6:]) - 1, 1), 4)
+                                 if len(bars) >= 2 else 0.0,
             }
     print(f'[seed] TF physics: '
           + '  '.join(f"{tf}={len(state.tf_hists[tf]['scores'])}pts"

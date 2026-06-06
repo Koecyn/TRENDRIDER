@@ -157,47 +157,47 @@ def _dashboard(state, tfs, recent_signals):
     if htf_bars:
         rows.append(f'  htf: {htf_bars}')
 
-    # ── per-TF grid ───────────────────────────────────────────────────────
+    # ── per-TF blocks (2 lines each) ─────────────────────────────────────
     rows.append(f'{C}{"─"*W}{Z}')
-    # header row
-    rows.append(f'  {"TF":<5}'
-                f' {"SCORE":>7} {"NEED":>6}'
-                f' {"PH":>6} {"TRGH":>6} {"PEAK":>6}'
-                f' {"KDV":>7}'
-                f' {"OBI":>7}'
-                f'  STATE')
-    rows.append(f'  {"─"*5}'
-                f' {"─"*7} {"─"*6}'
-                f' {"─"*6} {"─"*6} {"─"*6}'
-                f' {"─"*7}'
-                f' {"─"*7}'
-                f'  {"─"*9}')
 
     for tf in active_tfs:
-        lv        = tf_live.get(tf, {})
-        score     = lv.get('score',     0.0)
-        thresh    = lv.get('thresh',    0.0)
-        phase     = lv.get('phase',     0.0)
-        peak_ph   = lv.get('peak_ph',   0.75)
-        trough_ph = lv.get('trough_ph', -0.75)
-        kdv_bal   = lv.get('kdv_bal',   0.0)
-        obi       = lv.get('obi',       0.0)
+        lv          = tf_live.get(tf, {})
+        score       = lv.get('score',         0.0)
+        thresh      = lv.get('thresh',         0.0)
+        phase       = lv.get('phase',          0.0)
+        peak_ph     = lv.get('peak_ph',        0.75)
+        trough_ph   = lv.get('trough_ph',     -0.75)
+        kdv_bal     = lv.get('kdv_bal',        0.0)
+        kdv_rev     = lv.get('kdv_need_rev',   0.0)
+        kdv_con     = lv.get('kdv_need_cont',  0.0)
+        obi         = lv.get('obi',            0.0)
+        obi_need    = lv.get('obi_need',       0.0)
+        al          = lv.get('align_need',     0.0)
+        vel_tf      = lv.get('vel',            0.0)
 
         if phase >= peak_ph:
-            state_str = f'{R}PEAK  ▼{Z}'
+            st = f'{R}PEAK▼{Z}'
         elif phase <= trough_ph:
-            state_str = f'{G}TROUGH▲{Z}'
+            st = f'{G}TRGR▲{Z}'
         else:
-            state_str = f'{Y}MID    {Z}'
+            st = f'{Y}MID  {Z}'
 
-        hit = abs(score) >= thresh > 0
-        sc  = f'{G if hit else Z}{score:>7.3f}{Z}'
-        rows.append(f'  {tf:<5}'
-                    f' {sc} {thresh:>6.3f}'
-                    f' {phase:>6.3f} {trough_ph:>6.3f} {peak_ph:>6.3f}'
-                    f' {kdv_bal:>7.3f}'
-                    f' {obi:>7.3f}'
-                    f'  {state_str}')
+        sc_hit  = abs(score) >= thresh > 0
+        obi_hit = abs(obi)   >= obi_need > 0
+        sc_s  = f'{G if sc_hit  else Z}{score:+.3f}{Z}'
+        obi_s = f'{G if obi_hit else Z}{obi:+.3f}{Z}'
+
+        rows.append(
+            f'  {B}{tf:<4}{Z} {st}'
+            f'  sc={sc_s}(n={thresh:.3f})'
+            f'  ph={phase:+.3f}[{trough_ph:.2f}/{peak_ph:.2f}]'
+            f'  vel={vel_tf:+.2f}'
+        )
+        rows.append(
+            f'       kdv={kdv_bal:.3f}(rv={kdv_rev:.3f} cn={kdv_con:.3f})'
+            f'  obi={obi_s}(n={obi_need:.3f})'
+            f'  al={al:.3f}'
+        )
 
     rows.append(f'{C}{"─"*W}{Z}')
 
