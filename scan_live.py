@@ -321,6 +321,7 @@ def main():
                     'new_this_run': len(new_sigs),
                     'live':         getattr(state, 'live', {}),
                     'tf_states':    getattr(state, 'last_tf_states', {}),
+                    'tf_physics':   getattr(state, 'tf_live', {}),
                     'shelves':      getattr(state, 'session_shelves', []),
                     'knife':        knife_data,
                     'ob_depth':     ob_depth,

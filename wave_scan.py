@@ -2044,7 +2044,8 @@ class ScanState:
                  'last_cont_up_px', 'last_cont_dn_px',
                  'last_peak_px', 'last_trough_px',
                  'last_range_hi_px', 'last_range_lo_px',
-                 'last_range_state', 'session_shelves', 'live')
+                 'last_range_state', 'session_shelves', 'live',
+                 'tf_hists', 'tf_accums', 'tf_live')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -2084,9 +2085,95 @@ class ScanState:
         self.last_range_state = None   # 'sup'|'res' — last ranging side fired
         self.session_shelves  = []
         self.live             = {}     # current-second indicator snapshot for JSON output
+        # Per-TF physics — each TF has its own history, accumulator, and live snapshot.
+        # Histories update only at TF bar close; thresholds are frozen between rollovers.
+        _TFS = ('5m', '15m', '1h', '4h')
+        self.tf_hists  = {
+            tf: {'scores': [], 'phases': [], 'obi': [], 'kdv_bals': [],
+                 'last_ts': 0, 'thresh': 0.0, 'peak_ph': 0.0, 'trough_ph': 0.0}
+            for tf in _TFS
+        }
+        self.tf_accums = {tf: HydraulicAccumulator() for tf in _TFS}
+        self.tf_live   = {
+            tf: {'score': 0.0, 'phase': 0.0, 'kdv_bal': 0.0, 'obi': 0.0,
+                 'thresh': 0.0, 'peak_ph': 0.0, 'trough_ph': 0.0}
+            for tf in _TFS
+        }
 
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
+
+_TF_BARS = {'5m': 30, '15m': 20, '1h': 12, '4h': 6}  # lookback per TF for physics
+
+
+def _run_tf_physics(bars: list, accum) -> dict:
+    """Run fusion + WF on a TF's bars. Returns {score, phase, kdv_bal, obi}."""
+    if len(bars) < 10:
+        return {'score': 0.0, 'phase': 0.0, 'kdv_bal': 0.0, 'obi': 0.0}
+    try:
+        c, o, v, t = _bars2arr(bars)
+        prices = (c + o) / 2.0
+        fus     = fusion.run(prices, o, c, v, t, accum, [], [])
+        score   = float(fus['score'])
+        kdv_bal = float(abs(fus['soliton'].get('balance', 0.0)))
+        obi_raw = fus.get('obi', {})
+        obi_val = float(obi_raw.get('obi', 0.0) if isinstance(obi_raw, dict) else obi_raw or 0.0)
+        phase   = float(WF.run(c, entry=float(c[-1]),
+                               direction=1 if score >= 0 else -1
+                               )['components'].get('micro', {}).get('phase', 0.0))
+        return {'score': score, 'phase': phase, 'kdv_bal': kdv_bal, 'obi': obi_val}
+    except Exception:
+        return {'score': 0.0, 'phase': 0.0, 'kdv_bal': 0.0, 'obi': 0.0}
+
+
+def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
+    """
+    Run physics on this TF's bars, append to its history, recompute its thresholds.
+    Called only when a new bar appears for this TF (i.e. at TF bar close).
+    """
+    n    = _TF_BARS.get(tf, 20)
+    snap = bars[-n:] if len(bars) >= n else bars
+    ph   = _run_tf_physics(snap, state.tf_accums[tf])
+
+    hist = state.tf_hists[tf]
+    hist['scores'].append(abs(ph['score']))
+    hist['phases'].append(ph['phase'])
+    hist['obi'].append(ph['obi'])
+    hist['kdv_bals'].append(ph['kdv_bal'])
+    hist['last_ts'] = bars[-1]['ts']
+
+    # Recompute this TF's thresholds from its own distribution
+    dummy_aligns = [0.5] * len(hist['scores'])
+    thr = _thresholds(hist['scores'], hist['phases'], hist['obi'],
+                      hist['kdv_bals'], dummy_aligns)
+    hist['thresh']   = thr[0]
+    hist['peak_ph']  = thr[1]
+    hist['trough_ph']= thr[2]
+
+    state.tf_live[tf] = {
+        'score':    ph['score'],
+        'phase':    ph['phase'],
+        'kdv_bal':  ph['kdv_bal'],
+        'obi':      ph['obi'],
+        'thresh':   thr[0],
+        'peak_ph':  thr[1],
+        'trough_ph':thr[2],
+    }
+
+
+def _check_tf_rollovers(state: 'ScanState'):
+    """After each 1m close, detect which higher TFs have a new bar and update their physics."""
+    tf_map = [
+        ('5m',  state.tf5m),
+        ('15m', state.tf15m),
+        ('1h',  state.tf1h),
+        ('4h',  state.tf4h),
+    ]
+    for tf, bars in tf_map:
+        if not bars:
+            continue
+        if bars[-1]['ts'] != state.tf_hists[tf]['last_ts']:
+            _update_tf_hist(state, tf, bars)
 
 
 def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
@@ -2115,6 +2202,47 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
     print(f'[seed] HTF: {len(state.tf5m)}x5m  {len(state.tf15m)}x15m  '
           f'{len(state.tf1h)}x1h  {len(state.tf4h)}x4h'
           f'  (1h-seed={len(h1)})', flush=True)
+
+    # Seed per-TF physics histories — rolling pass over each TF's closed bars.
+    # Each bar's window gets its own physics run so the threshold distribution
+    # is populated from the session's actual TF-scale behavior at startup.
+    _seed_tf_hists = [
+        ('5m',  state.tf5m,  30),
+        ('15m', state.tf15m, 20),
+        ('1h',  state.tf1h,  12),
+        ('4h',  state.tf4h,   6),
+    ]
+    for tf, bars, win in _seed_tf_hists:
+        if len(bars) < win:
+            continue
+        for i in range(win, len(bars) + 1):
+            snap = bars[i - win:i]
+            ph_s = _run_tf_physics(snap, state.tf_accums[tf])
+            hist = state.tf_hists[tf]
+            hist['scores'].append(abs(ph_s['score']))
+            hist['phases'].append(ph_s['phase'])
+            hist['obi'].append(ph_s['obi'])
+            hist['kdv_bals'].append(ph_s['kdv_bal'])
+        if bars:
+            state.tf_hists[tf]['last_ts'] = bars[-1]['ts']
+        # Compute initial threshold from seeded distribution
+        hist = state.tf_hists[tf]
+        dummy = [0.5] * len(hist['scores'])
+        thr = _thresholds(hist['scores'], hist['phases'], hist['obi'],
+                          hist['kdv_bals'], dummy)
+        hist['thresh']    = thr[0]
+        hist['peak_ph']   = thr[1]
+        hist['trough_ph'] = thr[2]
+        if bars:
+            ph_last = _run_tf_physics(bars[-win:], state.tf_accums[tf])
+            state.tf_live[tf] = {
+                'score':    ph_last['score'],  'phase':   ph_last['phase'],
+                'kdv_bal':  ph_last['kdv_bal'],'obi':     ph_last['obi'],
+                'thresh':   thr[0], 'peak_ph': thr[1], 'trough_ph': thr[2],
+            }
+    print(f'[seed] TF physics: '
+          + '  '.join(f"{tf}={len(state.tf_hists[tf]['scores'])}pts"
+                      for tf, _, _ in _seed_tf_hists), flush=True)
 
     c, o, v, t = _bars2arr(seed_bars)
     prices = (c + o) / 2.0
@@ -2280,6 +2408,7 @@ def _append_closed_1m(state: 'ScanState', s1_by_sec: dict, min_sec: int):
     })
     state.appended_min_ts.add(min_sec)
     _update_htf(state)
+    _check_tf_rollovers(state)
 
 
 def scan_incremental(state: ScanState, from_sec: int = 0,
