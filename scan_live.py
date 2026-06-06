@@ -332,8 +332,8 @@ def main():
                         'tf10m': _agg_tf(getattr(state, 'closed_1m', []), 10, keep=20),
                         # 15m/30m/45m/1h/4h — live edge snaps on 5m close (live 5m bar included)
                         'tf15m': (state.tf15m[-20:]      if getattr(state, 'tf15m', None) else []),
-                        'tf30m': _agg_tf(tf5m_live, 6,  keep=12),
-                        'tf45m': _agg_tf(tf5m_live, 9,  keep=10),
+                        'tf30m': (state.tf30m[-12:]      if getattr(state, 'tf30m', None) else []),
+                        'tf45m': (state.tf45m[-10:]      if getattr(state, 'tf45m', None) else []),
                         'tf1h':  (state.tf1h[-12:]       if getattr(state, 'tf1h',  None) else []),
                         'tf4h':  (state.tf4h[-6:]        if getattr(state, 'tf4h',  None) else []),
                     },

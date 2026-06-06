@@ -2036,7 +2036,7 @@ class ScanState:
                  'hist_scores', 'hist_phases', 'hist_obi', 'hist_kdv_bals',
                  'hist_aligns', 'hist_signed_scores', 'hist_dk_ds', 'hist_dk_fos',
                  'prev_kdv_global', 'sig_count',
-                 'last_sec', 'tf1m', 'tf5m', 'tf15m', 'tf1h', 'tf4h',
+                 'last_sec', 'tf1m', 'tf5m', 'tf10m', 'tf15m', 'tf30m', 'tf45m', 'tf1h', 'tf4h',
                  'tf1h_seed',
                  's1_by_sec', 'ob_by_sec', 'knife_buf', 'signals',
                  'appended_min_ts', 'last_align', 'last_res_dir', 'last_htf_sup',
@@ -2064,7 +2064,7 @@ class ScanState:
         self.prev_kdv_global  = 0
         self.sig_count        = 0
         self.last_sec         = 0
-        self.tf1m = self.tf5m = self.tf15m = self.tf1h = self.tf4h = []
+        self.tf1m = self.tf5m = self.tf10m = self.tf15m = self.tf30m = self.tf45m = self.tf1h = self.tf4h = []
         self.tf1h_seed        = []   # historical 1h candles — base layer for 1h/4h
         self.s1_by_sec        = {}
         self.ob_by_sec        = {}
@@ -2087,7 +2087,7 @@ class ScanState:
         self.live             = {}     # current-second indicator snapshot for JSON output
         # Per-TF physics — each TF has its own history, accumulator, and live snapshot.
         # Histories update only at TF bar close; thresholds are frozen between rollovers.
-        _TFS = ('5m', '15m', '1h', '4h')
+        _TFS = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
         self.tf_hists  = {
             tf: {'scores': [], 'phases': [], 'obi': [], 'kdv_bals': [],
                  'last_ts': 0, 'thresh': 0.0, 'peak_ph': 0.0, 'trough_ph': 0.0}
@@ -2103,7 +2103,10 @@ class ScanState:
 
 _LIVE_MINS = 2    # minutes of tick-by-tick on first call (history uses 1m candles)
 
-_TF_BARS = {'5m': 30, '15m': 20, '1h': 12, '4h': 6}  # lookback per TF for physics
+_TF_BARS = {
+    '1m': 30, '5m': 30, '10m': 20, '15m': 20,
+    '30m': 12, '45m': 10, '1h': 12, '4h': 6,
+}
 
 
 def _run_tf_physics(bars: list, accum) -> dict:
@@ -2162,10 +2165,14 @@ def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
 
 
 def _check_tf_rollovers(state: 'ScanState'):
-    """After each 1m close, detect which higher TFs have a new bar and update their physics."""
+    """After each 1m close, detect which TFs have a new bar and update their physics."""
     tf_map = [
+        ('1m',  state.closed_1m),
         ('5m',  state.tf5m),
+        ('10m', state.tf10m),
         ('15m', state.tf15m),
+        ('30m', state.tf30m),
+        ('45m', state.tf45m),
         ('1h',  state.tf1h),
         ('4h',  state.tf4h),
     ]
@@ -2207,10 +2214,14 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
     # Each bar's window gets its own physics run so the threshold distribution
     # is populated from the session's actual TF-scale behavior at startup.
     _seed_tf_hists = [
-        ('5m',  state.tf5m,  30),
-        ('15m', state.tf15m, 20),
-        ('1h',  state.tf1h,  12),
-        ('4h',  state.tf4h,   6),
+        ('1m',  state.closed_1m, 30),
+        ('5m',  state.tf5m,      30),
+        ('10m', state.tf10m,     20),
+        ('15m', state.tf15m,     20),
+        ('30m', state.tf30m,     12),
+        ('45m', state.tf45m,     10),
+        ('1h',  state.tf1h,      12),
+        ('4h',  state.tf4h,       6),
     ]
     for tf, bars, win in _seed_tf_hists:
         if len(bars) < win:
@@ -2379,8 +2390,11 @@ def _update_htf(state: 'ScanState'):
     bars = state.closed_1m
     if not bars:
         return
-    state.tf5m  = _agg(bars, 300_000)
-    state.tf15m = _agg(bars, 900_000)
+    state.tf5m  = _agg(bars,  300_000)
+    state.tf10m = _agg(bars,  600_000)
+    state.tf15m = _agg(bars,  900_000)
+    state.tf30m = _agg(state.tf5m,  1_800_000)
+    state.tf45m = _agg(state.tf5m,  2_700_000)
     live_1h = _agg(bars, 3_600_000)
     if state.tf1h_seed:
         live_ts    = {b['ts'] for b in live_1h}
