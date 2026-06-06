@@ -8,10 +8,14 @@ no sleeping past the data. Pushes results to data/signals branch on new signal
 or every 60 seconds.
 
 Usage:
-    python scan_live.py
+    python scan_live.py [--tf 1m 5m 15m 1h]
+
+    --tf   Timeframes to display on screen (default: 1m 5m 15m 1h).
+           All 8 TFs are always saved to the repo JSON regardless.
+           Valid: 1m 5m 10m 15m 30m 45m 1h 4h
 """
 
-import gzip, io, json, os, re, subprocess, sys, time
+import argparse, gzip, io, json, os, re, subprocess, sys, time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -30,7 +34,70 @@ POLL_S        = 0.05  # mtime poll cadence — 50 ms
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; Z='\033[0m'
+B='\033[1m'   # bold
 def log(m, c=Z): print(f"{c}[scan] {m}{Z}", flush=True)
+
+VALID_TFS = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
+_dash_lines = 0   # how many lines the dashboard printed last time
+
+
+def _dashboard(state, tfs, recent_signals):
+    """Redraw the live TF dashboard in place on the terminal."""
+    global _dash_lines
+    if _dash_lines:
+        # Move cursor up to overwrite previous dashboard
+        print(f'\033[{_dash_lines}A\033[J', end='', flush=True)
+
+    live     = getattr(state, 'live', {})
+    tf_live  = getattr(state, 'tf_live', {})
+    price    = live.get('price', 0.0)
+    dk       = live.get('dk', '?')
+    vel      = live.get('vel', 0.0)
+    now      = datetime.now(timezone.utc).strftime('%H:%M:%S')
+
+    rows = []
+    rows.append(f'{B}{C}{"─"*52}{Z}')
+    rows.append(f'{B}{C}  BTC ${price:>10,.2f}   dk={dk:<6} vel={vel:+.3f}   {now}{Z}')
+    rows.append(f'{C}{"─"*52}{Z}')
+    rows.append(f'  {"TF":<5} {"SCORE":>7} {"NEED":>7} {"PHASE":>7} {"KDV":>7} {"OBI":>7}  STATE')
+    rows.append(f'  {"─"*5} {"─"*7} {"─"*7} {"─"*7} {"─"*7} {"─"*7}  {"─"*9}')
+
+    for tf in tfs:
+        lv        = tf_live.get(tf, {})
+        score     = lv.get('score',     0.0)
+        thresh    = lv.get('thresh',    0.0)
+        phase     = lv.get('phase',     0.0)
+        peak_ph   = lv.get('peak_ph',   0.75)
+        trough_ph = lv.get('trough_ph', -0.75)
+        kdv_bal   = lv.get('kdv_bal',   0.0)
+        obi       = lv.get('obi',       0.0)
+
+        if phase >= peak_ph:
+            state_str = f'{R}PEAK  ▼{Z}'
+        elif phase <= trough_ph:
+            state_str = f'{G}TROUGH▲{Z}'
+        else:
+            state_str = f'{Y}MID    {Z}'
+
+        hit = abs(score) >= thresh > 0
+        sc  = f'{G if hit else Z}{score:>7.3f}{Z}'
+        rows.append(f'  {tf:<5} {sc} {thresh:>7.3f} {phase:>7.3f} {kdv_bal:>7.3f} {obi:>7.3f}  {state_str}')
+
+    rows.append(f'{C}{"─"*52}{Z}')
+
+    if recent_signals:
+        for sig in recent_signals[-3:]:
+            d   = sig.get('dir', 0)
+            lbl = sig.get('label', sig.get('stype', '?'))
+            px  = sig.get('price', 0.0)
+            t   = sig.get('time', '')
+            c   = G if d > 0 else R
+            rows.append(f'  {c}{"▲" if d>0 else "▼"} {lbl:<14} {t}  ${px:,.2f}{Z}')
+        rows.append('')
+
+    out = '\n'.join(rows) + '\n'
+    print(out, end='', flush=True)
+    _dash_lines = out.count('\n')
 
 
 def _agg_tf(bars_1m, n, keep=20):
@@ -209,6 +276,15 @@ def _startup_backfill():
 
 
 def main():
+    ap = argparse.ArgumentParser(description='scan_live — BTC signal scanner')
+    ap.add_argument('--tf', nargs='+', default=['1m', '5m', '15m', '1h'],
+                    metavar='TF',
+                    help=f'Timeframes to display ({", ".join(VALID_TFS)})')
+    args = ap.parse_args()
+    display_tfs = [t for t in args.tf if t in VALID_TFS]
+    if not display_tfs:
+        display_tfs = ['1m', '5m', '15m', '1h']
+
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     _startup_backfill()
@@ -217,7 +293,7 @@ def main():
     import wave_scan as _ws
 
     state = _ws.ScanState()
-    log(f"Starting — event-driven on {LIVE_FILE.name}", C)
+    log(f"Starting — display: {' '.join(display_tfs)}  |  event-driven on {LIVE_FILE.name}", C)
 
     last_push_time = 0.0
     last_clean_out = ''
@@ -253,6 +329,8 @@ def main():
 
             if clean_out:
                 last_clean_out = clean_out
+
+            _dashboard(state, display_tfs, state.signals)
 
             if new_sigs:
                 last_str = (f"{'LONG' if last['dir']>0 else 'SHORT'} "
