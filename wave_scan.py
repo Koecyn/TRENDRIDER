@@ -31,8 +31,21 @@ from physics.signals import HydraulicAccumulator
 REPO         = os.path.dirname(__file__)
 SUSTAIN_S    = 1    # fire on first qualifying second — predict, not follow
 SUSTAIN_FLIP = 1    # when KdV flips, 1 confirmed second is enough (the flip IS confirmation)
-PEAK_PH      =  0.75  # fallback per-TF threshold (used only when composite unavailable)
+PEAK_PH      =  0.75  # fallback (used only when composite unavailable)
 TROUGH_PH    = -0.75
+
+# Per-TF phase thresholds: longer TF waves take more time to complete their
+# cycle, so the reliable peak/trough sits closer to the ±1 extreme.
+_TF_PHASE_THRESH = {
+    '1m':  ( 0.72, -0.72),
+    '5m':  ( 0.75, -0.75),
+    '10m': ( 0.75, -0.75),
+    '15m': ( 0.76, -0.76),
+    '30m': ( 0.77, -0.77),
+    '45m': ( 0.78, -0.78),
+    '1h':  ( 0.80, -0.80),
+    '4h':  ( 0.85, -0.85),
+}
 # Composite multi-TF phase weights — same as physics/resonance._TF_WEIGHTS.
 # composite = Σ(w_tf * phase_tf) ranges -1..+1.
 # +1.0 means EVERY timeframe has its wave at the crest simultaneously.
@@ -2153,21 +2166,22 @@ def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
     hist['peak_ph']  = thr[1]
     hist['trough_ph']= thr[2]
 
+    _pk, _tr = _TF_PHASE_THRESH.get(tf, (PEAK_PH, TROUGH_PH))
+    _vb = bars[-6:] if len(bars) >= 6 else bars
     state.tf_live[tf] = {
         'score':         ph['score'],
         'phase':         ph['phase'],
         'kdv_bal':       ph['kdv_bal'],
         'obi':           ph['obi'],
         'thresh':        thr[0],
-        'peak_ph':       thr[1],
-        'trough_ph':     thr[2],
+        'peak_ph':       _pk,
+        'trough_ph':     _tr,
         'obi_need':      thr[3],
         'kdv_need_rev':  thr[4],
         'kdv_need_cont': thr[5],
         'align_need':    thr[6],
-        'vel':           round((bars[-1]['close'] - bars[-6]['close'])
-                               / max(len(bars[-6:]) - 1, 1), 4)
-                         if len(bars) >= 2 else 0.0,
+        'vel':           round((_vb[-1]['close'] - _vb[0]['close'])
+                               / max(len(_vb) - 1, 1), 4) if len(_vb) >= 2 else 0.0,
     }
 
 
@@ -2253,21 +2267,22 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         hist['trough_ph'] = thr[2]
         if bars:
             ph_last = _run_tf_physics(bars[-win:], state.tf_accums[tf])
+            _pk, _tr = _TF_PHASE_THRESH.get(tf, (PEAK_PH, TROUGH_PH))
+            _vb = bars[-6:] if len(bars) >= 6 else bars
             state.tf_live[tf] = {
                 'score':         ph_last['score'],
                 'phase':         ph_last['phase'],
                 'kdv_bal':       ph_last['kdv_bal'],
                 'obi':           ph_last['obi'],
                 'thresh':        thr[0],
-                'peak_ph':       thr[1],
-                'trough_ph':     thr[2],
+                'peak_ph':       _pk,
+                'trough_ph':     _tr,
                 'obi_need':      thr[3],
                 'kdv_need_rev':  thr[4],
                 'kdv_need_cont': thr[5],
                 'align_need':    thr[6],
-                'vel':           round((bars[-1]['close'] - bars[-6]['close'])
-                                       / max(len(bars[-6:]) - 1, 1), 4)
-                                 if len(bars) >= 2 else 0.0,
+                'vel':           round((_vb[-1]['close'] - _vb[0]['close'])
+                                       / max(len(_vb) - 1, 1), 4) if len(_vb) >= 2 else 0.0,
             }
     print(f'[seed] TF physics: '
           + '  '.join(f"{tf}={len(state.tf_hists[tf]['scores'])}pts"

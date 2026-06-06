@@ -503,8 +503,14 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                         conc = round((bv2-av2)/(bv2+av2), 3) if bv2+av2 else 0.0
                         spr  = round(asks[0][0]-bids[0][0], 2) if bids and asks else 99.0
                         buf  = state.knife_buf
-                        vel  = round(buf._vel(), 3)
                         br, ar = buf._flow_rates()
+                        # micro_window gives bar-close velocity — never zeros on
+                        # quiet ticks the way buf._vel() does (which needs ≥2 trades
+                        # within VEL_WIN_MS).
+                        _mw = getattr(state, 'micro_window', [])
+                        _nv = min(10, len(_mw))
+                        vel  = round((_mw[-1]['close'] - _mw[-_nv]['close'])
+                                     / max(_nv - 1, 1), 4) if _nv > 1 else round(buf._vel(), 4)
                         ds   = round(buf._decay_score(), 3)
                         fos  = round(buf._floor_score(conc, spr, mid=mid, bids=bids, asks=asks), 3)
                         thr  = _ws._thresholds(
