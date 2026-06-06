@@ -216,12 +216,68 @@ def main():
             if new_sigs or (now - last_push_time >= PUSH_INTERVAL):
                 SIGNALS_TXT.write_text(last_clean_out or '(no signals yet)\n',
                                        encoding='utf-8')
+                # ── order book depth snapshot ────────────────────────────
+                ob_depth = {}
+                ob_by_sec = getattr(state, 'ob_by_sec', {})
+                if ob_by_sec:
+                    latest_ob = ob_by_sec.get(max(ob_by_sec.keys()))
+                    if latest_ob and len(latest_ob) == 2:
+                        bids, asks = latest_ob
+                        ob_depth['bids'] = [[round(p,2), round(q,4)] for p,q in (bids[:20] if bids else [])]
+                        ob_depth['asks'] = [[round(p,2), round(q,4)] for p,q in (asks[:20] if asks else [])]
+                        if bids and asks:
+                            ob_depth['mid']  = round((asks[0][0] + bids[0][0]) / 2, 2)
+                            ob_depth['spr']  = round(asks[0][0] - bids[0][0], 2)
+                            for depth in [5, 10, 20]:
+                                b = bids[:depth]; a = asks[:depth]
+                                bv = sum(x[1] for x in b); av = sum(x[1] for x in a)
+                                tot = bv + av
+                                ob_depth[f'obi{depth}'] = round((bv - av) / tot, 4) if tot > 0 else 0
+                            def _wall(levels):
+                                if not levels: return None
+                                avg = sum(x[1] for x in levels) / len(levels)
+                                for i, (p, q) in enumerate(levels):
+                                    if q >= avg:
+                                        return {'lvl': i, 'price': round(p,2), 'qty': round(q,4)}
+                                return None
+                            ob_depth['bid_wall'] = _wall(bids[:20])
+                            ob_depth['ask_wall'] = _wall(asks[:20])
+                            # total liquidity each side (20 levels)
+                            ob_depth['bid_liq'] = round(sum(x[1] for x in bids[:20]), 4)
+                            ob_depth['ask_liq'] = round(sum(x[1] for x in asks[:20]), 4)
+
+                # ── knife decay buffer ───────────────────────────────────
+                kb = getattr(state, 'knife_buf', None)
+                knife_data = {}
+                if kb:
+                    knife_data = {
+                        'state':    getattr(kb, 'state', 0),
+                        'label':    getattr(kb, 'label', '?'),
+                        'decay_sc': round(getattr(kb, 'decay_score', 0), 4),
+                        'floor_sc': round(getattr(kb, 'floor_score', 0), 4),
+                        'lows':     getattr(kb, 'lows', []),
+                    }
+
+                # ── history arrays (last 30 bars each) ──────────────────
+                history = {
+                    'obi':   [round(x,4) for x in getattr(state, 'hist_obi',      [])[-30:]],
+                    'score': [round(x,4) for x in getattr(state, 'hist_scores',    [])[-30:]],
+                    'kdv':   [round(x,4) for x in getattr(state, 'hist_kdv_bals',  [])[-30:]],
+                    'align': [round(x,4) for x in getattr(state, 'hist_aligns',    [])[-30:]],
+                    'n_bars': len(getattr(state, 'hist_scores', [])),
+                }
+
                 summary = {
                     'signal_count': n,
                     'signals':      state.signals,
                     'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'new_this_run': len(new_sigs),
                     'live':         getattr(state, 'live', {}),
+                    'tf_states':    getattr(state, 'last_tf_states', {}),
+                    'shelves':      getattr(state, 'session_shelves', []),
+                    'knife':        knife_data,
+                    'ob_depth':     ob_depth,
+                    'history':      history,
                     'timeframes': {
                         'tf5m':  (state.tf5m[-30:]  if getattr(state, 'tf5m',  None) else []),
                         'tf15m': (state.tf15m[-20:] if getattr(state, 'tf15m', None) else []),
