@@ -120,12 +120,16 @@ def _dashboard(state, tfs, recent_signals):
     kdv_g    = live.get('kdv_bal',  0.0)
     kdv_rev  = live.get('kdv_need_rev',  0.0)
     kdv_con  = live.get('kdv_need_cont', 0.0)
-    res_al   = live.get('res_align', 0.0)
-    res_dir  = live.get('res_dir',   0)
-    htf_sup  = live.get('htf_sup',   False)
-    micro_ph = live.get('micro_ph',  0.0)
+    res_al   = live.get('res_align',     0.0)
+    res_dir  = live.get('res_dir',       0)
+    htf_sup  = live.get('htf_sup',       False)
+    micro_ph = live.get('micro_ph',      0.0)
+    mph_pk   = live.get('micro_ph_peak',   0.75)
+    mph_tr   = live.get('micro_ph_trough', -0.75)
+    align_n  = live.get('align_need',    0.0)
+    htf_bars = live.get('htf_bars',      '')
 
-    W = 62
+    W = 64
     rows = ['\033[2J\033[H']   # clear screen, cursor to home
     rows.append(f'{B}{C}{"─"*W}{Z}')
     rows.append(f'{B}{C}  BTC ${price:>11,.2f}   {now_s}   dk={dk}{Z}')
@@ -138,12 +142,20 @@ def _dashboard(state, tfs, recent_signals):
     sc_ok = abs(score_g) >= score_n > 0
     rows.append(f'  score={G if sc_ok else Z}{score_g:+.4f}{Z}(n={score_n:.3f})'
                 f'  kdv={kdv_g:.4f}  rev_n={kdv_rev:.3f}  con_n={kdv_con:.3f}')
-    # line 3: decay / floor / resonance / HTF
-    sup_str = f'{G}▲HTF-SUP{Z}' if htf_sup else f'{Y}no-sup{Z}'
+    # line 3: micro phase with its own thresholds / alignment
+    mok = micro_ph <= mph_tr or micro_ph >= mph_pk
+    rows.append(f'  μph={G if mok else Z}{micro_ph:+.4f}{Z}'
+                f'[trg:{mph_tr:.3f} pk:{mph_pk:.3f}]'
+                f'  align={res_al:.3f}(n={align_n:.3f})')
+    # line 4: decay / floor / flow rates / HTF support
+    sup_str = f'{G}▲SUP{Z}' if htf_sup else f'{Y}no-sup{Z}'
     dir_str = f'{G}▲{Z}' if res_dir > 0 else (f'{R}▼{Z}' if res_dir < 0 else '─')
     rows.append(f'  ds={decay_sc:.3f}  fos={floor_sc:.3f}'
                 f'  bf={bf:+.4f}  af={af:+.4f}'
-                f'  res={res_al:.3f}{dir_str}  {sup_str}')
+                f'  {sup_str}{dir_str}')
+    # line 5: HTF bar counts
+    if htf_bars:
+        rows.append(f'  htf: {htf_bars}')
 
     # ── per-TF grid ───────────────────────────────────────────────────────
     rows.append(f'{C}{"─"*W}{Z}')
@@ -476,66 +488,68 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                 finally:
                     sys.stdout = _old
 
+                # ── full live dict every tick — dashboard always has fresh data ──
+                live = {}
+                try:
+                    if state.s1_by_sec:
+                        last_sec = max(state.s1_by_sec)
+                        bar  = state.s1_by_sec[last_sec]
+                        bids, asks = bar['ob']
+                        mid  = bar['close']
+                        bv   = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
+                        obi  = round((bv-av)/(bv+av), 3) if bv+av else 0.0
+                        bv2  = sum(q for p,q in bids if abs(p-mid)<=25)
+                        av2  = sum(q for p,q in asks if abs(p-mid)<=25)
+                        conc = round((bv2-av2)/(bv2+av2), 3) if bv2+av2 else 0.0
+                        spr  = round(asks[0][0]-bids[0][0], 2) if bids and asks else 99.0
+                        buf  = state.knife_buf
+                        vel  = round(buf._vel(), 3)
+                        br, ar = buf._flow_rates()
+                        ds   = round(buf._decay_score(), 3)
+                        fos  = round(buf._floor_score(conc, spr, mid=mid, bids=bids, asks=asks), 3)
+                        thr  = _ws._thresholds(
+                            state.hist_scores, state.hist_phases,
+                            state.hist_obi, state.hist_kdv_bals,
+                            state.hist_aligns)
+                        thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = thr
+                        live = {
+                            'at':              datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
+                            'price':           round(mid, 2),
+                            'obi':             obi,
+                            'obi_need':        round(obi_conf, 3),
+                            'conc':            conc,
+                            'spr':             spr,
+                            'vel':             vel,
+                            'bid_flow':        round(br, 4),
+                            'ask_flow':        round(ar, 4),
+                            'phase':           buf.phase,
+                            'dk':              buf.LABELS.get(buf.state, str(buf.state)),
+                            'decay_sc':        ds,
+                            'floor_sc':        fos,
+                            'score':           round(state.hist_scores[-1], 3) if state.hist_scores else 0.0,
+                            'score_need':      round(thresh, 3),
+                            'kdv_bal':         round(state.hist_kdv_bals[-1], 3) if state.hist_kdv_bals else 0.0,
+                            'kdv_need_rev':    round(gate_rev, 3),
+                            'kdv_need_cont':   round(gate_cont, 3),
+                            'micro_ph':        round(state.hist_phases[-1], 3) if state.hist_phases else 0.0,
+                            'micro_ph_peak':   round(peak_ph, 3),
+                            'micro_ph_trough': round(trough_ph, 3),
+                            'align_need':      round(align_cont, 3),
+                            'res_align':       round(state.last_align, 3),
+                            'res_dir':         state.last_res_dir,
+                            'htf_sup':         state.last_htf_sup,
+                            'htf_bars':        (f'{len(state.tf5m)}x5m {len(state.tf15m)}x15m'
+                                                f' {len(state.tf1h)}x1h {len(state.tf4h)}x4h'),
+                        }
+                        state.live = live   # dashboard reads state.live every redraw
+                except Exception:
+                    live = getattr(state, 'live', {})
+
                 # ── dashboard on every tick ──────────────────────────────
                 _dashboard(state, _tfs, state.signals)
 
                 now = time.time()
                 if new_sigs or (now - last_push_time >= SIG_PUSH_S):
-                    live = {}
-                    try:
-                        if state.s1_by_sec:
-                            last_sec = max(state.s1_by_sec)
-                            bar  = state.s1_by_sec[last_sec]
-                            bids, asks = bar['ob']
-                            mid  = bar['close']
-                            bv   = sum(q for _,q in bids[:5]); av = sum(q for _,q in asks[:5])
-                            obi  = round((bv-av)/(bv+av), 3) if bv+av else 0.0
-                            bv2  = sum(q for p,q in bids if abs(p-mid)<=25)
-                            av2  = sum(q for p,q in asks if abs(p-mid)<=25)
-                            conc = round((bv2-av2)/(bv2+av2), 3) if bv2+av2 else 0.0
-                            spr  = round(asks[0][0]-bids[0][0], 2) if bids and asks else 99.0
-                            buf  = state.knife_buf
-                            vel  = round(buf._vel(), 3)
-                            br, ar = buf._flow_rates()
-                            ds   = round(buf._decay_score(), 3)
-                            fos  = round(buf._floor_score(conc, spr, mid=mid, bids=bids, asks=asks), 3)
-                            thr = _ws._thresholds(
-                                state.hist_scores, state.hist_phases,
-                                state.hist_obi, state.hist_kdv_bals,
-                                state.hist_aligns)
-                            thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = thr
-                            live = {
-                                'at':        datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
-                                'price':     round(mid, 2),
-                                'obi':       obi,
-                                'obi_need':  round(obi_conf, 3),
-                                'conc':      conc,
-                                'spr':       spr,
-                                'vel':       vel,
-                                'bid_flow':  round(br, 4),
-                                'ask_flow':  round(ar, 4),
-                                'phase':     buf.phase,
-                                'dk':        buf.LABELS.get(buf.state, str(buf.state)),
-                                'decay_sc':  ds,
-                                'floor_sc':  fos,
-                                'score':     round(state.hist_scores[-1], 3) if state.hist_scores else None,
-                                'score_need': round(thresh, 3),
-                                'kdv_bal':   round(state.hist_kdv_bals[-1], 3) if state.hist_kdv_bals else None,
-                                'kdv_need_rev':  round(gate_rev, 3),
-                                'kdv_need_cont': round(gate_cont, 3),
-                                'micro_ph':  round(state.hist_phases[-1], 3) if state.hist_phases else None,
-                                'micro_ph_peak':   round(peak_ph, 3),
-                                'micro_ph_trough': round(trough_ph, 3),
-                                'align_need': round(align_cont, 3),
-                                'res_align':  round(state.last_align, 3),
-                                'res_dir':    state.last_res_dir,
-                                'htf_sup':    state.last_htf_sup,
-                                'htf_bars':   f'{len(state.tf5m)}x5m {len(state.tf15m)}x15m {len(state.tf1h)}x1h {len(state.tf4h)}x4h',
-                            }
-                            # make richer live available to dashboard on next tick
-                            state.live = live
-                    except Exception:
-                        pass
 
                     # ── order book depth snapshot ────────────────────────
                     ob_depth = {}
@@ -546,7 +560,6 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                             _ob  = _bar.get('ob', ([], []))
                             _bids, _asks = (_ob if len(_ob) == 2 else ([], []))
                             if _bids and _asks:
-                                _mid = _bar['close']
                                 ob_depth['bids'] = [[round(p,2), round(q,4)] for p,q in _bids[:20]]
                                 ob_depth['asks'] = [[round(p,2), round(q,4)] for p,q in _asks[:20]]
                                 ob_depth['mid']  = round((_asks[0][0] + _bids[0][0]) / 2, 2)
@@ -624,12 +637,10 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                         px   = live.get('price', '?')
                         dk_l = live.get('dk', '?')
                         sc   = live.get('score', '?')
-                        vel  = live.get('vel', '?')
                         bars = len(state.closed_1m)
-                        sup  = ' SUP' if state.last_htf_sup else ''
-                        log(f'push ok | ${px:,.2f}  dk={dk_l}  score={sc}  vel={vel}'
-                            f'  htf={len(state.tf5m)}x5m/{len(state.tf1h)}x1h{sup}'
-                            f'  bars={bars}', Y)
+                        sup  = ' SUP' if live.get('htf_sup') else ''
+                        log(f'push ok | ${px:,.2f}  dk={dk_l}  score={sc}'
+                            f'  {live.get("htf_bars","")}{sup}  bars={bars}', Y)
                     last_push_time = time.time()
 
             except Exception:
