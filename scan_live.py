@@ -33,6 +33,27 @@ G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; Z='\033[0m'
 def log(m, c=Z): print(f"{c}[scan] {m}{Z}", flush=True)
 
 
+def _agg_tf(bars_1m, n, keep=20):
+    """Aggregate 1m bars into n-minute bars using sliding window from the end."""
+    if not bars_1m or n <= 1:
+        return bars_1m[-keep:]
+    result = []
+    i = len(bars_1m)
+    while i >= n and len(result) < keep:
+        chunk = bars_1m[i - n:i]
+        result.insert(0, {
+            'ts':        chunk[0]['ts'],
+            'open':      chunk[0]['open'],
+            'high':      max(b['high'] for b in chunk),
+            'low':       min(b['low'] for b in chunk),
+            'close':     chunk[-1]['close'],
+            'volume':    round(sum(b.get('volume', 0) for b in chunk), 6),
+            'taker_buy': round(sum(b.get('taker_buy', b.get('taker', 0)) for b in chunk), 6),
+        })
+        i -= n
+    return result
+
+
 # ── git plumbing push ─────────────────────────────────────────────────────────
 
 def _run(*a, env=None):
@@ -269,10 +290,14 @@ def main():
                     'knife':        knife_data,
                     'ob_depth':     ob_depth,
                     'timeframes': {
-                        'tf5m':  (state.tf5m[-30:]  if getattr(state, 'tf5m',  None) else []),
-                        'tf15m': (state.tf15m[-20:] if getattr(state, 'tf15m', None) else []),
-                        'tf1h':  (state.tf1h[-12:]  if getattr(state, 'tf1h',  None) else []),
-                        'tf4h':  (state.tf4h[-6:]   if getattr(state, 'tf4h',  None) else []),
+                        'tf1m':  (state.closed_1m[-60:]  if getattr(state, 'closed_1m', None) else []),
+                        'tf5m':  (state.tf5m[-30:]       if getattr(state, 'tf5m',  None) else []),
+                        'tf10m': _agg_tf(getattr(state, 'closed_1m', []), 10, keep=20),
+                        'tf15m': (state.tf15m[-20:]      if getattr(state, 'tf15m', None) else []),
+                        'tf30m': _agg_tf(getattr(state, 'closed_1m', []), 30, keep=12),
+                        'tf45m': _agg_tf(getattr(state, 'closed_1m', []), 45, keep=10),
+                        'tf1h':  (state.tf1h[-12:]       if getattr(state, 'tf1h',  None) else []),
+                        'tf4h':  (state.tf4h[-6:]        if getattr(state, 'tf4h',  None) else []),
                     },
                 }
                 SIGNALS_JSON.write_text(json.dumps(summary, indent=2), encoding='utf-8')
