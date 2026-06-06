@@ -162,23 +162,33 @@ def _dashboard(state, tfs, recent_signals):
 
     for tf in active_tfs:
         lv          = tf_live.get(tf, {})
-        score       = lv.get('score',         0.0)
-        thresh      = lv.get('thresh',         0.0)
-        phase       = lv.get('phase',          0.0)
-        peak_ph     = lv.get('peak_ph',        0.75)
-        trough_ph   = lv.get('trough_ph',     -0.75)
-        kdv_bal     = lv.get('kdv_bal',        0.0)
-        kdv_rev     = lv.get('kdv_need_rev',   0.0)
-        kdv_con     = lv.get('kdv_need_cont',  0.0)
-        obi         = lv.get('obi',            0.0)
-        obi_need    = lv.get('obi_need',       0.0)
-        al          = lv.get('align_need',     0.0)
-        vel_tf      = lv.get('vel',            0.0)
+        score       = lv.get('score',        0.0)
+        thresh      = lv.get('thresh',        0.0)
+        phase       = lv.get('phase',         0.0)
+        proj_peak   = lv.get('proj_peak',     0.0)
+        proj_trough = lv.get('proj_trough',   0.0)
+        wave_amp    = lv.get('wave_amp',      0.0)
+        wave_dir    = lv.get('wave_dir',      0)
+        kdv_bal     = lv.get('kdv_bal',       0.0)
+        kdv_rev     = lv.get('kdv_need_rev',  0.0)
+        kdv_con     = lv.get('kdv_need_cont', 0.0)
+        obi         = lv.get('obi',           0.0)
+        obi_need    = lv.get('obi_need',      0.0)
+        al          = lv.get('align_need',    0.0)
+        vel_tf      = lv.get('vel',           0.0)
 
-        if phase >= peak_ph:
+        # State from wave direction + how close price is to projection
+        cur_px = price  # global price from live dict
+        near_pk = proj_peak   > 0 and cur_px >= proj_peak   * 0.998
+        near_tr = proj_trough > 0 and cur_px <= proj_trough * 1.002
+        if wave_dir == 1 and near_pk:
             st = f'{R}PEAK▼{Z}'
-        elif phase <= trough_ph:
+        elif wave_dir == -1 and near_tr:
             st = f'{G}TRGR▲{Z}'
+        elif wave_dir == 1:
+            st = f'{G}UP  ▲{Z}'
+        elif wave_dir == -1:
+            st = f'{R}DN  ▼{Z}'
         else:
             st = f'{Y}MID  {Z}'
 
@@ -186,12 +196,17 @@ def _dashboard(state, tfs, recent_signals):
         obi_hit = abs(obi)   >= obi_need > 0
         sc_s  = f'{G if sc_hit  else Z}{score:+.3f}{Z}'
         obi_s = f'{G if obi_hit else Z}{obi:+.3f}{Z}'
+        dir_s = '▲' if wave_dir == 1 else ('▼' if wave_dir == -1 else '─')
 
         rows.append(
             f'  {B}{tf:<4}{Z} {st}'
             f'  sc={sc_s}(n={thresh:.3f})'
-            f'  ph={phase:+.3f}[{trough_ph:.2f}/{peak_ph:.2f}]'
-            f'  vel={vel_tf:+.2f}'
+            f'  ph={phase:+.3f}'
+            f'  vel={vel_tf:+.1f}'
+        )
+        rows.append(
+            f'       {dir_s} pk=${proj_peak:,.0f}  tr=${proj_trough:,.0f}'
+            f'  amp=${wave_amp:,.0f}'
         )
         rows.append(
             f'       kdv={kdv_bal:.3f}(rv={kdv_rev:.3f} cn={kdv_con:.3f})'

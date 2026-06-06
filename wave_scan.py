@@ -2103,13 +2103,25 @@ class ScanState:
         _TFS = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
         self.tf_hists  = {
             tf: {'scores': [], 'phases': [], 'obi': [], 'kdv_bals': [],
-                 'last_ts': 0, 'thresh': 0.0, 'peak_ph': 0.0, 'trough_ph': 0.0}
+                 'last_ts': 0, 'thresh': 0.0,
+                 # swing projection state
+                 'wave_dir':      0,     # +1 up / -1 down / 0 unknown
+                 'swing_start':   0.0,   # price where current swing began
+                 'swing_extreme': 0.0,   # running high (up) or low (down) of this swing
+                 'prev_amps':     [],    # amplitudes of recent completed swings
+                }
             for tf in _TFS
         }
         self.tf_accums = {tf: HydraulicAccumulator() for tf in _TFS}
         self.tf_live   = {
             tf: {'score': 0.0, 'phase': 0.0, 'kdv_bal': 0.0, 'obi': 0.0,
-                 'thresh': 0.0, 'peak_ph': 0.0, 'trough_ph': 0.0}
+                 'thresh': 0.0,
+                 'proj_peak':   0.0,   # projected peak price (from trough + avg amp)
+                 'proj_trough': 0.0,   # projected trough price (from peak - avg amp)
+                 'wave_amp':    0.0,   # current/recent wave amplitude in $
+                 'wave_dir':    0,     # +1 up / -1 down
+                 'obi_need': 0.0, 'kdv_need_rev': 0.0, 'kdv_need_cont': 0.0,
+                 'align_need': 0.0, 'vel': 0.0}
             for tf in _TFS
         }
 
@@ -2142,6 +2154,82 @@ def _run_tf_physics(bars: list, accum) -> dict:
         return {'score': 0.0, 'phase': 0.0, 'kdv_bal': 0.0, 'obi': 0.0}
 
 
+def _swing_update(hist: dict, bars: list) -> tuple:
+    """
+    Track swing direction and amplitude per TF.  Returns (proj_peak, proj_trough, wave_amp, wave_dir).
+
+    proj_peak   — projected peak price: trough_start + avg_amplitude.
+                  Snaps up to the actual running high when price exceeds the projection.
+    proj_trough — projected trough price: peak_start - avg_amplitude.
+                  Snaps down to the actual running low when price drops below projection.
+
+    Amplitude history grows from completed swings (direction flips) so the
+    projection improves with each cycle.  Falls back to the current bar-range
+    until the first flip is detected.
+    """
+    if len(bars) < 4:
+        rng = max(b['high'] for b in bars) - min(b['low'] for b in bars)
+        mid = bars[-1]['close']
+        return mid + rng, mid - rng, rng, 0
+
+    highs = np.array([b['high'] for b in bars])
+    lows  = np.array([b['low']  for b in bars])
+    n     = max(len(bars) // 3, 1)
+
+    if (np.max(highs[-n:]) > np.max(highs[:n]) and
+            np.min(lows[-n:]) > np.min(lows[:n])):
+        new_dir = 1
+    elif (np.max(highs[-n:]) < np.max(highs[:n]) and
+            np.min(lows[-n:]) < np.min(lows[:n])):
+        new_dir = -1
+    else:
+        new_dir = hist.get('wave_dir', 0) or 1
+
+    prev_dir = hist.get('wave_dir', 0)
+    cur_high = float(np.max(highs[-3:]))
+    cur_low  = float(np.min(lows[-3:]))
+    price    = float(bars[-1]['close'])
+
+    if prev_dir == 0:
+        # First call — initialise from current price
+        hist['wave_dir']      = new_dir
+        hist['swing_start']   = price
+        hist['swing_extreme'] = price
+    elif new_dir != prev_dir:
+        # Direction flipped → completed swing
+        amp = abs(hist['swing_extreme'] - hist['swing_start'])
+        if amp > 0:
+            hist['prev_amps'].append(amp)
+            if len(hist['prev_amps']) > 10:
+                hist['prev_amps'].pop(0)
+        hist['swing_start']   = hist['swing_extreme']
+        hist['swing_extreme'] = cur_high if new_dir == 1 else cur_low
+        hist['wave_dir']      = new_dir
+    else:
+        # Same direction — extend running extreme
+        if new_dir == 1:
+            hist['swing_extreme'] = max(hist['swing_extreme'], cur_high)
+        else:
+            hist['swing_extreme'] = min(hist['swing_extreme'], cur_low)
+
+    avg_amp = float(np.mean(hist['prev_amps'])) if hist['prev_amps'] \
+              else float(np.max(highs) - np.min(lows))
+
+    start = hist['swing_start']
+    ext   = hist['swing_extreme']
+
+    if hist['wave_dir'] == 1:
+        # Upswing: proj_peak snaps to running high, at minimum projects from start
+        proj_peak   = max(ext, start + avg_amp)
+        proj_trough = start          # where we bounced from
+    else:
+        # Downswing: proj_trough snaps to running low
+        proj_trough = min(ext, start - avg_amp)
+        proj_peak   = start          # where we rolled over from
+
+    return round(proj_peak, 2), round(proj_trough, 2), round(avg_amp, 2), hist['wave_dir']
+
+
 def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
     """
     Run physics on this TF's bars, append to its history, recompute its thresholds.
@@ -2166,7 +2254,7 @@ def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
     hist['peak_ph']  = thr[1]
     hist['trough_ph']= thr[2]
 
-    _pk, _tr = _TF_PHASE_THRESH.get(tf, (PEAK_PH, TROUGH_PH))
+    proj_peak, proj_trough, wave_amp, wave_dir = _swing_update(hist, snap)
     _vb = bars[-6:] if len(bars) >= 6 else bars
     state.tf_live[tf] = {
         'score':         ph['score'],
@@ -2174,8 +2262,10 @@ def _update_tf_hist(state: 'ScanState', tf: str, bars: list):
         'kdv_bal':       ph['kdv_bal'],
         'obi':           ph['obi'],
         'thresh':        thr[0],
-        'peak_ph':       _pk,
-        'trough_ph':     _tr,
+        'proj_peak':     proj_peak,
+        'proj_trough':   proj_trough,
+        'wave_amp':      wave_amp,
+        'wave_dir':      wave_dir,
         'obi_need':      thr[3],
         'kdv_need_rev':  thr[4],
         'kdv_need_cont': thr[5],
@@ -2267,7 +2357,8 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
         hist['trough_ph'] = thr[2]
         if bars:
             ph_last = _run_tf_physics(bars[-win:], state.tf_accums[tf])
-            _pk, _tr = _TF_PHASE_THRESH.get(tf, (PEAK_PH, TROUGH_PH))
+            proj_peak, proj_trough, wave_amp, wave_dir = _swing_update(
+                state.tf_hists[tf], bars[-win:] if len(bars) >= win else bars)
             _vb = bars[-6:] if len(bars) >= 6 else bars
             state.tf_live[tf] = {
                 'score':         ph_last['score'],
@@ -2275,8 +2366,10 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
                 'kdv_bal':       ph_last['kdv_bal'],
                 'obi':           ph_last['obi'],
                 'thresh':        thr[0],
-                'peak_ph':       _pk,
-                'trough_ph':     _tr,
+                'proj_peak':     proj_peak,
+                'proj_trough':   proj_trough,
+                'wave_amp':      wave_amp,
+                'wave_dir':      wave_dir,
                 'obi_need':      thr[3],
                 'kdv_need_rev':  thr[4],
                 'kdv_need_cont': thr[5],
