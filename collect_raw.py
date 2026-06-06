@@ -78,20 +78,67 @@ def _dashboard(state, tfs, recent_signals):
         return
     _last_dash_t = now_t
 
-    live      = getattr(state, 'live', {})
-    tf_live   = getattr(state, 'tf_live', {})
-    price     = live.get('price', 0.0)
-    dk        = live.get('dk', '?')
-    vel       = live.get('vel', 0.0)
-    now_s     = datetime.now(timezone.utc).strftime('%H:%M:%S')
+    live    = getattr(state, 'live', {})
+    tf_live = getattr(state, 'tf_live', {})
+    now_s   = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
-    rows = []
-    rows.append(f'\033[2J\033[H')   # clear screen, cursor to home
-    rows.append(f'{B}{C}{"─"*54}{Z}')
-    rows.append(f'{B}{C}  BTC ${price:>10,.2f}   dk={dk:<8} vel={vel:+.3f}   {now_s}{Z}')
-    rows.append(f'{C}{"─"*54}{Z}')
-    rows.append(f'  {"TF":<5} {"SCORE":>7} {"NEED":>7} {"PHASE":>7} {"KDV":>7} {"OBI":>7}  STATE')
-    rows.append(f'  {"─"*5} {"─"*7} {"─"*7} {"─"*7} {"─"*7} {"─"*7}  {"─"*9}')
+    # ── global live indicators ────────────────────────────────────────────
+    price    = live.get('price',    0.0)
+    dk       = live.get('dk',       '?')
+    vel      = live.get('vel',      0.0)
+    conc     = live.get('conc',     0.0)
+    spr      = live.get('spr',      0.0)
+    decay_sc = live.get('decay_sc', 0.0)
+    floor_sc = live.get('floor_sc', 0.0)
+    bf       = live.get('bid_flow', 0.0)
+    af       = live.get('ask_flow', 0.0)
+    obi_g    = live.get('obi',      0.0)
+    obi_n    = live.get('obi_need', 0.0)
+    score_g  = live.get('score',    0.0)
+    score_n  = live.get('score_need', 0.0)
+    kdv_g    = live.get('kdv_bal',  0.0)
+    kdv_rev  = live.get('kdv_need_rev',  0.0)
+    kdv_con  = live.get('kdv_need_cont', 0.0)
+    res_al   = live.get('res_align', 0.0)
+    res_dir  = live.get('res_dir',   0)
+    htf_sup  = live.get('htf_sup',   False)
+    micro_ph = live.get('micro_ph',  0.0)
+
+    W = 62
+    rows = ['\033[2J\033[H']   # clear screen, cursor to home
+    rows.append(f'{B}{C}{"─"*W}{Z}')
+    rows.append(f'{B}{C}  BTC ${price:>11,.2f}   {now_s}   dk={dk}{Z}')
+    rows.append(f'{C}{"─"*W}{Z}')
+
+    # line 1: velocity / OB imbalance / concentration / spread
+    rows.append(f'  vel={vel:+.4f}  obi={obi_g:+.3f}(n={obi_n:.3f})'
+                f'  conc={conc:+.3f}  spr={spr:.2f}')
+    # line 2: score / KdV
+    sc_ok = abs(score_g) >= score_n > 0
+    rows.append(f'  score={G if sc_ok else Z}{score_g:+.4f}{Z}(n={score_n:.3f})'
+                f'  kdv={kdv_g:.4f}  rev_n={kdv_rev:.3f}  con_n={kdv_con:.3f}')
+    # line 3: decay / floor / resonance / HTF
+    sup_str = f'{G}▲HTF-SUP{Z}' if htf_sup else f'{Y}no-sup{Z}'
+    dir_str = f'{G}▲{Z}' if res_dir > 0 else (f'{R}▼{Z}' if res_dir < 0 else '─')
+    rows.append(f'  ds={decay_sc:.3f}  fos={floor_sc:.3f}'
+                f'  bf={bf:+.4f}  af={af:+.4f}'
+                f'  res={res_al:.3f}{dir_str}  {sup_str}')
+
+    # ── per-TF grid ───────────────────────────────────────────────────────
+    rows.append(f'{C}{"─"*W}{Z}')
+    # header row
+    rows.append(f'  {"TF":<5}'
+                f' {"SCORE":>7} {"NEED":>6}'
+                f' {"PH":>6} {"TRGH":>6} {"PEAK":>6}'
+                f' {"KDV":>7}'
+                f' {"OBI":>7}'
+                f'  STATE')
+    rows.append(f'  {"─"*5}'
+                f' {"─"*7} {"─"*6}'
+                f' {"─"*6} {"─"*6} {"─"*6}'
+                f' {"─"*7}'
+                f' {"─"*7}'
+                f'  {"─"*9}')
 
     for tf in (tfs or ['1m', '5m', '15m', '1h']):
         lv        = tf_live.get(tf, {})
@@ -112,9 +159,14 @@ def _dashboard(state, tfs, recent_signals):
 
         hit = abs(score) >= thresh > 0
         sc  = f'{G if hit else Z}{score:>7.3f}{Z}'
-        rows.append(f'  {tf:<5} {sc} {thresh:>7.3f} {phase:>7.3f} {kdv_bal:>7.3f} {obi:>7.3f}  {state_str}')
+        rows.append(f'  {tf:<5}'
+                    f' {sc} {thresh:>6.3f}'
+                    f' {phase:>6.3f} {trough_ph:>6.3f} {peak_ph:>6.3f}'
+                    f' {kdv_bal:>7.3f}'
+                    f' {obi:>7.3f}'
+                    f'  {state_str}')
 
-    rows.append(f'{C}{"─"*54}{Z}')
+    rows.append(f'{C}{"─"*W}{Z}')
 
     if recent_signals:
         for sig in recent_signals[-3:]:
@@ -123,7 +175,7 @@ def _dashboard(state, tfs, recent_signals):
             px  = sig.get('price', 0.0)
             t   = sig.get('time', '')
             cl  = G if d > 0 else R
-            rows.append(f'  {cl}{"▲" if d>0 else "▼"} {lbl:<14} {t}  ${px:,.2f}{Z}')
+            rows.append(f'  {cl}{"▲" if d>0 else "▼"} {lbl:<16} {t}  ${px:,.2f}{Z}')
         rows.append('')
 
     print('\n'.join(rows), flush=True)
