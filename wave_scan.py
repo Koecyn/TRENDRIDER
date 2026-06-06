@@ -2863,6 +2863,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             # Run 5m-scale physics on complete_5m_bars + partial_5m_bar.
             _win5s = (sec // 300) * 300
             _secs5 = sorted(s for s in s1_by_sec if _win5s <= s)
+            _p5 = None
             if _secs5:
                 _bars5s = [s1_by_sec[s] for s in _secs5]
                 _p5 = {
@@ -2882,6 +2883,32 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                     _lv5['phase']   = round(_ph5['phase'],   4)
                     _lv5['kdv_bal'] = round(_ph5['kdv_bal'], 4)
                     _lv5['obi']     = round(_ph5['obi'],     4)
+
+            # 10m: live edge = current partial 1m bar appended to complete 10m bars.
+            _win10m = state.tf10m[-19:] + [partial]
+            if len(_win10m) >= 5:
+                _ph10 = _run_tf_physics(_win10m, state.tf_accums['10m'])
+                _lv10 = state.tf_live['10m']
+                _lv10['score']   = round(_ph10['score'],   4)
+                _lv10['phase']   = round(_ph10['phase'],   4)
+                _lv10['kdv_bal'] = round(_ph10['kdv_bal'], 4)
+                _lv10['obi']     = round(_ph10['obi'],     4)
+
+            # 15m/30m/45m: live edge = live 5m bar appended to each TF's complete bars.
+            if _p5 is not None:
+                for _tflbl, _tfbars, _nback in (
+                    ('15m', state.tf15m, 19),
+                    ('30m', state.tf30m, 11),
+                    ('45m', state.tf45m,  9),
+                ):
+                    _wintf = _tfbars[-_nback:] + [_p5]
+                    if len(_wintf) >= 5:
+                        _phtf = _run_tf_physics(_wintf, state.tf_accums[_tflbl])
+                        _lvtf = state.tf_live[_tflbl]
+                        _lvtf['score']   = round(_phtf['score'],   4)
+                        _lvtf['phase']   = round(_phtf['phase'],   4)
+                        _lvtf['kdv_bal'] = round(_phtf['kdv_bal'], 4)
+                        _lvtf['obi']     = round(_phtf['obi'],     4)
 
         if not final:
             if (s1_secs[-1] >= min_sec + 60
