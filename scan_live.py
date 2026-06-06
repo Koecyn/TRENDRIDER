@@ -64,7 +64,9 @@ def _live_5m_bar(state):
     secs = sorted(s for s in s1 if win_start <= s <= last_sec)
     if not secs:
         return None
-    bars = [s1[s] for s in secs]
+    bars     = [s1[s] for s in secs]
+    last_ob  = bars[-1].get('ob', ([], []))
+    bids, asks = last_ob if len(last_ob) == 2 else ([], [])
     return {
         'ts':        win_start * 1000,
         'open':      bars[0]['open'],
@@ -73,6 +75,8 @@ def _live_5m_bar(state):
         'close':     bars[-1]['close'],
         'volume':    round(sum(b['volume'] for b in bars), 6),
         'taker_buy': round(sum(b.get('taker_buy', b['volume'] * 0.5) for b in bars), 6),
+        'ob_mid':    round((asks[0][0] + bids[0][0]) / 2, 2) if bids and asks else None,
+        'ob_spr':    round(asks[0][0] - bids[0][0], 2)       if bids and asks else None,
         'live':      True,
     }
 
