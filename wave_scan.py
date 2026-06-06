@@ -2910,6 +2910,53 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                         _lvtf['kdv_bal'] = round(_phtf['kdv_bal'], 4)
                         _lvtf['obi']     = round(_phtf['obi'],     4)
 
+            # 1h: live edge = all closed 1m bars in current 1h window + partial 1m bar.
+            # The partial 1h bar grows minute-by-minute — 1 bar at :01, 59 bars at :59.
+            _win1hs = (sec // 3600) * 3600
+            _1m_in_1h = [b for b in state.closed_1m if b['ts'] // 1000 >= _win1hs]
+            _bars_p1h = _1m_in_1h + [partial]
+            _p1h = {
+                'ts':        _win1hs * 1000,
+                'open':      _bars_p1h[0]['open'],
+                'high':      max(b['high'] for b in _bars_p1h),
+                'low':       min(b['low']  for b in _bars_p1h),
+                'close':     _bars_p1h[-1]['close'],
+                'volume':    sum(b['volume'] for b in _bars_p1h),
+                'taker_buy': sum(b.get('taker_buy', b['volume'] * 0.5) for b in _bars_p1h),
+            }
+            _win1h = [b for b in state.tf1h if b['ts'] < _win1hs * 1000][-11:] + [_p1h]
+            if len(_win1h) >= 5:
+                _ph1h = _run_tf_physics(_win1h, state.tf_accums['1h'])
+                _lv1h = state.tf_live['1h']
+                _lv1h['score']   = round(_ph1h['score'],   4)
+                _lv1h['phase']   = round(_ph1h['phase'],   4)
+                _lv1h['kdv_bal'] = round(_ph1h['kdv_bal'], 4)
+                _lv1h['obi']     = round(_ph1h['obi'],     4)
+
+            # 4h: live edge = complete 1h bars in current 4h window + live partial 1h bar.
+            # The partial 4h bar grows hour-by-hour within the 4h window.
+            _win4hs = (sec // 14400) * 14400
+            _1h_in_4h = [b for b in state.tf1h
+                         if _win4hs <= b['ts'] // 1000 < _win1hs]
+            _bars_p4h = _1h_in_4h + [_p1h]
+            _p4h = {
+                'ts':        _win4hs * 1000,
+                'open':      _bars_p4h[0]['open'],
+                'high':      max(b['high'] for b in _bars_p4h),
+                'low':       min(b['low']  for b in _bars_p4h),
+                'close':     _bars_p4h[-1]['close'],
+                'volume':    sum(b['volume'] for b in _bars_p4h),
+                'taker_buy': sum(b.get('taker_buy', b['volume'] * 0.5) for b in _bars_p4h),
+            }
+            _win4h = [b for b in state.tf4h if b['ts'] < _win4hs * 1000][-5:] + [_p4h]
+            if len(_win4h) >= 3:
+                _ph4h = _run_tf_physics(_win4h, state.tf_accums['4h'])
+                _lv4h = state.tf_live['4h']
+                _lv4h['score']   = round(_ph4h['score'],   4)
+                _lv4h['phase']   = round(_ph4h['phase'],   4)
+                _lv4h['kdv_bal'] = round(_ph4h['kdv_bal'], 4)
+                _lv4h['obi']     = round(_ph4h['obi'],     4)
+
         if not final:
             if (s1_secs[-1] >= min_sec + 60
                     and min_sec not in state.appended_min_ts):
