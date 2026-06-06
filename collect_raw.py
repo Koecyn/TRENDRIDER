@@ -140,7 +140,7 @@ def _dashboard(state, tfs, recent_signals):
                 f' {"─"*7}'
                 f'  {"─"*9}')
 
-    for tf in (tfs or ['1m', '5m', '15m', '1h']):
+    for tf in (tfs or list(VALID_TFS)):
         lv        = tf_live.get(tf, {})
         score     = lv.get('score',     0.0)
         thresh    = lv.get('thresh',    0.0)
@@ -413,7 +413,7 @@ def _scan_loop(seed_bars=None, display_tfs=None):
 
         state          = _ws.ScanState()
         last_push_time = 0.0
-        _tfs           = [t for t in (display_tfs or []) if t in VALID_TFS] or ['1m', '5m', '15m', '1h']
+        _tfs           = [t for t in (display_tfs or []) if t in VALID_TFS] or list(VALID_TFS)
 
         # Seed directly from exchange bars — no deque needed for startup
         log('scanner: seeding from exchange bars…', Y)
@@ -715,11 +715,11 @@ async def stream():
 if __name__ == '__main__':
     import argparse as _ap
     _parser = _ap.ArgumentParser(description='collect_raw — BTC live collector + scanner')
-    _parser.add_argument('--tf', nargs='+', default=['1m', '5m', '15m', '1h'],
+    _parser.add_argument('--tf', nargs='+', default=list(VALID_TFS),
                          metavar='TF',
                          help=f'Timeframes to display ({", ".join(VALID_TFS)})')
     _args       = _parser.parse_args()
-    _disp_tfs   = [t for t in _args.tf if t in VALID_TFS] or ['1m', '5m', '15m', '1h']
+    _disp_tfs   = [t for t in _args.tf if t in VALID_TFS] or list(VALID_TFS)
 
     _seed_bars = []
     try:
