@@ -2910,11 +2910,12 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                         _lvtf['kdv_bal'] = round(_phtf['kdv_bal'], 4)
                         _lvtf['obi']     = round(_phtf['obi'],     4)
 
-            # 1h: live edge = all closed 1m bars in current 1h window + partial 1m bar.
-            # The partial 1h bar grows minute-by-minute — 1 bar at :01, 59 bars at :59.
+            # 1h: live edge = complete 5m bars in current 1h window + live 5m bar (_p5).
+            # 5m bars give a smoother representation of the hour; _p5 carries the
+            # per-second live edge all the way into the 1h and 4h physics.
             _win1hs = (sec // 3600) * 3600
-            _1m_in_1h = [b for b in state.closed_1m if b['ts'] // 1000 >= _win1hs]
-            _bars_p1h = _1m_in_1h + [partial]
+            _5m_in_1h  = [b for b in state.tf5m if b['ts'] // 1000 >= _win1hs]
+            _bars_p1h  = _5m_in_1h + ([_p5] if _p5 is not None else [partial])
             _p1h = {
                 'ts':        _win1hs * 1000,
                 'open':      _bars_p1h[0]['open'],
