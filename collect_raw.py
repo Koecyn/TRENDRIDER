@@ -58,7 +58,117 @@ _last_depth_sec = 0
 GIT_TIMEOUT = 60   # seconds before a git subprocess is killed
 
 G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'
+C='\033[96m'; B='\033[1m'
 def log(m, c=Z): print(f'{c}[raw] {m}{Z}', flush=True)
+
+VALID_TFS  = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
+_dash_lines = 0
+
+
+def _dashboard(state, tfs, recent_signals):
+    """Redraw live TF dashboard in place on the terminal."""
+    global _dash_lines
+    if _dash_lines:
+        print(f'\033[{_dash_lines}A\033[J', end='', flush=True)
+
+    live      = getattr(state, 'live', {})
+    tf_live   = getattr(state, 'tf_live', {})
+    price     = live.get('price', 0.0)
+    dk        = live.get('dk', '?')
+    vel       = live.get('vel', 0.0)
+    now_s     = datetime.now(timezone.utc).strftime('%H:%M:%S')
+
+    rows = []
+    rows.append(f'{B}{C}{"─"*52}{Z}')
+    rows.append(f'{B}{C}  BTC ${price:>10,.2f}   dk={dk:<6} vel={vel:+.3f}   {now_s}{Z}')
+    rows.append(f'{C}{"─"*52}{Z}')
+    rows.append(f'  {"TF":<5} {"SCORE":>7} {"NEED":>7} {"PHASE":>7} {"KDV":>7} {"OBI":>7}  STATE')
+    rows.append(f'  {"─"*5} {"─"*7} {"─"*7} {"─"*7} {"─"*7} {"─"*7}  {"─"*9}')
+
+    for tf in (tfs or ['1m', '5m', '15m', '1h']):
+        lv        = tf_live.get(tf, {})
+        score     = lv.get('score',     0.0)
+        thresh    = lv.get('thresh',    0.0)
+        phase     = lv.get('phase',     0.0)
+        peak_ph   = lv.get('peak_ph',   0.75)
+        trough_ph = lv.get('trough_ph', -0.75)
+        kdv_bal   = lv.get('kdv_bal',   0.0)
+        obi       = lv.get('obi',       0.0)
+
+        if phase >= peak_ph:
+            state_str = f'{R}PEAK  ▼{Z}'
+        elif phase <= trough_ph:
+            state_str = f'{G}TROUGH▲{Z}'
+        else:
+            state_str = f'{Y}MID    {Z}'
+
+        hit = abs(score) >= thresh > 0
+        sc  = f'{G if hit else Z}{score:>7.3f}{Z}'
+        rows.append(f'  {tf:<5} {sc} {thresh:>7.3f} {phase:>7.3f} {kdv_bal:>7.3f} {obi:>7.3f}  {state_str}')
+
+    rows.append(f'{C}{"─"*52}{Z}')
+
+    if recent_signals:
+        for sig in recent_signals[-3:]:
+            d   = sig.get('dir', 0)
+            lbl = sig.get('label', sig.get('stype', '?'))
+            px  = sig.get('price', 0.0)
+            t   = sig.get('time', '')
+            cl  = G if d > 0 else R
+            rows.append(f'  {cl}{"▲" if d>0 else "▼"} {lbl:<14} {t}  ${px:,.2f}{Z}')
+        rows.append('')
+
+    out = '\n'.join(rows) + '\n'
+    print(out, end='', flush=True)
+    _dash_lines = out.count('\n')
+
+
+def _agg_tf(bars_1m, n, keep=20):
+    """Aggregate 1m bars into n-minute bars from the end."""
+    if not bars_1m or n <= 1:
+        return bars_1m[-keep:]
+    result = []
+    i = len(bars_1m)
+    while i >= n and len(result) < keep:
+        chunk = bars_1m[i - n:i]
+        result.insert(0, {
+            'ts':        chunk[0]['ts'],
+            'open':      chunk[0]['open'],
+            'high':      max(b['high'] for b in chunk),
+            'low':       min(b['low'] for b in chunk),
+            'close':     chunk[-1]['close'],
+            'volume':    round(sum(b.get('volume', 0) for b in chunk), 6),
+            'taker_buy': round(sum(b.get('taker_buy', b.get('taker', 0)) for b in chunk), 6),
+        })
+        i -= n
+    return result
+
+
+def _live_5m_bar(state):
+    """Build the current incomplete 5m bar from accumulated second bars."""
+    s1 = getattr(state, 's1_by_sec', {})
+    if not s1:
+        return None
+    last_sec  = max(s1)
+    win_start = (last_sec // 300) * 300
+    secs      = sorted(s for s in s1 if win_start <= s <= last_sec)
+    if not secs:
+        return None
+    bars     = [s1[s] for s in secs]
+    last_ob  = bars[-1].get('ob', ([], []))
+    bids, asks = last_ob if len(last_ob) == 2 else ([], [])
+    return {
+        'ts':        win_start * 1000,
+        'open':      bars[0]['open'],
+        'high':      max(b['high'] for b in bars),
+        'low':       min(b['low']  for b in bars),
+        'close':     bars[-1]['close'],
+        'volume':    round(sum(b['volume'] for b in bars), 6),
+        'taker_buy': round(sum(b.get('taker_buy', b['volume'] * 0.5) for b in bars), 6),
+        'ob_mid':    round((asks[0][0] + bids[0][0]) / 2, 2) if bids and asks else None,
+        'ob_spr':    round(asks[0][0] - bids[0][0], 2)       if bids and asks else None,
+        'live':      True,
+    }
 
 def _run(*a, env=None):
     return subprocess.run(list(a), capture_output=True, text=True,
@@ -235,7 +345,7 @@ def _push_signals(txt: str, summary: dict) -> bool:
 
 # ── Scan loop — triggered by on_trade, reads deque directly ───────────────────
 
-def _scan_loop(seed_bars=None):
+def _scan_loop(seed_bars=None, display_tfs=None):
     try:
         import traceback
         sys.path.insert(0, str(REPO))
@@ -245,6 +355,7 @@ def _scan_loop(seed_bars=None):
 
         state          = _ws.ScanState()
         last_push_time = 0.0
+        _tfs           = [t for t in (display_tfs or []) if t in VALID_TFS] or ['1m', '5m', '15m', '1h']
 
         # Seed directly from exchange bars — no deque needed for startup
         log('scanner: seeding from exchange bars…', Y)
@@ -272,6 +383,9 @@ def _scan_loop(seed_bars=None):
 
                 new_sigs = _ws.scan_incremental(state, raw_lines=snapshot,
                                                  signals_only=True)
+
+                # ── dashboard on every tick ──────────────────────────────
+                _dashboard(state, _tfs, state.signals)
 
                 now = time.time()
                 if new_sigs or (now - last_push_time >= SIG_PUSH_S):
@@ -301,7 +415,6 @@ def _scan_loop(seed_bars=None):
                             live = {
                                 'at':        datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
                                 'price':     round(mid, 2),
-                                # ── live indicators ──────────────────────────
                                 'obi':       obi,
                                 'obi_need':  round(obi_conf, 3),
                                 'conc':      conc,
@@ -327,28 +440,104 @@ def _scan_loop(seed_bars=None):
                                 'htf_sup':    state.last_htf_sup,
                                 'htf_bars':   f'{len(state.tf5m)}x5m {len(state.tf15m)}x15m {len(state.tf1h)}x1h {len(state.tf4h)}x4h',
                             }
+                            # make richer live available to dashboard on next tick
+                            state.live = live
                     except Exception:
                         pass
+
+                    # ── order book depth snapshot ────────────────────────
+                    ob_depth = {}
+                    try:
+                        if state.s1_by_sec:
+                            _ls  = max(state.s1_by_sec)
+                            _bar = state.s1_by_sec[_ls]
+                            _ob  = _bar.get('ob', ([], []))
+                            _bids, _asks = (_ob if len(_ob) == 2 else ([], []))
+                            if _bids and _asks:
+                                _mid = _bar['close']
+                                ob_depth['bids'] = [[round(p,2), round(q,4)] for p,q in _bids[:20]]
+                                ob_depth['asks'] = [[round(p,2), round(q,4)] for p,q in _asks[:20]]
+                                ob_depth['mid']  = round((_asks[0][0] + _bids[0][0]) / 2, 2)
+                                ob_depth['spr']  = round(_asks[0][0] - _bids[0][0], 2)
+                                for depth in (5, 10, 20):
+                                    _b = _bids[:depth]; _a = _asks[:depth]
+                                    _bv = sum(x[1] for x in _b); _av = sum(x[1] for x in _a)
+                                    _tot = _bv + _av
+                                    ob_depth[f'obi{depth}'] = round((_bv-_av)/_tot, 4) if _tot else 0
+                                def _wall(lvls):
+                                    if not lvls: return None
+                                    avg = sum(x[1] for x in lvls) / len(lvls)
+                                    for i, (p, q) in enumerate(lvls):
+                                        if q >= avg:
+                                            return {'lvl': i, 'price': round(p,2), 'qty': round(q,4)}
+                                    return None
+                                ob_depth['bid_wall'] = _wall(_bids[:20])
+                                ob_depth['ask_wall'] = _wall(_asks[:20])
+                                ob_depth['bid_liq']  = round(sum(x[1] for x in _bids[:20]), 4)
+                                ob_depth['ask_liq']  = round(sum(x[1] for x in _asks[:20]), 4)
+                    except Exception:
+                        pass
+
+                    # ── knife buffer state ───────────────────────────────
+                    kb = getattr(state, 'knife_buf', None)
+                    knife_data = {}
+                    if kb:
+                        try:
+                            knife_data = {
+                                'state':    getattr(kb, 'state', 0),
+                                'label':    kb.LABELS.get(kb.state, '?'),
+                                'decay_sc': round(kb._decay_score(), 4),
+                                'floor_sc': round(kb._floor_score(
+                                    live.get('conc', 0), live.get('spr', 99),
+                                    mid=live.get('price', 0),
+                                    bids=[], asks=[]), 4),
+                                'lows':     getattr(kb, 'lows', []),
+                            }
+                        except Exception:
+                            pass
+
+                    # ── live 5m bar from second data ─────────────────────
+                    _live5    = _live_5m_bar(state)
+                    _tf5c     = getattr(state, 'tf5m', [])
+                    _live5_ts = (_live5 or {}).get('ts')
+                    tf5m_live = [b for b in _tf5c[-30:] if b['ts'] != _live5_ts]
+                    if _live5:
+                        tf5m_live.append(_live5)
+
                     summary = {
                         'signal_count': state.sig_count,
                         'signals':      state.signals,
                         'scanned_at':   datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                         'new_this_run': len(new_sigs),
                         'live':         live,
+                        'tf_physics':   getattr(state, 'tf_live', {}),
+                        'tf_states':    getattr(state, 'last_tf_states', {}),
+                        'shelves':      getattr(state, 'session_shelves', []),
+                        'knife':        knife_data,
+                        'ob_depth':     ob_depth,
+                        'timeframes': {
+                            'tf1m':  (state.closed_1m[-60:]  if getattr(state, 'closed_1m', None) else []),
+                            'tf5m':  tf5m_live,
+                            'tf10m': _agg_tf(getattr(state, 'closed_1m', []), 10, keep=20),
+                            'tf15m': (state.tf15m[-20:]      if getattr(state, 'tf15m', None) else []),
+                            'tf30m': (state.tf30m[-12:]      if getattr(state, 'tf30m', None) else []),
+                            'tf45m': (state.tf45m[-10:]      if getattr(state, 'tf45m', None) else []),
+                            'tf1h':  (state.tf1h[-12:]       if getattr(state, 'tf1h',  None) else []),
+                            'tf4h':  (state.tf4h[-6:]        if getattr(state, 'tf4h',  None) else []),
+                        },
                     }
                     if not _push_signals('', summary):
                         log('sig push failed', R)
                     else:
                         px   = live.get('price', '?')
-                        ph   = live.get('phase', '?')
-                        ds   = live.get('decay_sc', '?')
-                        fos  = live.get('floor_sc', '?')
+                        dk_l = live.get('dk', '?')
                         sc   = live.get('score', '?')
+                        vel  = live.get('vel', '?')
                         bars = len(state.closed_1m)
-                        res  = f'res={state.last_res_dir}@{state.last_align:.2f}'
-                        htf  = f'htf={len(state.tf5m)}x5m/{len(state.tf1h)}x1h'
                         sup  = ' SUP' if state.last_htf_sup else ''
-                        log(f'push ok | ${px:,.2f}  {ph}  ds={ds}  fos={fos}  score={sc}  {res}  {htf}{sup}  bars={bars}', Y)
+                        log(f'push ok | ${px:,.2f}  dk={dk_l}  score={sc}  vel={vel}'
+                            f'  htf={len(state.tf5m)}x5m/{len(state.tf1h)}x1h{sup}'
+                            f'  bars={bars}', Y)
                     last_push_time = time.time()
 
             except Exception:
@@ -459,6 +648,14 @@ async def stream():
 
 
 if __name__ == '__main__':
+    import argparse as _ap
+    _parser = _ap.ArgumentParser(description='collect_raw — BTC live collector + scanner')
+    _parser.add_argument('--tf', nargs='+', default=['1m', '5m', '15m', '1h'],
+                         metavar='TF',
+                         help=f'Timeframes to display ({", ".join(VALID_TFS)})')
+    _args       = _parser.parse_args()
+    _disp_tfs   = [t for t in _args.tf if t in VALID_TFS] or ['1m', '5m', '15m', '1h']
+
     _seed_bars = []
     try:
         import pull_candles
@@ -466,9 +663,9 @@ if __name__ == '__main__':
     except Exception as e:
         log(f'candle seed (non-fatal): {e}', R)
 
-    threading.Thread(target=_push_loop,                    daemon=True).start()
-    threading.Thread(target=_git_push_worker,              daemon=True).start()
-    threading.Thread(target=_scan_loop, args=(_seed_bars,), daemon=True).start()
+    threading.Thread(target=_push_loop,                                        daemon=True).start()
+    threading.Thread(target=_git_push_worker,                                  daemon=True).start()
+    threading.Thread(target=_scan_loop, args=(_seed_bars, _disp_tfs),          daemon=True).start()
 
     loop = asyncio.new_event_loop()
     task = loop.create_task(stream())
