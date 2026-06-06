@@ -46,6 +46,7 @@ SIGNALS_TXT  = SIGNALS_DIR / 'BTCUSDT_SIGNALS.txt'
 SIGNALS_JSON = SIGNALS_DIR / 'BTCUSDT_SIGNALS.json'
 SIG_BRANCH   = 'data/signals'
 SIG_IDX      = REPO / '.git' / 'scan_push.idx'
+TF_VIEW_FILE = DATA_DIR / 'tf_view'   # live TF selector — write anytime, no restart
 
 _raw_deque    = collections.deque(maxlen=WINDOW_LINES)
 _deque_lock   = threading.Lock()
@@ -71,12 +72,32 @@ def _dashboard(state, tfs, recent_signals):
 
     Uses full-screen clear so concurrent log output from other threads
     never corrupts cursor positioning.
+
+    TF selection (live, no restart needed):
+      echo '1m 5m 1h'  > ~/.trendrider/tf_view   # narrow view
+      echo 'all'       > ~/.trendrider/tf_view   # all 8 TFs
+      rm               ~/.trendrider/tf_view      # back to --tf default
     """
     global _last_dash_t
     now_t = time.monotonic()
     if now_t - _last_dash_t < _DASH_MIN_S:
         return
     _last_dash_t = now_t
+
+    # ── live TF selection — read on every draw, no restart needed ────────
+    active_tfs = tfs  # fallback: whatever --tf gave us
+    try:
+        txt = TF_VIEW_FILE.read_text().strip()
+        if txt.lower() in ('all', 'default', ''):
+            active_tfs = list(VALID_TFS)
+        else:
+            chosen = [t for t in txt.split() if t in VALID_TFS]
+            if chosen:
+                active_tfs = chosen
+    except FileNotFoundError:
+        pass   # no file → use --tf default
+    except Exception:
+        pass
 
     live    = getattr(state, 'live', {})
     tf_live = getattr(state, 'tf_live', {})
@@ -140,7 +161,7 @@ def _dashboard(state, tfs, recent_signals):
                 f' {"─"*7}'
                 f'  {"─"*9}')
 
-    for tf in (tfs or list(VALID_TFS)):
+    for tf in active_tfs:
         lv        = tf_live.get(tf, {})
         score     = lv.get('score',     0.0)
         thresh    = lv.get('thresh',    0.0)
@@ -177,6 +198,12 @@ def _dashboard(state, tfs, recent_signals):
             cl  = G if d > 0 else R
             rows.append(f'  {cl}{"▲" if d>0 else "▼"} {lbl:<16} {t}  ${px:,.2f}{Z}')
         rows.append('')
+
+    # live TF control hint
+    cur = ' '.join(active_tfs)
+    rows.append(f'\033[2m  view: {cur}'
+                f'  |  echo "1m 5m 1h" > {TF_VIEW_FILE.name}'
+                f'  |  echo all > {TF_VIEW_FILE.name}\033[0m')
 
     print('\n'.join(rows), flush=True)
 
