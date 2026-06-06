@@ -13,7 +13,7 @@ Trade line : ["T", ts_ms, price_cents, qty_units, side]
 Depth line : ["D", ts_ms, [[p_c,q_u],...bids], [[p_c,q_u],...asks]]
 """
 
-import asyncio, collections, gc, gzip, json, os, queue, resource
+import asyncio, collections, gc, gzip, io, json, os, queue, resource
 import signal, subprocess, sys, threading, time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -61,15 +61,22 @@ G='\033[92m'; R='\033[91m'; Y='\033[93m'; Z='\033[0m'
 C='\033[96m'; B='\033[1m'
 def log(m, c=Z): print(f'{c}[raw] {m}{Z}', flush=True)
 
-VALID_TFS  = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
-_dash_lines = 0
+VALID_TFS   = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
+_last_dash_t = 0.0
+_DASH_MIN_S  = 1.0      # redraw at most once per second
 
 
 def _dashboard(state, tfs, recent_signals):
-    """Redraw live TF dashboard in place on the terminal."""
-    global _dash_lines
-    if _dash_lines:
-        print(f'\033[{_dash_lines}A\033[J', end='', flush=True)
+    """Clear screen and redraw full TF dashboard.
+
+    Uses full-screen clear so concurrent log output from other threads
+    never corrupts cursor positioning.
+    """
+    global _last_dash_t
+    now_t = time.monotonic()
+    if now_t - _last_dash_t < _DASH_MIN_S:
+        return
+    _last_dash_t = now_t
 
     live      = getattr(state, 'live', {})
     tf_live   = getattr(state, 'tf_live', {})
@@ -79,9 +86,10 @@ def _dashboard(state, tfs, recent_signals):
     now_s     = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
     rows = []
-    rows.append(f'{B}{C}{"─"*52}{Z}')
-    rows.append(f'{B}{C}  BTC ${price:>10,.2f}   dk={dk:<6} vel={vel:+.3f}   {now_s}{Z}')
-    rows.append(f'{C}{"─"*52}{Z}')
+    rows.append(f'\033[2J\033[H')   # clear screen, cursor to home
+    rows.append(f'{B}{C}{"─"*54}{Z}')
+    rows.append(f'{B}{C}  BTC ${price:>10,.2f}   dk={dk:<8} vel={vel:+.3f}   {now_s}{Z}')
+    rows.append(f'{C}{"─"*54}{Z}')
     rows.append(f'  {"TF":<5} {"SCORE":>7} {"NEED":>7} {"PHASE":>7} {"KDV":>7} {"OBI":>7}  STATE')
     rows.append(f'  {"─"*5} {"─"*7} {"─"*7} {"─"*7} {"─"*7} {"─"*7}  {"─"*9}')
 
@@ -106,7 +114,7 @@ def _dashboard(state, tfs, recent_signals):
         sc  = f'{G if hit else Z}{score:>7.3f}{Z}'
         rows.append(f'  {tf:<5} {sc} {thresh:>7.3f} {phase:>7.3f} {kdv_bal:>7.3f} {obi:>7.3f}  {state_str}')
 
-    rows.append(f'{C}{"─"*52}{Z}')
+    rows.append(f'{C}{"─"*54}{Z}')
 
     if recent_signals:
         for sig in recent_signals[-3:]:
@@ -118,9 +126,7 @@ def _dashboard(state, tfs, recent_signals):
             rows.append(f'  {cl}{"▲" if d>0 else "▼"} {lbl:<14} {t}  ${px:,.2f}{Z}')
         rows.append('')
 
-    out = '\n'.join(rows) + '\n'
-    print(out, end='', flush=True)
-    _dash_lines = out.count('\n')
+    print('\n'.join(rows), flush=True)
 
 
 def _agg_tf(bars_1m, n, keep=20):
@@ -381,8 +387,15 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                 with _deque_lock:
                     snapshot = list(_raw_deque)
 
-                new_sigs = _ws.scan_incremental(state, raw_lines=snapshot,
-                                                 signals_only=True)
+                # suppress wave_scan's own print output (signal cards etc.)
+                _buf = io.StringIO()
+                _old = sys.stdout
+                sys.stdout = _buf
+                try:
+                    new_sigs = _ws.scan_incremental(state, raw_lines=snapshot,
+                                                     signals_only=True)
+                finally:
+                    sys.stdout = _old
 
                 # ── dashboard on every tick ──────────────────────────────
                 _dashboard(state, _tfs, state.signals)
