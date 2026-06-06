@@ -54,6 +54,29 @@ def _agg_tf(bars_1m, n, keep=20):
     return result
 
 
+def _live_5m_bar(state):
+    """Build the current incomplete 5m bar from accumulated second bars on state."""
+    s1       = getattr(state, 's1_by_sec', {})
+    last_sec = getattr(state, 'last_sec',  0)
+    if not s1 or not last_sec:
+        return None
+    win_start = (last_sec // 300) * 300
+    secs = sorted(s for s in s1 if win_start <= s <= last_sec)
+    if not secs:
+        return None
+    bars = [s1[s] for s in secs]
+    return {
+        'ts':        win_start * 1000,
+        'open':      bars[0]['open'],
+        'high':      max(b['high'] for b in bars),
+        'low':       min(b['low']  for b in bars),
+        'close':     bars[-1]['close'],
+        'volume':    round(sum(b['volume'] for b in bars), 6),
+        'taker_buy': round(sum(b.get('taker_buy', b['volume'] * 0.5) for b in bars), 6),
+        'live':      True,
+    }
+
+
 # ── git plumbing push ─────────────────────────────────────────────────────────
 
 def _run(*a, env=None):
@@ -279,6 +302,14 @@ def main():
                         'lows':     getattr(kb, 'lows', []),
                     }
 
+                # ── live 5m bar from second bars ─────────────────────────
+                _live5        = _live_5m_bar(state)
+                _tf5c         = getattr(state, 'tf5m', [])
+                _live5_ts     = (_live5 or {}).get('ts')
+                tf5m_live     = [b for b in _tf5c[-30:] if b['ts'] != _live5_ts]
+                if _live5:
+                    tf5m_live.append(_live5)
+
                 summary = {
                     'signal_count': n,
                     'signals':      state.signals,
@@ -292,12 +323,12 @@ def main():
                     'timeframes': {
                         # 1m/5m/10m — live edge snaps on 1m close
                         'tf1m':  (state.closed_1m[-60:]  if getattr(state, 'closed_1m', None) else []),
-                        'tf5m':  (state.tf5m[-30:]       if getattr(state, 'tf5m',  None) else []),
+                        'tf5m':  tf5m_live,
                         'tf10m': _agg_tf(getattr(state, 'closed_1m', []), 10, keep=20),
-                        # 15m/30m/45m/1h/4h — live edge snaps on 5m close
+                        # 15m/30m/45m/1h/4h — live edge snaps on 5m close (live 5m bar included)
                         'tf15m': (state.tf15m[-20:]      if getattr(state, 'tf15m', None) else []),
-                        'tf30m': _agg_tf(getattr(state, 'tf5m',  []), 6,  keep=12),
-                        'tf45m': _agg_tf(getattr(state, 'tf5m',  []), 9,  keep=10),
+                        'tf30m': _agg_tf(tf5m_live, 6,  keep=12),
+                        'tf45m': _agg_tf(tf5m_live, 9,  keep=10),
                         'tf1h':  (state.tf1h[-12:]       if getattr(state, 'tf1h',  None) else []),
                         'tf4h':  (state.tf4h[-6:]        if getattr(state, 'tf4h',  None) else []),
                     },
