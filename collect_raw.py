@@ -893,6 +893,15 @@ def _deep_book_loop():
                                         log(f'deep-book: ready  {len(_deep_bids)}b/{len(_deep_asks)}a levels', G)
 
                                 _deep_probe = _probe_deep_book()
+                                # Write to local file for real-time reads
+                                if _deep_probe:
+                                    try:
+                                        _dp_path = DATA_DIR / 'deep_probe.json'
+                                        _dp_path.write_text(
+                                            json.dumps(_deep_probe, indent=2),
+                                            encoding='utf-8')
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
             except Exception as e:
