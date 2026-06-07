@@ -430,18 +430,32 @@ def _git_push_worker():
                            'GIT_INDEX_FILE': str(TMP_IDX)}
                 env_obj = {**os.environ, 'GIT_NO_AUTO_GC': '1'}  # no index for hash-object
                 TMP_IDX.unlink(missing_ok=True)
-                r = _run('git', 'hash-object', '-w', str(gz_path), env=env_obj)
-                blob = r.stdout.strip()
-                if not blob:
-                    # One retry after clearing any stale locks
-                    _clear_git_locks()
-                    r = _run('git', 'hash-object', '-w', str(gz_path), env=env_obj)
-                    blob = r.stdout.strip()
+
+                # All files to commit to data/raw in one tree
+                raw_files = {GIT_TREE_PATH: gz_path}
+                for fname in ('BTCUSDT_1m.json.gz', 'BTCUSDT_1h.json.gz'):
+                    p = DATA_DIR / fname
+                    if p.exists() and p.stat().st_size > 0:
+                        raw_files[f'data/raw/{fname}'] = p
+
+                all_blobs = {}
+                for git_path, local_path in raw_files.items():
+                    r = _run('git', 'hash-object', '-w', str(local_path), env=env_obj)
+                    b = r.stdout.strip()
+                    if not b and local_path == gz_path:
+                        _clear_git_locks()
+                        r = _run('git', 'hash-object', '-w', str(local_path), env=env_obj)
+                        b = r.stdout.strip()
+                    if b:
+                        all_blobs[git_path] = b
+
+                blob = all_blobs.get(GIT_TREE_PATH, '')
                 if not blob:
                     log(f'raw: hash-object failed (sz={sz}): {r.stderr.strip()[:200]}', R)
                     continue
-                _run('git', 'update-index', '--add',
-                     '--cacheinfo', f'100644,{blob},{GIT_TREE_PATH}', env=env_gc)
+                for git_path, b in all_blobs.items():
+                    _run('git', 'update-index', '--add',
+                         '--cacheinfo', f'100644,{b},{git_path}', env=env_gc)
                 r = _run('git', 'write-tree', env=env_gc)
                 tree = r.stdout.strip()
                 TMP_IDX.unlink(missing_ok=True)
@@ -483,14 +497,18 @@ def _push_signals(txt: str, summary: dict) -> bool:
                 SIGNALS_TXT:  'data/signals/BTCUSDT_SIGNALS.txt',
                 SIGNALS_JSON: 'data/signals/BTCUSDT_SIGNALS.json',
             }
-            for p in (SIGNALS_TXT, SIGNALS_JSON):
+            # Include deep probe snapshot if available
+            dp_file = DATA_DIR / 'deep_probe.json'
+            if dp_file.exists() and dp_file.stat().st_size > 0:
+                tree_paths[dp_file] = 'data/signals/deep_probe.json'
+            for p, git_path in tree_paths.items():
                 r = _run('git', 'hash-object', '-w', str(p))
                 blob = r.stdout.strip()
                 if not blob:
                     log(f'sig: hash-object failed: {r.stderr.strip()[:120]}', R)
                     return False
                 _run('git', 'update-index', '--add',
-                     '--cacheinfo', f'100644,{blob},{tree_paths[p]}', env=env)
+                     '--cacheinfo', f'100644,{blob},{git_path}', env=env)
             r = _run('git', 'write-tree', env=env)
             tree = r.stdout.strip()
             SIG_IDX.unlink(missing_ok=True)
@@ -1142,7 +1160,8 @@ if __name__ == '__main__':
     _seed_bars = []
     try:
         import pull_candles
-        _seed_bars = pull_candles.fetch_seed_bars(1000)  # 1000 → enough for 45m (22 bars) + 4h seeding
+        pull_candles.backfill_local(verbose=True)   # fetch + save 1m/1h candles to ~/.trendrider/
+        _seed_bars = pull_candles.fetch_seed_bars(1000)
     except Exception as e:
         log(f'candle seed (non-fatal): {e}', R)
 
