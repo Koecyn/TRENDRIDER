@@ -71,7 +71,9 @@ _deep_probe  = {}
 
 # Per-level history for friction classification
 # price → collections.deque of (ts_ms, qty) — last 40 snapshots
-_level_hist  = {}
+_level_hist       = {}
+_level_first_seen = {}   # (side, price) → ts_ms when first seen in diff stream
+_level_last_seen  = {}   # (side, price) → ts_ms of most recent diff update
 # Reload tracker: price → {'ts': ms, 'qty': qty_before_pull, 'side': str}
 _reload_pend = {}
 # Reload events: price → {'ratio': float, 'side': str, 'ts': ms}
@@ -851,6 +853,14 @@ def _deep_book_loop():
                                                 _level_hist[key] = collections.deque(maxlen=40)
                                             _level_hist[key].append((ts_ms, qf))
 
+                                            # Track first/last seen for static STABLE detection
+                                            # Diff stream only sends updates on changes; a level
+                                            # that never changes never appears → check age instead
+                                            if qf > 0:
+                                                if key not in _level_first_seen:
+                                                    _level_first_seen[key] = ts_ms
+                                                _level_last_seen[key] = ts_ms
+
                                             if qf == 0.0:
                                                 book.pop(pf, None)
                                                 # Level disappeared — record for reload detection
@@ -926,12 +936,19 @@ def _probe_deep_book(orphan_threshold=3.0):
 
     def _classify(side, price):
         key = (side, price)
-        # Recent reload event?
+        now_ms = _time.time() * 1000
+        # Recent reload event takes priority
         if key in reload_snap:
             r = reload_snap[key]['ratio']
             if   r > 1.05: return 'RELOAD_+'
             elif r < 0.95: return 'RELOAD_-'
             else:          return 'RELOAD_='
+        # Static wall: seen in diff stream but no update in >30s = resting order
+        # (diff stream only sends messages when qty changes; silence = unchanged)
+        first = _level_first_seen.get(key)
+        last  = _level_last_seen.get(key)
+        if first and last and (now_ms - last) > 30_000 and (now_ms - first) > 30_000:
+            return 'STABLE'
         hist = hist_snap.get(key, [])
         if len(hist) < 3:
             return 'NEW'
