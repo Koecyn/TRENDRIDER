@@ -850,28 +850,29 @@ def _deep_book_loop():
                         snap_url = ('https://api.binance.us/api/v3/depth'
                                     f'?symbol=BTCUSDT&limit=100')
                         async with sess.get(snap_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                            if r.status != 200:
+                                raise Exception(f'HTTP {r.status}')
                             snap = await r.json(content_type=None)
+                        bids_snap = [(float(p), float(q)) for p, q in snap.get('bids', []) if float(q) > 0]
+                        asks_snap = [(float(p), float(q)) for p, q in snap.get('asks', []) if float(q) > 0]
+                        if not bids_snap or not asks_snap:
+                            raise Exception('empty snapshot response')
                         snap_ts = int(time.time() * 1000)
                         with _deep_lock:
                             _deep_bids.clear()
                             _deep_asks.clear()
-                            for p, q in snap.get('bids', []):
-                                pf, qf = float(p), float(q)
-                                if qf > 0:
-                                    _deep_bids[pf] = qf
-                                    key = ('bid', pf)
-                                    if key not in _level_first_seen:
-                                        _level_first_seen[key] = snap_ts
-                                    # snapshot levels: last_seen = now so they age toward STABLE
-                                    _level_last_seen[key] = snap_ts
-                            for p, q in snap.get('asks', []):
-                                pf, qf = float(p), float(q)
-                                if qf > 0:
-                                    _deep_asks[pf] = qf
-                                    key = ('ask', pf)
-                                    if key not in _level_first_seen:
-                                        _level_first_seen[key] = snap_ts
-                                    _level_last_seen[key] = snap_ts
+                            for pf, qf in bids_snap:
+                                _deep_bids[pf] = qf
+                                key = ('bid', pf)
+                                if key not in _level_first_seen:
+                                    _level_first_seen[key] = snap_ts
+                                _level_last_seen[key] = snap_ts
+                            for pf, qf in asks_snap:
+                                _deep_asks[pf] = qf
+                                key = ('ask', pf)
+                                if key not in _level_first_seen:
+                                    _level_first_seen[key] = snap_ts
+                                _level_last_seen[key] = snap_ts
                         log(f'deep-book: snapshot {len(_deep_bids)}b/{len(_deep_asks)}a levels', C)
                     except Exception as e:
                         log(f'deep-book: snapshot failed ({e}) — diffs only', Y)
