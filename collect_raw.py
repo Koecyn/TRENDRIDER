@@ -797,32 +797,6 @@ def _push_loop():
 
 # ── WebSocket → deque (hot path — zero I/O) ───────────────────────────────────
 
-async def stream():
-    def on_trade(d):
-        global _last_trade_sec
-        ts_ms = int(d['T'])
-        ts_s  = ts_ms // 1000
-        with _deque_lock:
-            _raw_deque.append(json.dumps(
-                ['T', ts_ms, int(float(d['p'])*100),
-                 int(float(d['q'])*10000), 0 if d.get('m') else 1],
-                separators=(',',':')))
-        if ts_s > _last_trade_sec:
-            _last_trade_sec = ts_s
-            _scan_trigger.set()   # new second → wake scanner
-
-    def on_depth(d):
-        global _last_depth_sec
-        ts  = int(time.time()*1000)
-        ts_s = ts // 1000
-        bid = [[int(float(p)*100), int(float(q)*10000)] for p,q in d.get('bids',[])]
-        ask = [[int(float(p)*100), int(float(q)*10000)] for p,q in d.get('asks',[])]
-        with _deque_lock:
-            _raw_deque.append(json.dumps(['D', ts, bid, ask], separators=(',',':')))
-        if ts_s > _last_depth_sec:
-            _last_depth_sec = ts_s
-            _scan_trigger.set()   # new second of OB data → wake scanner
-
 
 def _deep_book_loop():
     """
@@ -968,6 +942,33 @@ def _probe_deep_book(n_side=100, orphan_threshold=3.0):
         'bias':          bias,
     }
 
+
+async def stream():
+    def on_trade(d):
+        global _last_trade_sec
+        ts_ms = int(d['T'])
+        ts_s  = ts_ms // 1000
+        with _deque_lock:
+            _raw_deque.append(json.dumps(
+                ['T', ts_ms, int(float(d['p'])*100),
+                 int(float(d['q'])*10000), 0 if d.get('m') else 1],
+                separators=(',',':')))
+        if ts_s > _last_trade_sec:
+            _last_trade_sec = ts_s
+            _scan_trigger.set()
+
+    def on_depth(d):
+        global _last_depth_sec
+        ts   = int(time.time()*1000)
+        ts_s = ts // 1000
+        bid  = [[int(float(p)*100), int(float(q)*10000)] for p,q in d.get('bids',[])]
+        ask  = [[int(float(p)*100), int(float(q)*10000)] for p,q in d.get('asks',[])]
+        with _deque_lock:
+            _raw_deque.append(json.dumps(['D', ts, bid, ask], separators=(',',':')))
+        if ts_s > _last_depth_sec:
+            _last_depth_sec = ts_s
+            _scan_trigger.set()
+
     log('connecting...', G)
     backoff = 1
     try:
@@ -998,7 +999,7 @@ def _probe_deep_book(n_side=100, orphan_threshold=3.0):
                 await asyncio.sleep(backoff)
                 backoff = min(backoff*2, 60)
     finally:
-        _push_queue.put(None)   # signal git worker to exit
+        _push_queue.put(None)
 
 
 if __name__ == '__main__':
