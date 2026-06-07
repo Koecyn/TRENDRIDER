@@ -35,6 +35,10 @@ SESSIONS_BRANCH_PREFIX = 'data/sessions/'   # archive — one branch per session
 WS_URL = ('wss://stream.binance.us:9443/stream'
           '?streams=btcusdt@depth20@100ms/btcusdt@aggTrade')
 
+# Second stream for deep book — diff-based, slower, read-only directional probe
+WS_URL_DEEP = ('wss://stream.binance.us:9443/stream'
+               '?streams=btcusdt@depth@1000ms')
+
 WINDOW_LINES   = 15_000   # bounded deque — ~125 min at 2 records/sec
 PUSH_S         = 2        # write snapshot every N seconds
 GC_EVERY       = 60
@@ -55,6 +59,15 @@ _scan_trigger = threading.Event()        # set by on_trade/on_depth; scanner als
 _git_lock     = threading.Lock()         # serialize all git operations — one at a time
 _last_trade_sec = 0
 _last_depth_sec = 0
+
+# ── Deep order book (separate slow stream, diff-based) ────────────────────────
+# Fast 20-level stream feeds the physics engine unchanged.
+# Deep book is maintained here for directional/target confirmation only.
+_deep_bids   = {}   # price → qty  (full book, ask side)
+_deep_asks   = {}   # price → qty  (full book, bid side)
+_deep_lock   = threading.Lock()
+_deep_ready  = False   # True once we have meaningful depth (>20 levels seen)
+_deep_probe  = {}      # last orphan-wall analysis result
 
 GIT_TIMEOUT = 60   # seconds before a git subprocess is killed
 
@@ -153,6 +166,18 @@ def _dashboard(state, tfs, recent_signals):
     # trend line
     rows.append(f'  TREND  4h={_trend_str(tr_4h)}  1h={_trend_str(tr_1h)}'
                 f'  htf_sup={G+"▲SUP"+Z if htf_sup else Y+"no-sup"+Z}')
+    # deep book probe line
+    dp = _deep_probe
+    if dp:
+        bias_s  = (f'{G}▲PULL{Z}' if dp.get('bias',0) > 0
+                   else (f'{R}▼PULL{Z}' if dp.get('bias',0) < 0 else f'{Y}FLAT{Z}'))
+        aw = dp.get('nearest_ask_wall')
+        bw = dp.get('nearest_bid_wall')
+        aw_s = f'ask_wall=${aw:,.0f}(+${aw-price:,.0f})' if aw else 'ask_wall=─'
+        bw_s = f'bid_wall=${bw:,.0f}(-${price-bw:,.0f})' if bw else 'bid_wall=─'
+        rows.append(f'  DEEP({dp.get("levels_bid",0)}b/{dp.get("levels_ask",0)}a)'
+                    f'  obi={dp.get("deep_obi",0):+.3f}  {bias_s}'
+                    f'  {aw_s}  {bw_s}')
 
     # line 1: velocity / OB imbalance / concentration / spread
     rows.append(f'  vel={vel:+.4f}  obi={obi_g:+.3f}(n={obi_n:.3f})'
@@ -700,6 +725,7 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                         'shelves':      getattr(state, 'session_shelves', []),
                         'knife':        knife_data,
                         'ob_depth':     ob_depth,
+                        'ob_deep':      _deep_probe,
                         'timeframes': {
                             'tf1m':  (state.closed_1m[-60:]  if getattr(state, 'closed_1m', None) else []),
                             'tf5m':  tf5m_live,
@@ -797,6 +823,151 @@ async def stream():
             _last_depth_sec = ts_s
             _scan_trigger.set()   # new second of OB data → wake scanner
 
+
+def _deep_book_loop():
+    """
+    Separate slow WebSocket for full-depth diff stream.
+    Maintains _deep_bids/_deep_asks — complete order book for directional probe.
+    Runs in its own thread with its own event loop.
+    Never touches the fast-path deque or scan trigger.
+    """
+    import asyncio as _asyncio
+
+    async def _run():
+        global _deep_ready, _deep_probe
+        backoff = 2
+        while True:
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.ws_connect(WS_URL_DEEP, heartbeat=30,
+                                               receive_timeout=60) as ws:
+                        backoff = 2
+                        log('deep-book: connected', C)
+                        async for msg in ws:
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                break
+                            try:
+                                env = json.loads(msg.data)
+                                d   = env.get('data', env)
+                                with _deep_lock:
+                                    for p, q in d.get('b', d.get('bids', [])):
+                                        pf, qf = float(p), float(q)
+                                        if qf == 0.0:
+                                            _deep_bids.pop(pf, None)
+                                        else:
+                                            _deep_bids[pf] = qf
+                                    for p, q in d.get('a', d.get('asks', [])):
+                                        pf, qf = float(p), float(q)
+                                        if qf == 0.0:
+                                            _deep_asks.pop(pf, None)
+                                        else:
+                                            _deep_asks[pf] = qf
+                                    if not _deep_ready and len(_deep_bids) > 20:
+                                        _deep_ready = True
+                                        log(f'deep-book: ready  {len(_deep_bids)}b / {len(_deep_asks)}a levels', G)
+                                # Run probe every 5s
+                                _deep_probe = _probe_deep_book()
+                            except Exception:
+                                pass
+            except Exception as e:
+                log(f'deep-book: {type(e).__name__} — retry {backoff}s', Y)
+                await _asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    loop = _asyncio.new_event_loop()
+    loop.run_until_complete(_run())
+
+
+def _probe_deep_book(n_side=100, orphan_threshold=3.0):
+    """
+    Analyse the full deep book for orphan walls — price levels with
+    disproportionately large volume vs their neighbours.
+
+    Orphan walls = institutional hedge orders placed at a target price
+    from another market (CME, Coinbase, etc.).  Price gravitates to them.
+
+    Returns dict with bid_walls, ask_walls, gravity_bid, gravity_ask,
+    deep_obi (full-book imbalance), and a directional bias.
+    """
+    with _deep_lock:
+        if not _deep_bids or not _deep_asks:
+            return {}
+        bids = sorted(_deep_bids.items(), reverse=True)[:n_side]
+        asks = sorted(_deep_asks.items())[:n_side]
+
+    if not bids or not asks:
+        return {}
+
+    mid = (bids[0][0] + asks[0][0]) / 2.0
+
+    def _orphan_walls(levels, side):
+        if len(levels) < 5:
+            return []
+        vols  = [q for _, q in levels]
+        avg   = sum(vols) / len(vols)
+        walls = []
+        for i, (p, q) in enumerate(levels):
+            neighbors = vols[max(0,i-3):i] + vols[i+1:i+4]
+            nbr_avg   = sum(neighbors) / len(neighbors) if neighbors else avg
+            if nbr_avg > 0 and q >= orphan_threshold * nbr_avg and q >= avg:
+                walls.append({
+                    'price': round(p, 2),
+                    'qty':   round(q, 4),
+                    'dist':  round(abs(p - mid), 2),
+                    'ratio': round(q / nbr_avg, 1),
+                    'side':  side,
+                })
+        return sorted(walls, key=lambda w: w['dist'])
+
+    bid_walls = _orphan_walls(bids, 'bid')
+    ask_walls = _orphan_walls(asks, 'ask')
+
+    # Volume-weighted centre of gravity each side
+    def _cog(levels):
+        tot = sum(q for _, q in levels)
+        if not tot: return mid
+        return sum(p * q for p, q in levels) / tot
+
+    g_bid = round(_cog(bids), 2)
+    g_ask = round(_cog(asks), 2)
+
+    # Full-depth OBI (all captured levels)
+    bv = sum(q for _, q in bids)
+    av = sum(q for _, q in asks)
+    deep_obi = round((bv - av) / (bv + av), 4) if bv + av else 0.0
+
+    # Directional bias: where are the orphan walls pulling price?
+    # Nearest ask wall above = upside target; nearest bid wall below = downside target
+    nearest_ask_wall = ask_walls[0]['price'] if ask_walls else None
+    nearest_bid_wall = bid_walls[0]['price'] if bid_walls else None
+
+    bias = 0
+    if nearest_ask_wall and nearest_bid_wall:
+        ask_dist = nearest_ask_wall - mid
+        bid_dist = mid - nearest_bid_wall
+        if ask_dist < bid_dist * 0.7:
+            bias =  1   # ask wall closer → upward gravitational pull
+        elif bid_dist < ask_dist * 0.7:
+            bias = -1   # bid wall closer → downward gravitational pull
+    elif nearest_ask_wall:
+        bias =  1
+    elif nearest_bid_wall:
+        bias = -1
+
+    return {
+        'mid':           round(mid, 2),
+        'levels_bid':    len(bids),
+        'levels_ask':    len(asks),
+        'deep_obi':      deep_obi,
+        'gravity_bid':   g_bid,
+        'gravity_ask':   g_ask,
+        'bid_walls':     bid_walls[:5],
+        'ask_walls':     ask_walls[:5],
+        'nearest_bid_wall': nearest_bid_wall,
+        'nearest_ask_wall': nearest_ask_wall,
+        'bias':          bias,
+    }
+
     log('connecting...', G)
     backoff = 1
     try:
@@ -849,6 +1020,7 @@ if __name__ == '__main__':
     threading.Thread(target=_push_loop,                                        daemon=True).start()
     threading.Thread(target=_git_push_worker,                                  daemon=True).start()
     threading.Thread(target=_scan_loop, args=(_seed_bars, _disp_tfs),          daemon=True).start()
+    threading.Thread(target=_deep_book_loop,                                   daemon=True).start()
 
     loop = asyncio.new_event_loop()
     task = loop.create_task(stream())
