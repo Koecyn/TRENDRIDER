@@ -128,12 +128,31 @@ def _dashboard(state, tfs, recent_signals):
     mph_tr   = live.get('micro_ph_trough', -0.75)
     align_n  = live.get('align_need',    0.0)
     htf_bars = live.get('htf_bars',      '')
+    s_open   = live.get('sess_open',     0.0)
+    s_high   = live.get('sess_high',     0.0)
+    s_low    = live.get('sess_low',      0.0)
+    s_range  = live.get('sess_range',    0.0)
+    s_chg    = live.get('sess_chg',      0.0)
+    s_pct    = live.get('sess_chg_pct',  0.0)
+    tr_4h    = live.get('trend_4h',      0)
+    tr_1h    = live.get('trend_1h',      0)
+
+    def _trend_str(t):
+        return f'{G}BULL▲{Z}' if t > 0 else (f'{R}BEAR▼{Z}' if t < 0 else f'{Y}COIL─{Z}')
 
     W = 64
     rows = ['\033[2J\033[H']   # clear screen, cursor to home
     rows.append(f'{B}{C}{"─"*W}{Z}')
     rows.append(f'{B}{C}  BTC ${price:>11,.2f}   {now_s}   dk={dk}{Z}')
     rows.append(f'{C}{"─"*W}{Z}')
+    # session range line
+    if s_open > 0:
+        chg_c = G if s_chg >= 0 else R
+        rows.append(f'  SESSION  o=${s_open:,.0f}  h=${s_high:,.0f}  l=${s_low:,.0f}'
+                    f'  rng=${s_range:,.0f}  {chg_c}{s_chg:+,.0f}({s_pct:+.2f}%){Z}')
+    # trend line
+    rows.append(f'  TREND  4h={_trend_str(tr_4h)}  1h={_trend_str(tr_1h)}'
+                f'  htf_sup={G+"▲SUP"+Z if htf_sup else Y+"no-sup"+Z}')
 
     # line 1: velocity / OB imbalance / concentration / spread
     rows.append(f'  vel={vel:+.4f}  obi={obi_g:+.3f}(n={obi_n:.3f})'
@@ -147,12 +166,10 @@ def _dashboard(state, tfs, recent_signals):
     rows.append(f'  μph={G if mok else Z}{micro_ph:+.4f}{Z}'
                 f'[trg:{mph_tr:.3f} pk:{mph_pk:.3f}]'
                 f'  align={res_al:.3f}(n={align_n:.3f})')
-    # line 4: decay / floor / flow rates / HTF support
-    sup_str = f'{G}▲SUP{Z}' if htf_sup else f'{Y}no-sup{Z}'
+    # line 4: decay / floor / flow rates
     dir_str = f'{G}▲{Z}' if res_dir > 0 else (f'{R}▼{Z}' if res_dir < 0 else '─')
     rows.append(f'  ds={decay_sc:.3f}  fos={floor_sc:.3f}'
-                f'  bf={bf:+.4f}  af={af:+.4f}'
-                f'  {sup_str}{dir_str}')
+                f'  bf={bf:+.4f}  af={af:+.4f}  {dir_str}')
     # line 5: HTF bar counts
     if htf_bars:
         rows.append(f'  htf: {htf_bars}')
@@ -538,6 +555,35 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                             state.hist_obi, state.hist_kdv_bals,
                             state.hist_aligns)
                         thresh, peak_ph, trough_ph, obi_conf, gate_rev, gate_cont, align_cont = thr
+                        # ── session stats from seeded candles ──────────────
+                        import time as _time
+                        _now_ms  = int(_time.time() * 1000)
+                        _today0  = _now_ms - (_now_ms % 86_400_000)
+                        _1m_bars = getattr(state, 'closed_1m', [])
+                        _today1m = [b for b in _1m_bars if b['ts'] >= _today0]
+                        if _today1m:
+                            _s_open  = _today1m[0]['open']
+                            _s_high  = max(b['high']  for b in _today1m)
+                            _s_low   = min(b['low']   for b in _today1m)
+                            _s_range = _s_high - _s_low
+                            _s_chg   = mid - _s_open
+                            _s_chg_pct = _s_chg / _s_open * 100 if _s_open else 0.0
+                        else:
+                            _s_open = _s_high = _s_low = _s_range = _s_chg = _s_chg_pct = 0.0
+                        # HTF trend: 4h higher-highs + higher-lows = BULL
+                        _4h = getattr(state, 'tf4h', [])
+                        _1h = getattr(state, 'tf1h', [])
+                        def _htf_trend(bars, n=3):
+                            if len(bars) < n + 1: return 0
+                            hh = all(bars[-i]['high'] > bars[-i-1]['high'] for i in range(1, n+1))
+                            hl = all(bars[-i]['low']  > bars[-i-1]['low']  for i in range(1, n+1))
+                            lh = all(bars[-i]['high'] < bars[-i-1]['high'] for i in range(1, n+1))
+                            ll = all(bars[-i]['low']  < bars[-i-1]['low']  for i in range(1, n+1))
+                            if hh and hl: return  1
+                            if lh and ll: return -1
+                            return 0
+                        _trend_4h = _htf_trend(_4h)
+                        _trend_1h = _htf_trend(_1h)
                         live = {
                             'at':              datetime.fromtimestamp(last_sec, tz=timezone.utc).strftime('%H:%M:%SZ'),
                             'price':           round(mid, 2),
@@ -566,6 +612,14 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                             'htf_sup':         state.last_htf_sup,
                             'htf_bars':        (f'{len(state.tf5m)}x5m {len(state.tf15m)}x15m'
                                                 f' {len(state.tf1h)}x1h {len(state.tf4h)}x4h'),
+                            'sess_open':       round(_s_open,   2),
+                            'sess_high':       round(_s_high,   2),
+                            'sess_low':        round(_s_low,    2),
+                            'sess_range':      round(_s_range,  2),
+                            'sess_chg':        round(_s_chg,    2),
+                            'sess_chg_pct':    round(_s_chg_pct, 3),
+                            'trend_4h':        _trend_4h,
+                            'trend_1h':        _trend_1h,
                         }
                         state.live = live   # dashboard reads state.live every redraw
                 except Exception:
