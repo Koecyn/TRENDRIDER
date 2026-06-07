@@ -63,11 +63,21 @@ _last_depth_sec = 0
 # ── Deep order book (separate slow stream, diff-based) ────────────────────────
 # Fast 20-level stream feeds the physics engine unchanged.
 # Deep book is maintained here for directional/target confirmation only.
-_deep_bids   = {}   # price → qty  (full book, ask side)
-_deep_asks   = {}   # price → qty  (full book, bid side)
+_deep_bids   = {}   # price → qty  (full book, bid side)
+_deep_asks   = {}   # price → qty  (full book, ask side)
 _deep_lock   = threading.Lock()
-_deep_ready  = False   # True once we have meaningful depth (>20 levels seen)
-_deep_probe  = {}      # last orphan-wall analysis result
+_deep_ready  = False
+_deep_probe  = {}
+
+# Per-level history for friction classification
+# price → collections.deque of (ts_ms, qty) — last 40 snapshots
+_level_hist  = {}
+# Reload tracker: price → {'ts': ms, 'qty': qty_before_pull, 'side': str}
+_reload_pend = {}
+# Reload events: price → {'ratio': float, 'side': str, 'ts': ms}
+# ratio = new_qty / (prev_qty - filled_qty)
+# >1 = reloaded more than consumed (defending), <1 = withdrawing, ~1 = MM
+_reload_evts = {}   # kept for last 60s
 
 GIT_TIMEOUT = 60   # seconds before a git subprocess is killed
 
@@ -823,23 +833,55 @@ def _deep_book_loop():
                             try:
                                 env = json.loads(msg.data)
                                 d   = env.get('data', env)
+                                ts_ms = int(time.time() * 1000)
                                 with _deep_lock:
-                                    for p, q in d.get('b', d.get('bids', [])):
-                                        pf, qf = float(p), float(q)
-                                        if qf == 0.0:
-                                            _deep_bids.pop(pf, None)
-                                        else:
-                                            _deep_bids[pf] = qf
-                                    for p, q in d.get('a', d.get('asks', [])):
-                                        pf, qf = float(p), float(q)
-                                        if qf == 0.0:
-                                            _deep_asks.pop(pf, None)
-                                        else:
-                                            _deep_asks[pf] = qf
+                                    # expire old reload events (>60s)
+                                    stale = [k for k,v in _reload_evts.items()
+                                             if ts_ms - v['ts'] > 60000]
+                                    for k in stale: _reload_evts.pop(k, None)
+
+                                    def _apply(book, side, updates):
+                                        for p, q in updates:
+                                            pf, qf = float(p), float(q)
+                                            prev   = book.get(pf, 0.0)
+                                            key    = (side, pf)
+
+                                            # Level history (full satoshi depth, no cap)
+                                            if key not in _level_hist:
+                                                _level_hist[key] = collections.deque(maxlen=40)
+                                            _level_hist[key].append((ts_ms, qf))
+
+                                            if qf == 0.0:
+                                                book.pop(pf, None)
+                                                # Level disappeared — record for reload detection
+                                                if prev > 0.001:
+                                                    _reload_pend[key] = {
+                                                        'ts': ts_ms, 'qty': prev, 'side': side}
+                                            else:
+                                                book[pf] = qf
+                                                # Level reappeared after pull — compute reload ratio
+                                                if key in _reload_pend and prev == 0.0:
+                                                    pend = _reload_pend.pop(key)
+                                                    # ratio: how much came back vs what was there
+                                                    ratio = round(qf / pend['qty'], 3) if pend['qty'] else 0
+                                                    _reload_evts[key] = {
+                                                        'ts':    ts_ms,
+                                                        'ratio': ratio,
+                                                        'prev':  round(pend['qty'], 4),
+                                                        'curr':  round(qf, 4),
+                                                        'side':  side,
+                                                        # >1 = added more than before (defending)
+                                                        # ~1 = exact reload (market maker)
+                                                        # <1 = came back with less (withdrawing)
+                                                    }
+
+                                    _apply(_deep_bids, 'bid', d.get('b', d.get('bids', [])))
+                                    _apply(_deep_asks, 'ask', d.get('a', d.get('asks', [])))
+
                                     if not _deep_ready and len(_deep_bids) > 20:
                                         _deep_ready = True
-                                        log(f'deep-book: ready  {len(_deep_bids)}b / {len(_deep_asks)}a levels', G)
-                                # Run probe every 5s
+                                        log(f'deep-book: ready  {len(_deep_bids)}b/{len(_deep_asks)}a levels', G)
+
                                 _deep_probe = _probe_deep_book()
                             except Exception:
                                 pass
@@ -852,94 +894,121 @@ def _deep_book_loop():
     loop.run_until_complete(_run())
 
 
-def _probe_deep_book(n_side=100, orphan_threshold=3.0):
+def _probe_deep_book(orphan_threshold=3.0):
     """
-    Analyse the full deep book for orphan walls — price levels with
-    disproportionately large volume vs their neighbours.
+    Full-depth order book analysis — no level cap (full satoshi depth).
 
-    Orphan walls = institutional hedge orders placed at a target price
-    from another market (CME, Coinbase, etc.).  Price gravitates to them.
+    Friction classification per orphan wall:
+      STABLE     — qty unchanged across recent history (real resting order)
+      ABSORBING  — qty monotonically decreasing (being filled by takers)
+      PULLING    — disappeared without a fill (spoof/cancel)
+      RELOAD_+   — reloaded with MORE than before (defending, directional)
+      RELOAD_=   — reloaded ~equal (market maker maintaining level)
+      RELOAD_-   — reloaded with LESS (withdrawing, weakening wall)
+      NEW        — just appeared (fewer than 3 history snapshots)
 
-    Returns dict with bid_walls, ask_walls, gravity_bid, gravity_ask,
-    deep_obi (full-book imbalance), and a directional bias.
+    Reload ratio = new_qty / prev_qty_before_pull.
+    >1.05 = RELOAD_+, 0.95-1.05 = RELOAD_=, <0.95 = RELOAD_-
     """
     with _deep_lock:
         if not _deep_bids or not _deep_asks:
             return {}
-        bids = sorted(_deep_bids.items(), reverse=True)[:n_side]
-        asks = sorted(_deep_asks.items())[:n_side]
+        # Full depth — no cap
+        bids = sorted(_deep_bids.items(), reverse=True)
+        asks = sorted(_deep_asks.items())
+        reload_snap = dict(_reload_evts)
+        hist_snap   = {k: list(v) for k, v in _level_hist.items()}
 
     if not bids or not asks:
         return {}
 
     mid = (bids[0][0] + asks[0][0]) / 2.0
 
+    def _classify(side, price):
+        key = (side, price)
+        # Recent reload event?
+        if key in reload_snap:
+            r = reload_snap[key]['ratio']
+            if   r > 1.05: return 'RELOAD_+'
+            elif r < 0.95: return 'RELOAD_-'
+            else:          return 'RELOAD_='
+        hist = hist_snap.get(key, [])
+        if len(hist) < 3:
+            return 'NEW'
+        qtys = [q for _, q in hist]
+        if all(qtys[i] >= qtys[i+1] for i in range(len(qtys)-1)) and qtys[-1] < qtys[0]*0.95:
+            return 'ABSORBING'
+        if max(qtys) - min(qtys) < qtys[0] * 0.01:
+            return 'STABLE'
+        return 'DYNAMIC'
+
     def _orphan_walls(levels, side):
         if len(levels) < 5:
             return []
-        vols  = [q for _, q in levels]
-        avg   = sum(vols) / len(vols)
-        walls = []
+        vols    = [q for _, q in levels]
+        avg     = sum(vols) / len(vols)
+        walls   = []
         for i, (p, q) in enumerate(levels):
-            neighbors = vols[max(0,i-3):i] + vols[i+1:i+4]
-            nbr_avg   = sum(neighbors) / len(neighbors) if neighbors else avg
+            nbrs    = vols[max(0,i-3):i] + vols[i+1:i+4]
+            nbr_avg = sum(nbrs)/len(nbrs) if nbrs else avg
             if nbr_avg > 0 and q >= orphan_threshold * nbr_avg and q >= avg:
+                key = (side, p)
+                reload_info = reload_snap.get(key)
                 walls.append({
-                    'price': round(p, 2),
-                    'qty':   round(q, 4),
-                    'dist':  round(abs(p - mid), 2),
-                    'ratio': round(q / nbr_avg, 1),
-                    'side':  side,
+                    'price':    round(p, 2),
+                    'qty':      round(q, 4),
+                    'dist':     round(abs(p - mid), 2),
+                    'ratio':    round(q / nbr_avg, 1),
+                    'side':     side,
+                    'friction': _classify(side, p),
+                    'reload_r': round(reload_info['ratio'], 3) if reload_info else None,
+                    'reload_prev': reload_info['prev'] if reload_info else None,
+                    'reload_curr': reload_info['curr'] if reload_info else None,
                 })
         return sorted(walls, key=lambda w: w['dist'])
 
     bid_walls = _orphan_walls(bids, 'bid')
     ask_walls = _orphan_walls(asks, 'ask')
 
-    # Volume-weighted centre of gravity each side
     def _cog(levels):
         tot = sum(q for _, q in levels)
-        if not tot: return mid
-        return sum(p * q for p, q in levels) / tot
+        return sum(p*q for p,q in levels)/tot if tot else mid
 
-    g_bid = round(_cog(bids), 2)
-    g_ask = round(_cog(asks), 2)
-
-    # Full-depth OBI (all captured levels)
     bv = sum(q for _, q in bids)
     av = sum(q for _, q in asks)
     deep_obi = round((bv - av) / (bv + av), 4) if bv + av else 0.0
 
-    # Directional bias: where are the orphan walls pulling price?
-    # Nearest ask wall above = upside target; nearest bid wall below = downside target
     nearest_ask_wall = ask_walls[0]['price'] if ask_walls else None
     nearest_bid_wall = bid_walls[0]['price'] if bid_walls else None
 
     bias = 0
     if nearest_ask_wall and nearest_bid_wall:
-        ask_dist = nearest_ask_wall - mid
-        bid_dist = mid - nearest_bid_wall
-        if ask_dist < bid_dist * 0.7:
-            bias =  1   # ask wall closer → upward gravitational pull
-        elif bid_dist < ask_dist * 0.7:
-            bias = -1   # bid wall closer → downward gravitational pull
-    elif nearest_ask_wall:
-        bias =  1
-    elif nearest_bid_wall:
-        bias = -1
+        if (nearest_ask_wall - mid) < (mid - nearest_bid_wall) * 0.7: bias =  1
+        elif (mid - nearest_bid_wall) < (nearest_ask_wall - mid) * 0.7: bias = -1
+    elif nearest_ask_wall: bias =  1
+    elif nearest_bid_wall: bias = -1
+
+    # Reload directional summary: net reload pressure
+    reloads_up   = [v for v in reload_snap.values() if v['side']=='ask' and v['ratio']>1.05]
+    reloads_dn   = [v for v in reload_snap.values() if v['side']=='bid' and v['ratio']>1.05]
+    reload_bias  = (1 if len(reloads_up) > len(reloads_dn) else
+                   -1 if len(reloads_dn) > len(reloads_up) else 0)
 
     return {
-        'mid':           round(mid, 2),
-        'levels_bid':    len(bids),
-        'levels_ask':    len(asks),
-        'deep_obi':      deep_obi,
-        'gravity_bid':   g_bid,
-        'gravity_ask':   g_ask,
-        'bid_walls':     bid_walls[:5],
-        'ask_walls':     ask_walls[:5],
+        'mid':              round(mid, 2),
+        'levels_bid':       len(bids),
+        'levels_ask':       len(asks),
+        'deep_obi':         deep_obi,
+        'gravity_bid':      round(_cog(bids), 2),
+        'gravity_ask':      round(_cog(asks), 2),
+        'bid_walls':        bid_walls[:8],
+        'ask_walls':        ask_walls[:8],
         'nearest_bid_wall': nearest_bid_wall,
         'nearest_ask_wall': nearest_ask_wall,
-        'bias':          bias,
+        'bias':             bias,
+        'reload_bias':      reload_bias,
+        'reloads_ask_defending': len(reloads_up),
+        'reloads_bid_defending': len(reloads_dn),
     }
 
 
