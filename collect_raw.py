@@ -830,7 +830,7 @@ def _deep_book_loop():
                     # stays near-empty until every level happens to be updated.
                     try:
                         snap_url = ('https://api.binance.us/api/v3/depth'
-                                    f'?symbol=BTCUSDT&limit=1000')
+                                    f'?symbol=BTCUSDT&limit=100')
                         async with sess.get(snap_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                             snap = await r.json(content_type=None)
                         snap_ts = int(time.time() * 1000)
