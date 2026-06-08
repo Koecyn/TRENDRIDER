@@ -756,7 +756,7 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                         'shelves':      getattr(state, 'session_shelves', []),
                         'knife':        knife_data,
                         'ob_depth':     ob_depth,
-                        'ob_deep':      {**_deep_probe, '_status': _deep_status},
+                        'ob_deep':      {**_deep_probe, 'deep_status': _deep_status},
                         'timeframes': {
                             'tf1m':  (state.closed_1m[-60:]  if getattr(state, 'closed_1m', None) else []),
                             'tf5m':  tf5m_live,
@@ -835,28 +835,27 @@ def _deep_book_loop():
     same concept as depth20@100ms but via REST at 1s cadence.
     No diff handling, no state sync. Each response replaces the book.
     """
-    global _deep_ready, _deep_probe
+    global _deep_ready, _deep_probe, _deep_status
+    import urllib.request as _ur
     backoff = 2
     _dp_path = DATA_DIR / 'deep_probe.json'
 
     while True:
         try:
-            import urllib.request as _ur
-            while True:
-                try:
-                    ts_ms = int(time.time() * 1000)
-                    req = _ur.Request(DEEP_BOOK_URL,
-                                      headers={'User-Agent': 'python-trendrider/1.0'})
-                    with _ur.urlopen(req, timeout=5) as resp:
-                        raw = json.loads(resp.read())
+            ts_ms = int(time.time() * 1000)
+            req = _ur.Request(DEEP_BOOK_URL,
+                              headers={'User-Agent': 'python-trendrider/1.0'})
+            with _ur.urlopen(req, timeout=5) as resp:
+                raw = json.loads(resp.read())
 
-                    bids_raw = raw.get('bids', [])
-                    asks_raw = raw.get('asks', [])
-                    if not bids_raw or not asks_raw:
-                        time.sleep(DEEP_POLL_S)
-                        continue
+            bids_raw = raw.get('bids', [])
+            asks_raw = raw.get('asks', [])
+            if not bids_raw or not asks_raw:
+                _deep_status = f'empty response: {list(raw.keys())}'
+                time.sleep(DEEP_POLL_S)
+                continue
 
-                    with _deep_lock:
+            with _deep_lock:
                         # Expire old reload events (>60s)
                         stale = [k for k,v in _reload_evts.items() if ts_ms - v['ts'] > 60000]
                         for k in stale: _reload_evts.pop(k, None)
@@ -924,27 +923,22 @@ def _deep_book_loop():
                             _deep_ready = True
                             log(f'deep-book: ready  {len(_deep_bids)}b/{len(_deep_asks)}a levels', G)
 
-                    _deep_probe = _probe_deep_book()
-                    if _deep_probe:
-                        try:
-                            _dp_path.write_text(json.dumps(_deep_probe, indent=2), encoding='utf-8')
-                        except Exception:
-                            pass
+            _deep_probe = _probe_deep_book()
+            try:
+                _dp_path.write_text(json.dumps(
+                    {**_deep_probe, '_status': _deep_status}, indent=2), encoding='utf-8')
+            except Exception:
+                pass
 
-                    _deep_status = f'ok {len(_deep_bids)}b/{len(_deep_asks)}a'
-                    backoff = 2
-                    time.sleep(DEEP_POLL_S)
-
-                except Exception as e:
-                    _deep_status = f'{type(e).__name__}: {e}'
-                    log(f'deep-book: {_deep_status} — retry {backoff}s', Y)
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, 30)
+            _deep_status = f'ok {len(_deep_bids)}b/{len(_deep_asks)}a'
+            backoff = 2
+            time.sleep(DEEP_POLL_S)
 
         except Exception as e:
-            log(f'deep-book outer: {e}', R)
+            _deep_status = f'{type(e).__name__}: {e}'
+            log(f'deep-book: {_deep_status} — retry {backoff}s', Y)
             time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            backoff = min(backoff * 2, 30)
 
 
 def _probe_deep_book(orphan_threshold=3.0):
@@ -979,7 +973,7 @@ def _probe_deep_book(orphan_threshold=3.0):
 
     def _classify(side, price):
         key = (side, price)
-        now_ms = _time.time() * 1000
+        now_ms = time.time() * 1000
         # Recent reload event takes priority
         if key in reload_snap:
             r = reload_snap[key]['ratio']
