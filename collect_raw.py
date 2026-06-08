@@ -68,6 +68,7 @@ _deep_asks   = {}   # price → qty  (full book, ask side)
 _deep_lock   = threading.Lock()
 _deep_ready  = False
 _deep_probe  = {}
+_deep_status = 'init'   # last error or 'ok' — visible in signals JSON
 
 # Per-level history for friction classification
 # price → collections.deque of (ts_ms, qty) — last 40 snapshots
@@ -755,7 +756,7 @@ def _scan_loop(seed_bars=None, display_tfs=None):
                         'shelves':      getattr(state, 'session_shelves', []),
                         'knife':        knife_data,
                         'ob_depth':     ob_depth,
-                        'ob_deep':      _deep_probe,
+                        'ob_deep':      {**_deep_probe, '_status': _deep_status},
                         'timeframes': {
                             'tf1m':  (state.closed_1m[-60:]  if getattr(state, 'closed_1m', None) else []),
                             'tf5m':  tf5m_live,
@@ -844,7 +845,9 @@ def _deep_book_loop():
             while True:
                 try:
                     ts_ms = int(time.time() * 1000)
-                    with _ur.urlopen(DEEP_BOOK_URL, timeout=5) as resp:
+                    req = _ur.Request(DEEP_BOOK_URL,
+                                      headers={'User-Agent': 'python-trendrider/1.0'})
+                    with _ur.urlopen(req, timeout=5) as resp:
                         raw = json.loads(resp.read())
 
                     bids_raw = raw.get('bids', [])
@@ -928,11 +931,13 @@ def _deep_book_loop():
                         except Exception:
                             pass
 
+                    _deep_status = f'ok {len(_deep_bids)}b/{len(_deep_asks)}a'
                     backoff = 2
                     time.sleep(DEEP_POLL_S)
 
                 except Exception as e:
-                    log(f'deep-book: {type(e).__name__} — retry {backoff}s', Y)
+                    _deep_status = f'{type(e).__name__}: {e}'
+                    log(f'deep-book: {_deep_status} — retry {backoff}s', Y)
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 30)
 
