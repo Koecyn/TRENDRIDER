@@ -35,9 +35,9 @@ SESSIONS_BRANCH_PREFIX = 'data/sessions/'   # archive — one branch per session
 WS_URL = ('wss://stream.binance.us:9443/stream'
           '?streams=btcusdt@depth20@100ms/btcusdt@aggTrade')
 
-# Second stream for deep book — diff-based, slower, read-only directional probe
-WS_URL_DEEP = ('wss://stream.binance.us:9443/stream'
-               '?streams=btcusdt@depth@1000ms')
+# Deep book — REST poll for 100 levels, refreshed every second
+DEEP_BOOK_URL  = 'https://api.binance.us/api/v3/depth?symbol=BTCUSDT&limit=100'
+DEEP_POLL_S    = 1.0   # poll interval seconds
 
 WINDOW_LINES   = 15_000   # bounded deque — ~125 min at 2 records/sec
 PUSH_S         = 2        # write snapshot every N seconds
@@ -830,139 +830,116 @@ def _push_loop():
 
 def _deep_book_loop():
     """
-    Separate slow WebSocket for full-depth diff stream.
-    Maintains _deep_bids/_deep_asks — complete order book for directional probe.
-    Runs in its own thread with its own event loop.
-    Never touches the fast-path deque or scan trigger.
+    Poll /api/v3/depth?limit=100 every second — full snapshot of 100 levels,
+    same concept as depth20@100ms but via REST at 1s cadence.
+    No diff handling, no state sync. Each response replaces the book.
     """
-    import asyncio as _asyncio
+    global _deep_ready, _deep_probe
+    backoff = 2
+    _dp_path = DATA_DIR / 'deep_probe.json'
 
-    async def _run():
-        global _deep_ready, _deep_probe
-        backoff = 2
-        while True:
-            try:
-                async with aiohttp.ClientSession() as sess:
-                    # Seed full book snapshot before applying diffs.
-                    # Diff stream only sends changes — without a snapshot the book
-                    # stays near-empty until every level happens to be updated.
-                    try:
-                        snap_url = ('https://api.binance.us/api/v3/depth'
-                                    f'?symbol=BTCUSDT&limit=100')
-                        async with sess.get(snap_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                            if r.status != 200:
-                                raise Exception(f'HTTP {r.status}')
-                            snap = await r.json(content_type=None)
-                        bids_snap = [(float(p), float(q)) for p, q in snap.get('bids', []) if float(q) > 0]
-                        asks_snap = [(float(p), float(q)) for p, q in snap.get('asks', []) if float(q) > 0]
-                        if not bids_snap or not asks_snap:
-                            raise Exception('empty snapshot response')
-                        snap_ts = int(time.time() * 1000)
-                        with _deep_lock:
-                            _deep_bids.clear()
-                            _deep_asks.clear()
-                            for pf, qf in bids_snap:
-                                _deep_bids[pf] = qf
-                                key = ('bid', pf)
-                                if key not in _level_first_seen:
-                                    _level_first_seen[key] = snap_ts
-                                _level_last_seen[key] = snap_ts
-                            for pf, qf in asks_snap:
-                                _deep_asks[pf] = qf
-                                key = ('ask', pf)
-                                if key not in _level_first_seen:
-                                    _level_first_seen[key] = snap_ts
-                                _level_last_seen[key] = snap_ts
-                        log(f'deep-book: snapshot {len(_deep_bids)}b/{len(_deep_asks)}a levels', C)
-                    except Exception as e:
-                        log(f'deep-book: snapshot failed ({e}) — diffs only', Y)
+    while True:
+        try:
+            import urllib.request as _ur
+            while True:
+                try:
+                    ts_ms = int(time.time() * 1000)
+                    with _ur.urlopen(DEEP_BOOK_URL, timeout=5) as resp:
+                        raw = json.loads(resp.read())
 
-                    async with sess.ws_connect(WS_URL_DEEP, heartbeat=30,
-                                               receive_timeout=60) as ws:
-                        backoff = 2
-                        log('deep-book: connected', C)
-                        async for msg in ws:
-                            if msg.type != aiohttp.WSMsgType.TEXT:
-                                break
-                            try:
-                                env = json.loads(msg.data)
-                                d   = env.get('data', env)
-                                ts_ms = int(time.time() * 1000)
-                                with _deep_lock:
-                                    # expire old reload events (>60s)
-                                    stale = [k for k,v in _reload_evts.items()
-                                             if ts_ms - v['ts'] > 60000]
-                                    for k in stale: _reload_evts.pop(k, None)
+                    bids_raw = raw.get('bids', [])
+                    asks_raw = raw.get('asks', [])
+                    if not bids_raw or not asks_raw:
+                        time.sleep(DEEP_POLL_S)
+                        continue
 
-                                    def _apply(book, side, updates):
-                                        for p, q in updates:
-                                            pf, qf = float(p), float(q)
-                                            prev   = book.get(pf, 0.0)
-                                            key    = (side, pf)
+                    with _deep_lock:
+                        # Expire old reload events (>60s)
+                        stale = [k for k,v in _reload_evts.items() if ts_ms - v['ts'] > 60000]
+                        for k in stale: _reload_evts.pop(k, None)
 
-                                            # Level history (full satoshi depth, no cap)
-                                            if key not in _level_hist:
-                                                _level_hist[key] = collections.deque(maxlen=40)
-                                            _level_hist[key].append((ts_ms, qf))
+                        # Replace book — full snapshot each poll
+                        prev_bids = dict(_deep_bids)
+                        prev_asks = dict(_deep_asks)
+                        _deep_bids.clear()
+                        _deep_asks.clear()
 
-                                            # Track first/last seen for static STABLE detection
-                                            # Diff stream only sends updates on changes; a level
-                                            # that never changes never appears → check age instead
-                                            if qf > 0:
-                                                if key not in _level_first_seen:
-                                                    _level_first_seen[key] = ts_ms
-                                                _level_last_seen[key] = ts_ms
+                        for p, q in bids_raw:
+                            pf, qf = float(p), float(q)
+                            if qf <= 0: continue
+                            key = ('bid', pf)
+                            prev_q = prev_bids.get(pf, 0.0)
+                            _deep_bids[pf] = qf
 
-                                            if qf == 0.0:
-                                                book.pop(pf, None)
-                                                # Level disappeared — record for reload detection
-                                                if prev > 0.001:
-                                                    _reload_pend[key] = {
-                                                        'ts': ts_ms, 'qty': prev, 'side': side}
-                                            else:
-                                                book[pf] = qf
-                                                # Level reappeared after pull — compute reload ratio
-                                                if key in _reload_pend and prev == 0.0:
-                                                    pend = _reload_pend.pop(key)
-                                                    # ratio: how much came back vs what was there
-                                                    ratio = round(qf / pend['qty'], 3) if pend['qty'] else 0
-                                                    _reload_evts[key] = {
-                                                        'ts':    ts_ms,
-                                                        'ratio': ratio,
-                                                        'prev':  round(pend['qty'], 4),
-                                                        'curr':  round(qf, 4),
-                                                        'side':  side,
-                                                        # >1 = added more than before (defending)
-                                                        # ~1 = exact reload (market maker)
-                                                        # <1 = came back with less (withdrawing)
-                                                    }
+                            if key not in _level_hist:
+                                _level_hist[key] = collections.deque(maxlen=40)
+                            _level_hist[key].append((ts_ms, qf))
 
-                                    _apply(_deep_bids, 'bid', d.get('b', d.get('bids', [])))
-                                    _apply(_deep_asks, 'ask', d.get('a', d.get('asks', [])))
+                            if key not in _level_first_seen:
+                                _level_first_seen[key] = ts_ms
+                            _level_last_seen[key] = ts_ms
 
-                                    if not _deep_ready and len(_deep_bids) > 20:
-                                        _deep_ready = True
-                                        log(f'deep-book: ready  {len(_deep_bids)}b/{len(_deep_asks)}a levels', G)
+                            # Reload detection: level was gone last poll, back now
+                            if prev_q == 0.0 and key in _reload_pend:
+                                pend = _reload_pend.pop(key)
+                                ratio = round(qf / pend['qty'], 3) if pend['qty'] else 0
+                                _reload_evts[key] = {'ts': ts_ms, 'ratio': ratio,
+                                                     'prev': round(pend['qty'], 4),
+                                                     'curr': round(qf, 4), 'side': 'bid'}
 
-                                _deep_probe = _probe_deep_book()
-                                # Write to local file for real-time reads
-                                if _deep_probe:
-                                    try:
-                                        _dp_path = DATA_DIR / 'deep_probe.json'
-                                        _dp_path.write_text(
-                                            json.dumps(_deep_probe, indent=2),
-                                            encoding='utf-8')
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
-            except Exception as e:
-                log(f'deep-book: {type(e).__name__} — retry {backoff}s', Y)
-                await _asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+                        for p, q in asks_raw:
+                            pf, qf = float(p), float(q)
+                            if qf <= 0: continue
+                            key = ('ask', pf)
+                            prev_q = prev_asks.get(pf, 0.0)
+                            _deep_asks[pf] = qf
 
-    loop = _asyncio.new_event_loop()
-    loop.run_until_complete(_run())
+                            if key not in _level_hist:
+                                _level_hist[key] = collections.deque(maxlen=40)
+                            _level_hist[key].append((ts_ms, qf))
+
+                            if key not in _level_first_seen:
+                                _level_first_seen[key] = ts_ms
+                            _level_last_seen[key] = ts_ms
+
+                            if prev_q == 0.0 and key in _reload_pend:
+                                pend = _reload_pend.pop(key)
+                                ratio = round(qf / pend['qty'], 3) if pend['qty'] else 0
+                                _reload_evts[key] = {'ts': ts_ms, 'ratio': ratio,
+                                                     'prev': round(pend['qty'], 4),
+                                                     'curr': round(qf, 4), 'side': 'ask'}
+
+                        # Detect disappeared levels (reload pending)
+                        for pf, prev_q in prev_bids.items():
+                            if pf not in _deep_bids and prev_q > 0.001:
+                                _reload_pend[('bid', pf)] = {'ts': ts_ms, 'qty': prev_q, 'side': 'bid'}
+                        for pf, prev_q in prev_asks.items():
+                            if pf not in _deep_asks and prev_q > 0.001:
+                                _reload_pend[('ask', pf)] = {'ts': ts_ms, 'qty': prev_q, 'side': 'ask'}
+
+                        if not _deep_ready:
+                            _deep_ready = True
+                            log(f'deep-book: ready  {len(_deep_bids)}b/{len(_deep_asks)}a levels', G)
+
+                    _deep_probe = _probe_deep_book()
+                    if _deep_probe:
+                        try:
+                            _dp_path.write_text(json.dumps(_deep_probe, indent=2), encoding='utf-8')
+                        except Exception:
+                            pass
+
+                    backoff = 2
+                    time.sleep(DEEP_POLL_S)
+
+                except Exception as e:
+                    log(f'deep-book: {type(e).__name__} — retry {backoff}s', Y)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
+
+        except Exception as e:
+            log(f'deep-book outer: {e}', R)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
 
 def _probe_deep_book(orphan_threshold=3.0):
