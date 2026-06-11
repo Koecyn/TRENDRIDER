@@ -112,8 +112,25 @@ def _load_candles(fname):
         return []
 
 
+def _load_tf_file(tf: str) -> list:
+    """Load pre-built TF bars from build_candles output. Maps buy_v → taker_buy."""
+    p = os.path.join(_TMP, f'tf_{tf}.json.gz')
+    if os.path.exists(p):
+        try:
+            with gzip.open(p, 'rt') as f:
+                bars = json.loads(f.read())
+            return [dict(b, taker_buy=b.get('buy_v', b.get('volume', 0) * 0.5))
+                    for b in bars]
+        except Exception:
+            pass
+    return []
+
+
 def _fetch_candles_1m():
-    """Load backfilled 1m candles, merging live session bars written by scan_live."""
+    """Load 1m candles: pre-built tf_1m.json.gz first (build_candles output), then legacy merge."""
+    bars = _load_tf_file('1m')
+    if bars:
+        return bars
     base = _load_candles('BTCUSDT_1m.json.gz')
 
     # Live session candles (bar dicts, not klines) — check local file first, then git
@@ -147,7 +164,10 @@ def _fetch_candles_1m():
 
 
 def _fetch_candles_1h():
-    """Load backfilled 1h candles."""
+    """Load 1h candles: pre-built tf_1h.json.gz first (build_candles output), then legacy file."""
+    bars = _load_tf_file('1h')
+    if bars:
+        return bars
     return _load_candles('BTCUSDT_1h.json.gz')
 
 
@@ -2360,6 +2380,15 @@ def _seed_state_from_candles(state: ScanState, tf1m: list, ob_by_sec: dict,
     if h1:
         state.tf1h_seed = h1
     _update_htf(state)
+    # Overlay pre-built TF bars when available — deeper history than live aggregation
+    for _ptf, _pattr in (('5m','tf5m'),('10m','tf10m'),('15m','tf15m'),
+                          ('30m','tf30m'),('45m','tf45m')):
+        _pb = _load_tf_file(_ptf)
+        if _pb:
+            setattr(state, _pattr, _pb)
+    _pb4h = _load_tf_file('4h')
+    if _pb4h:
+        state.tf4h = _pb4h
     print(f'[seed] HTF: {len(state.tf5m)}x5m  {len(state.tf15m)}x15m  '
           f'{len(state.tf1h)}x1h  {len(state.tf4h)}x4h'
           f'  (1h-seed={len(h1)})', flush=True)

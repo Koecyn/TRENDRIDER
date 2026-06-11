@@ -1136,9 +1136,19 @@ if __name__ == '__main__':
 
     _seed_bars = []
     try:
-        import pull_candles
-        pull_candles.backfill_local(verbose=True)   # fetch + save 1m/1h candles to ~/.trendrider/
-        _seed_bars = pull_candles.fetch_seed_bars(1000)
+        import ingest as _ingest
+        import build_candles as _bc
+        import gzip as _gz_seed, json as _json_seed
+        _ingest.run(verbose=True)         # fetch 1m/1h/4h klines → ~/.trendrider/
+        _bc.save(verbose=True)            # aggregate all TFs + rolling stats → ~/.trendrider/tf_*.json.gz
+        _tf1m_p = DATA_DIR / 'tf_1m.json.gz'
+        if _tf1m_p.exists():
+            with _gz_seed.open(_tf1m_p, 'rt') as _f:
+                _raw_bars = _json_seed.loads(_f.read())
+            # Map buy_v → taker_buy for wave_scan compatibility
+            _seed_bars = [dict(b, taker_buy=b.get('buy_v', b.get('volume', 0) * 0.5))
+                          for b in _raw_bars]
+            log(f'candle seed: {len(_seed_bars)} x 1m bars from tf_1m.json.gz', G)
     except Exception as e:
         log(f'candle seed (non-fatal): {e}', R)
 
