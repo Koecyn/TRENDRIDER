@@ -14,7 +14,7 @@ Run:
     A1
 """
 
-import asyncio, gzip, json, os, signal, subprocess, sys, threading, time
+import asyncio, gzip, io, json, os, signal, subprocess, sys, threading, time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,9 +42,12 @@ TIMEFRAMES = {
     '30m': 1800, '45m': 2700, '1h': 3600, '4h': 14400,
 }
 
-G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; Z='\033[0m'
+G='\033[92m'; R='\033[91m'; Y='\033[93m'; C='\033[96m'; W='\033[97m'; B='\033[94m'; Z='\033[0m'
 def _utc(): return datetime.now(timezone.utc).strftime('%H:%M:%S')
-SEP = C + '─' * 58 + Z
+SEP  = C + '─' * 56 + Z
+SEPE = W + '═' * 56 + Z   # heavy border for status blocks
+SEPS = G + '█' * 56 + Z   # solid bar for LONG signals
+SEPR = R + '█' * 56 + Z   # solid bar for SHORT signals
 
 
 # ── Shared state ───────────────────────────────────────────────────────────────
@@ -74,50 +77,123 @@ _scan_state = None   # wave_scan.ScanState
 # ── Terminal output ────────────────────────────────────────────────────────────
 
 def _hdr():
-    print(f'\n{SEP}')
-    print(f'{W}  A1 · BTCUSDT  real-time ticks + candles{Z}')
+    print(f'\n{SEPE}')
+    print(f'{W}  A1 · BTCUSDT  real-time ticks + candles + physics{Z}')
     print(f'  {_utc()} UTC  ·  {DATA_DIR}')
     print(f'  WRITE={WRITE_S}s  BUILD={BUILD_S}s  PUSH={PUSH_S}s  gzip-9')
-    print(f'{SEP}\n', flush=True)
+    print(f'{SEPE}\n', flush=True)
 
 
-def _print_counts():
+def _g(ok):
+    return f'{G}✓{Z}' if ok else f'{R}✗{Z}'
+
+
+def _print_status(new_sigs=None):
+    """
+    Unified status block printed every 5 1s-bar closes and on any TF close.
+    Two sections: PHYSICS indicators + CANDLES leading edge.
+    Signal cards printed separately at the end if new_sigs provided.
+    """
+    now_sec = int(time.time())
+    live    = getattr(_scan_state, 'live', {}) if _scan_state else {}
+
+    print(f'\n{SEPE}', flush=True)
+
+    # ── Physics panel ────────────────────────────────────────────────────
+    if live:
+        price   = live.get('price',        0)
+        dk      = live.get('dk',           '?')
+        phase   = live.get('phase',        '?')
+        micro   = live.get('micro_ph',     0)
+        vel     = live.get('vel',          0)
+        obi     = live.get('obi',          0);  obi_n   = live.get('obi_need',     1)
+        score   = live.get('score',        0);  score_n = live.get('score_need',   1)
+        kdv     = live.get('kdv_bal',      0);  kdv_r   = live.get('kdv_need_rev', 999)
+        spr     = live.get('spr',          0)
+        htf_sup = getattr(_scan_state, 'last_htf_sup', False)
+
+        dk_ok    = (dk == 'FLOOR')
+        vel_ok   = (vel > 0)
+        obi_ok   = (obi >= obi_n)
+        score_ok = (score >= score_n)
+        kdv_ok   = (kdv >= kdv_r)
+        n_pass   = sum([dk_ok, vel_ok, obi_ok, score_ok, kdv_ok])
+        nc       = G if n_pass == 5 else (Y if n_pass >= 3 else R)
+
+        htf_c  = G if htf_sup else R
+        dk_c   = G if dk_ok  else R
+        vel_c  = G if vel_ok else R
+        mic_c  = G if micro > 0 else R
+
+        print(f'  {W}PHYSICS{Z}  {_utc()}  ${price:>12,.2f}  '
+              f'spr:${spr:.2f}  htf_sup:{htf_c}{"✓" if htf_sup else "✗"}{Z}', flush=True)
+        print(f'  dk:{dk_c}{dk:<6}{Z}  phase:{phase:<8}  '
+              f'micro:{mic_c}{micro:>+.3f}{Z}  vel:{vel_c}{vel:>+.4f}{Z}', flush=True)
+        print(f'  obi:{obi:>+.3f}(≥{obi_n:.3f}){_g(obi_ok)}  '
+              f'score:{score:.3f}(≥{score_n:.3f}){_g(score_ok)}  '
+              f'kdv:{kdv:.3f}(≥{kdv_r:.3f}){_g(kdv_ok)}', flush=True)
+        print(f'  gates: dk{_g(dk_ok)} vel{_g(vel_ok)} obi{_g(obi_ok)} '
+              f'score{_g(score_ok)} kdv{_g(kdv_ok)}  '
+              f'{nc}({n_pass}/5){Z}', flush=True)
+    else:
+        phys_lbl = (f'{Y}initializing…{Z}' if _scan_state is not None
+                    else f'{R}DISABLED — no seed data{Z}')
+        print(f'  {W}PHYSICS{Z}  {_utc()}  {phys_lbl}', flush=True)
+
+    # ── Candle leading edge ──────────────────────────────────────────────
+    print(f'  {C}{"─"*52}{Z}', flush=True)
     tfs = ('1s', '1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
     row = '  '.join(f'{W}{tf}{Z}:{_counts.get(tf, 0):>4}' for tf in tfs)
     print(f'  {C}bars{Z}  {row}', flush=True)
 
+    if _partial:
+        for tf, tf_secs in TIMEFRAMES.items():
+            p = _partial.get(tf)
+            if p is None:
+                continue
+            elapsed = max(0, now_sec - p['_aligned'])
+            pct     = min(100, int(elapsed / tf_secs * 100))
+            chg     = p['close'] - p['open']
+            chg_c   = G if chg >= 0 else R
+            bc      = G if p['close'] >= p['open'] else R
+            buy_pct = int(p['buy_v'] / p['volume'] * 100) if p['volume'] else 0
+            bar_f   = ('█' * (pct // 10)).ljust(10)
+            print(
+                f'  {W}{tf:>4}{Z} [{bar_f}]{pct:>3}%  '
+                f'{elapsed:>4}s  '
+                f'{bc}{p["close"]:>12,.2f}{Z}  '
+                f'{chg_c}{chg:>+7.2f}{Z}  '
+                f'V:{p["volume"]:.4f}  buy:{buy_pct}%',
+                flush=True
+            )
 
-def _print_edge_snapshot(label: str = ''):
-    """
-    Print the current open (partial) bar for every TF — called after each 1s close.
-    Shows elapsed / remaining time so you can SEE each TF building in real time.
-    """
-    if not _partial:
-        return
-    now_sec = int(time.time())
-    hdr = f'  {C}── live edges {_utc()}{" " + label if label else ""} ──{Z}'
-    print(hdr, flush=True)
-    for tf, tf_secs in TIMEFRAMES.items():
-        p = _partial.get(tf)
-        if p is None:
-            print(f'  {W}{tf:>4}{Z}  (no data yet)', flush=True)
-            continue
-        elapsed   = max(0, now_sec - p['_aligned'])
-        remaining = max(0, tf_secs - elapsed)
-        pct       = min(100, int(elapsed / tf_secs * 100))
-        chg       = p['close'] - p['open']
-        chg_c     = G if chg >= 0 else R
-        bc        = G if p['close'] >= p['open'] else R
-        buy_pct   = int(p['buy_v'] / p['volume'] * 100) if p['volume'] else 0
-        bar_frac  = ('█' * (pct // 10)).ljust(10)
-        print(
-            f'  {W}{tf:>4}{Z}  [{bar_frac}]{pct:>3}%  '
-            f'{elapsed:>4}s/{tf_secs}s  '
-            f'O:{p["open"]:>12,.2f}  {bc}C:{p["close"]:>12,.2f}{Z}  '
-            f'{chg_c}{chg:>+8.2f}{Z}  '
-            f'V:{p["volume"]:.4f}btc  buy:{buy_pct}%',
-            flush=True
-        )
+    print(f'{SEPE}', flush=True)
+
+    # ── Signal cards ─────────────────────────────────────────────────────
+    if new_sigs:
+        for sig in new_sigs:
+            _print_signal_card(sig)
+
+
+def _print_signal_card(sig: dict):
+    """Large unmissable signal card — LONG=green solid bar, SHORT=red solid bar."""
+    d     = sig.get('dir', 0)
+    label = sig.get('label', sig.get('type', '?'))
+    price = sig.get('price', sig.get('entry', 0))
+    obi   = sig.get('obi',   0)
+    cph   = sig.get('cph',   0)
+    taker = sig.get('taker', 0)
+    nn    = sig.get('n',     '?')
+    BAR   = SEPS if d > 0 else SEPR
+    arrow = '▲▲  LONG  ▲▲' if d > 0 else '▼▼  SHORT ▼▼'
+    c     = G if d > 0 else R
+    print(f'\n{BAR}', flush=True)
+    print(f'{c}  {arrow}  ·  {label}  [#{nn}]{Z}', flush=True)
+    print(f'{c}  {_utc()}  ·  ${price:>12,.2f}{Z}', flush=True)
+    print(f'{c}  taker:{taker*100:.0f}%  obi:{obi:>+.3f}  cph:{cph:>+.3f}{Z}',
+          flush=True)
+    print(f'{BAR}', flush=True)
+    print('\a', end='', flush=True)   # terminal bell
 
 
 # ── Real-time TF aggregation ───────────────────────────────────────────────────
@@ -170,25 +246,18 @@ def _on_1s_close(bar1s: dict) -> list:
 
 
 def _print_tf_close(tf: str, bar: dict):
-    """Print a prominent notification when a TF bar closes, then show new open edge."""
+    """Compact closed-bar line — full status block prints immediately after."""
     buy_pct = int(bar['buy_v'] / bar['volume'] * 100) if bar['volume'] else 0
-    bc = G if bar['close'] >= bar['open'] else R
-    chg = bar['close'] - bar['open']
-    chg_c = G if chg >= 0 else R
-    print(f'\n{SEP}')
-    print(f'  {W}{tf} BAR CLOSED  {_utc()}{Z}  '
-          f'{chg_c}{chg:+.2f}{Z}')
-    print(f'  O:{bar["open"]:>12,.2f}  H:{bar["high"]:>12,.2f}'
-          f'  L:{bar["low"]:>12,.2f}  {bc}C:{bar["close"]:>12,.2f}{Z}')
-    print(f'  vol:{bar["volume"]:.4f}btc  buy:{buy_pct}%  '
-          f'sell:{100-buy_pct}%  n={bar["n"]} 1s-bars')
-    _print_counts()
-    # Show the new partial bar that just opened for this TF
-    p = _partial.get(tf)
-    if p is not None:
-        print(f'  {C}▶ new {tf} bar open:{Z}  O:{p["open"]:>12,.2f}  '
-              f'(0s/{TIMEFRAMES[tf]}s  0%)', flush=True)
-    print(f'{SEP}\n', flush=True)
+    bc   = G if bar['close'] >= bar['open'] else R
+    chg  = bar['close'] - bar['open']
+    cc   = G if chg >= 0 else R
+    print(f'{SEP}', flush=True)
+    print(f'  {W}{tf} CLOSED  {_utc()}{Z}  '
+          f'{cc}{chg:>+.2f}{Z}  '
+          f'O:{bar["open"]:>12,.2f}  H:{bar["high"]:>12,.2f}  '
+          f'L:{bar["low"]:>12,.2f}  {bc}C:{bar["close"]:>12,.2f}{Z}  '
+          f'vol:{bar["volume"]:.4f}  buy:{buy_pct}%  n={bar["n"]}s',
+          flush=True)
 
 
 # ── Disk flush (gzip level 9) ─────────────────────────────────────────────────
@@ -237,10 +306,7 @@ def _build():
 
         _last_build = time.time()
 
-        print(f'\n  {C}── build {_utc()} ─────────────────────────{Z}', flush=True)
-        _print_counts()
-        _print_edge_snapshot(label='(post-build)')
-        print(flush=True)
+        _print_status()   # shows updated counts + edges after build
 
     except Exception as e:
         print(f'  {Y}build error: {e}{Z}', flush=True)
@@ -357,69 +423,32 @@ def _init_physics(seed_bars_1m: list):
 
 def _run_physics():
     """
-    Run one incremental physics tick and print the live indicator panel.
-    Called every 5 1s-bar closes (~every 5s) and on any TF boundary crossing.
-    wave_scan prints its own signal cards automatically (signals_only=True).
+    Incremental physics tick — captures wave_scan stdout (we handle display),
+    collects new_sigs, then calls _print_status() to render everything.
+    Called every 5 1s-bar closes and on any TF boundary crossing.
     """
-    if _scan_state is None:
-        return
     try:
         import wave_scan as _ws
         with _lock:
             raw_snap = list(_raw)
 
-        _ws.scan_incremental(_scan_state, raw_lines=raw_snap, signals_only=True)
+        # Suppress wave_scan's own prints; we render signals our way
+        _buf = io.StringIO()
+        _old = sys.stdout
+        sys.stdout = _buf
+        try:
+            new_sigs = (_ws.scan_incremental(_scan_state, raw_lines=raw_snap,
+                                             signals_only=True)
+                        if _scan_state is not None else [])
+        finally:
+            sys.stdout = _old
 
-        live = getattr(_scan_state, 'live', {})
-        if not live:
-            return
-
-        price   = live.get('price',        0)
-        dk      = live.get('dk',           '?')
-        phase   = live.get('phase',        '?')
-        micro   = live.get('micro_ph',     0)
-        vel     = live.get('vel',          0)
-        obi     = live.get('obi',          0)
-        obi_n   = live.get('obi_need',     1)
-        score   = live.get('score',        0)
-        score_n = live.get('score_need',   1)
-        kdv     = live.get('kdv_bal',      0)
-        kdv_r   = live.get('kdv_need_rev', 999)
-        spr     = live.get('spr',          0)
-        conc    = live.get('conc',         0)
-        htf_sup = getattr(_scan_state, 'last_htf_sup', False)
-
-        dk_ok    = dk == 'FLOOR'
-        vel_ok   = vel > 0
-        obi_ok   = obi >= obi_n
-        score_ok = score >= score_n
-        kdv_ok   = kdv >= kdv_r
-        n_pass   = sum([dk_ok, vel_ok, obi_ok, score_ok, kdv_ok])
-
-        def _g(ok): return f'{G}✓{Z}' if ok else f'{R}✗{Z}'
-        state_c = G if n_pass == 5 else (Y if n_pass >= 3 else R)
-        htf_c   = G if htf_sup else R
-
-        dk_c  = G if dk_ok  else R
-        vel_c = G if vel_ok else R
-        ph_c  = G if micro > 0 else R
-
-        print(f'  {C}── physics {_utc()} ─────────────────────────{Z}', flush=True)
-        print(f'  ${price:>12,.2f}  '
-              f'dk:{dk_c}{dk}{Z}  phase:{phase}  '
-              f'micro:{ph_c}{micro:+.3f}{Z}', flush=True)
-        print(f'  vel:{vel_c}{vel:>+.4f}{Z}  '
-              f'obi:{obi:+.3f}(≥{obi_n:.3f}) {_g(obi_ok)}  '
-              f'score:{score:.3f}(≥{score_n:.3f}) {_g(score_ok)}', flush=True)
-        print(f'  kdv:{kdv:.3f}(≥{kdv_r:.3f}) {_g(kdv_ok)}  '
-              f'spr:${spr:.2f}  conc:{conc:+.3f}  '
-              f'htf_sup:{htf_c}{"✓" if htf_sup else "✗"}{Z}', flush=True)
-        print(f'  gates: dk:{_g(dk_ok)} vel:{_g(vel_ok)} '
-              f'obi:{_g(obi_ok)} score:{_g(score_ok)} kdv:{_g(kdv_ok)}  '
-              f'{state_c}({n_pass}/5){Z}', flush=True)
+        _print_status(new_sigs if new_sigs else None)
 
     except Exception as e:
-        print(f'  {Y}physics tick error: {e}{Z}', flush=True)
+        sys.stdout = sys.__stdout__   # safety restore
+        print(f'  {Y}physics: {e}{Z}', flush=True)
+        _print_status()   # still show candle edges even if physics errors
 
 
 # ── Background worker — write / build / push on timers ────────────────────────
@@ -515,11 +544,10 @@ async def _stream():
                                 for tf, closed_bar in just_closed:
                                     _print_tf_close(tf, closed_bar)
 
-                                # Every 5 1s-bars (or on any TF close): print edges + physics
+                                # Every 5s (or on any TF close): unified status block
                                 global _snap_count
                                 _snap_count += 1
                                 if _snap_count % 5 == 0 or just_closed:
-                                    _print_edge_snapshot()
                                     _run_physics()
 
                                 _bar = None
