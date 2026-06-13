@@ -90,82 +90,88 @@ def _g(ok):
 
 def _print_status(new_sigs=None):
     """
-    Unified status block printed every 5 1s-bar closes and on any TF close.
-    Two sections: PHYSICS indicators + CANDLES leading edge.
-    Signal cards printed separately at the end if new_sigs provided.
+    Unified status block.
+    Header: composite dk / vel / micro / htf_sup.
+    One row per TF: candle progress  +  that TF's own phase / obi / score / kdv / wave_dir.
+    Signal cards printed at the end if new_sigs provided.
     """
     now_sec = int(time.time())
-    live    = getattr(_scan_state, 'live', {}) if _scan_state else {}
+    live    = getattr(_scan_state, 'live',    {}) if _scan_state else {}
+    tf_live = getattr(_scan_state, 'tf_live', {}) if _scan_state else {}
 
     print(f'\n{SEPE}', flush=True)
 
-    # ── Physics panel ────────────────────────────────────────────────────
+    # ── Composite header (1m / global indicators) ─────────────────────────
     if live:
-        price   = live.get('price',        0)
-        dk      = live.get('dk',           '?')
-        phase   = live.get('phase',        '?')
-        micro   = live.get('micro_ph',     0)
-        vel     = live.get('vel',          0)
-        obi     = live.get('obi',          0);  obi_n   = live.get('obi_need',     1)
-        score   = live.get('score',        0);  score_n = live.get('score_need',   1)
-        kdv     = live.get('kdv_bal',      0);  kdv_r   = live.get('kdv_need_rev', 999)
-        spr     = live.get('spr',          0)
+        price   = live.get('price',    0)
+        dk      = live.get('dk',       '?')
+        vel     = live.get('vel',      0)
+        micro   = live.get('micro_ph', 0)
+        spr     = live.get('spr',      0)
         htf_sup = getattr(_scan_state, 'last_htf_sup', False)
-
-        dk_ok    = (dk == 'FLOOR')
-        vel_ok   = (vel > 0)
-        obi_ok   = (obi >= obi_n)
-        score_ok = (score >= score_n)
-        kdv_ok   = (kdv >= kdv_r)
-        n_pass   = sum([dk_ok, vel_ok, obi_ok, score_ok, kdv_ok])
-        nc       = G if n_pass == 5 else (Y if n_pass >= 3 else R)
-
-        htf_c  = G if htf_sup else R
-        dk_c   = G if dk_ok  else R
-        vel_c  = G if vel_ok else R
-        mic_c  = G if micro > 0 else R
-
-        print(f'  {W}PHYSICS{Z}  {_utc()}  ${price:>12,.2f}  '
-              f'spr:${spr:.2f}  htf_sup:{htf_c}{"✓" if htf_sup else "✗"}{Z}', flush=True)
-        print(f'  dk:{dk_c}{dk:<6}{Z}  phase:{phase:<8}  '
-              f'micro:{mic_c}{micro:>+.3f}{Z}  vel:{vel_c}{vel:>+.4f}{Z}', flush=True)
-        print(f'  obi:{obi:>+.3f}(≥{obi_n:.3f}){_g(obi_ok)}  '
-              f'score:{score:.3f}(≥{score_n:.3f}){_g(score_ok)}  '
-              f'kdv:{kdv:.3f}(≥{kdv_r:.3f}){_g(kdv_ok)}', flush=True)
-        print(f'  gates: dk{_g(dk_ok)} vel{_g(vel_ok)} obi{_g(obi_ok)} '
-              f'score{_g(score_ok)} kdv{_g(kdv_ok)}  '
-              f'{nc}({n_pass}/5){Z}', flush=True)
+        dk_c    = G if dk == 'FLOOR' else R
+        vel_c   = G if vel > 0 else R
+        mic_c   = G if micro > 0 else R
+        htf_c   = G if htf_sup else R
+        print(f'  {W}LIVE{Z}  {_utc()}  ${price:>12,.2f}  '
+              f'spr:${spr:.2f}  htf:{htf_c}{"✓" if htf_sup else "✗"}{Z}',
+              flush=True)
+        print(f'  dk:{dk_c}{dk}{Z}  vel:{vel_c}{vel:>+.4f}{Z}  '
+              f'micro_ph:{mic_c}{micro:>+.3f}{Z}',
+              flush=True)
     else:
-        phys_lbl = (f'{Y}initializing…{Z}' if _scan_state is not None
-                    else f'{R}DISABLED — no seed data{Z}')
-        print(f'  {W}PHYSICS{Z}  {_utc()}  {phys_lbl}', flush=True)
+        status = (f'{Y}initializing…{Z}' if _scan_state is not None
+                  else f'{R}no physics seed{Z}')
+        print(f'  {W}LIVE{Z}  {_utc()}  {status}', flush=True)
 
-    # ── Candle leading edge ──────────────────────────────────────────────
+    # ── Bar counts ────────────────────────────────────────────────────────
     print(f'  {C}{"─"*52}{Z}', flush=True)
-    tfs = ('1s', '1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
-    row = '  '.join(f'{W}{tf}{Z}:{_counts.get(tf, 0):>4}' for tf in tfs)
-    print(f'  {C}bars{Z}  {row}', flush=True)
+    tfs_all = ('1s', '1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
+    print(f'  {C}bars{Z}  ' +
+          '  '.join(f'{W}{tf}{Z}:{_counts.get(tf, 0):>4}' for tf in tfs_all),
+          flush=True)
+    print(f'  {C}{"─"*52}{Z}', flush=True)
 
-    if _partial:
-        for tf, tf_secs in TIMEFRAMES.items():
-            p = _partial.get(tf)
-            if p is None:
-                continue
+    # ── Per-TF rows: candle progress + that TF's own physics ─────────────
+    #  TF   [progress]pct%  Xs  Δprice  │  ph:±N.NN  obi:±N.NN✓  sc:N.NN✓  kv:N.NN✓  ↑
+    for tf, tf_secs in TIMEFRAMES.items():
+        p  = _partial.get(tf)
+        lv = tf_live.get(tf, {})
+
+        # Candle progress column
+        if p is not None:
             elapsed = max(0, now_sec - p['_aligned'])
             pct     = min(100, int(elapsed / tf_secs * 100))
             chg     = p['close'] - p['open']
             chg_c   = G if chg >= 0 else R
-            bc      = G if p['close'] >= p['open'] else R
-            buy_pct = int(p['buy_v'] / p['volume'] * 100) if p['volume'] else 0
             bar_f   = ('█' * (pct // 10)).ljust(10)
-            print(
-                f'  {W}{tf:>4}{Z} [{bar_f}]{pct:>3}%  '
-                f'{elapsed:>4}s  '
-                f'{bc}{p["close"]:>12,.2f}{Z}  '
-                f'{chg_c}{chg:>+7.2f}{Z}  '
-                f'V:{p["volume"]:.4f}  buy:{buy_pct}%',
-                flush=True
-            )
+            c_col   = (f'[{bar_f}]{pct:>3}%  {elapsed:>4}s  '
+                       f'{chg_c}{chg:>+7.2f}{Z}')
+        else:
+            c_col = f'{Y}(no bar){Z}'
+
+        # Per-TF physics column (each TF's own adaptive thresholds)
+        if lv:
+            ph    = lv.get('phase',       0)
+            obi   = lv.get('obi',         0);  obi_n = lv.get('obi_need',     1)
+            sc    = lv.get('score',       0);  sc_n  = lv.get('thresh',       1)
+            kdv   = lv.get('kdv_bal',     0);  kdv_r = lv.get('kdv_need_rev', 999)
+            wdir  = lv.get('wave_dir',    0)
+            ph_c  = G if ph > 0 else (R if ph < 0 else '')
+            arrow = {1: G+'↑'+Z, -1: R+'↓'+Z}.get(wdir, '→')
+            obi_ok = obi >= obi_n; sc_ok = sc >= sc_n; kdv_ok = kdv >= kdv_r
+            n_ok   = sum([obi_ok, sc_ok, kdv_ok])
+            row_c  = G if n_ok == 3 else (Y if n_ok == 2 else '')
+            p_col  = (f'ph:{ph_c}{ph:>+.2f}{Z}  '
+                      f'obi:{obi:>+.3f}{_g(obi_ok)}  '
+                      f'sc:{sc:.3f}{_g(sc_ok)}  '
+                      f'kv:{kdv:.3f}{_g(kdv_ok)}  '
+                      f'{arrow}')
+        else:
+            row_c = ''
+            p_col = f'{Y}physics pending{Z}'
+
+        print(f'  {row_c}{W}{tf:>4}{Z}  {c_col}  │  {p_col}', flush=True)
 
     print(f'{SEPE}', flush=True)
 
