@@ -65,7 +65,10 @@ _bar     = None   # {o, h, l, c, v, bv, sv, n}
 # _partial[tf] = current open bar for that TF (in-memory, not yet closed)
 _partial    = {}   # {tf: {'_aligned':int, ts, open, high, low, close, volume, buy_v, sell_v, n}}
 _counts     = {}   # {tf: total closed bar count} — base from file + live increments
-_snap_count = 0    # 1s-bar counter; snapshot prints every 5 counts
+_snap_count = 0    # 1s-bar counter; snapshot + physics print every 5 counts
+
+# Physics engine state — set by _init_physics() at startup
+_scan_state = None   # wave_scan.ScanState
 
 
 # ── Terminal output ────────────────────────────────────────────────────────────
@@ -336,6 +339,89 @@ def _push():
             _del_obj(sha)
 
 
+# ── Physics engine (wave_scan) ────────────────────────────────────────────────
+
+def _init_physics(seed_bars_1m: list):
+    """Seed ScanState from 1m bars. Called once at startup."""
+    global _scan_state
+    try:
+        import wave_scan as _ws
+        _scan_state = _ws.ScanState()
+        _ws.scan_incremental(_scan_state, raw_lines=[], signals_only=True,
+                             seed_bars=seed_bars_1m)
+        print(f'  {G}physics{Z}  seeded  '
+              f'({len(_scan_state.closed_1m)} 1m bars)', flush=True)
+    except Exception as e:
+        print(f'  {Y}physics init (non-fatal): {e}{Z}', flush=True)
+
+
+def _run_physics():
+    """
+    Run one incremental physics tick and print the live indicator panel.
+    Called every 5 1s-bar closes (~every 5s) and on any TF boundary crossing.
+    wave_scan prints its own signal cards automatically (signals_only=True).
+    """
+    if _scan_state is None:
+        return
+    try:
+        import wave_scan as _ws
+        with _lock:
+            raw_snap = list(_raw)
+
+        _ws.scan_incremental(_scan_state, raw_lines=raw_snap, signals_only=True)
+
+        live = getattr(_scan_state, 'live', {})
+        if not live:
+            return
+
+        price   = live.get('price',        0)
+        dk      = live.get('dk',           '?')
+        phase   = live.get('phase',        '?')
+        micro   = live.get('micro_ph',     0)
+        vel     = live.get('vel',          0)
+        obi     = live.get('obi',          0)
+        obi_n   = live.get('obi_need',     1)
+        score   = live.get('score',        0)
+        score_n = live.get('score_need',   1)
+        kdv     = live.get('kdv_bal',      0)
+        kdv_r   = live.get('kdv_need_rev', 999)
+        spr     = live.get('spr',          0)
+        conc    = live.get('conc',         0)
+        htf_sup = getattr(_scan_state, 'last_htf_sup', False)
+
+        dk_ok    = dk == 'FLOOR'
+        vel_ok   = vel > 0
+        obi_ok   = obi >= obi_n
+        score_ok = score >= score_n
+        kdv_ok   = kdv >= kdv_r
+        n_pass   = sum([dk_ok, vel_ok, obi_ok, score_ok, kdv_ok])
+
+        def _g(ok): return f'{G}✓{Z}' if ok else f'{R}✗{Z}'
+        state_c = G if n_pass == 5 else (Y if n_pass >= 3 else R)
+        htf_c   = G if htf_sup else R
+
+        dk_c  = G if dk_ok  else R
+        vel_c = G if vel_ok else R
+        ph_c  = G if micro > 0 else R
+
+        print(f'  {C}── physics {_utc()} ─────────────────────────{Z}', flush=True)
+        print(f'  ${price:>12,.2f}  '
+              f'dk:{dk_c}{dk}{Z}  phase:{phase}  '
+              f'micro:{ph_c}{micro:+.3f}{Z}', flush=True)
+        print(f'  vel:{vel_c}{vel:>+.4f}{Z}  '
+              f'obi:{obi:+.3f}(≥{obi_n:.3f}) {_g(obi_ok)}  '
+              f'score:{score:.3f}(≥{score_n:.3f}) {_g(score_ok)}', flush=True)
+        print(f'  kdv:{kdv:.3f}(≥{kdv_r:.3f}) {_g(kdv_ok)}  '
+              f'spr:${spr:.2f}  conc:{conc:+.3f}  '
+              f'htf_sup:{htf_c}{"✓" if htf_sup else "✗"}{Z}', flush=True)
+        print(f'  gates: dk:{_g(dk_ok)} vel:{_g(vel_ok)} '
+              f'obi:{_g(obi_ok)} score:{_g(score_ok)} kdv:{_g(kdv_ok)}  '
+              f'{state_c}({n_pass}/5){Z}', flush=True)
+
+    except Exception as e:
+        print(f'  {Y}physics tick error: {e}{Z}', flush=True)
+
+
 # ── Background worker — write / build / push on timers ────────────────────────
 
 def _worker():
@@ -429,11 +515,12 @@ async def _stream():
                                 for tf, closed_bar in just_closed:
                                     _print_tf_close(tf, closed_bar)
 
-                                # Live edge snapshot — every 5 1s-bars, or on any TF close
+                                # Every 5 1s-bars (or on any TF close): print edges + physics
                                 global _snap_count
                                 _snap_count += 1
                                 if _snap_count % 5 == 0 or just_closed:
                                     _print_edge_snapshot()
+                                    _run_physics()
 
                                 _bar = None
 
@@ -502,6 +589,22 @@ if __name__ == '__main__':
         _ig.run(verbose=True)
     except Exception as e:
         print(f'  {Y}ingest error (continuing): {e}{Z}', flush=True)
+
+    # Seed physics engine from pre-built 1m candles
+    print(f'  {Y}seeding physics engine…{Z}', flush=True)
+    try:
+        _seed_path = DATA_DIR / 'tf_1m.json.gz'
+        if _seed_path.exists():
+            with gzip.open(_seed_path, 'rt') as _sf:
+                _raw_1m = json.loads(_sf.read())
+            # wave_scan expects taker_buy field
+            _seed_1m = [dict(b, taker_buy=b.get('buy_v', b.get('volume', 0) * 0.5))
+                        for b in _raw_1m]
+            _init_physics(_seed_1m)
+        else:
+            print(f'  {Y}tf_1m.json.gz not found — physics starts cold{Z}', flush=True)
+    except Exception as e:
+        print(f'  {Y}physics seed (non-fatal): {e}{Z}', flush=True)
 
     threading.Thread(target=_worker, daemon=True).start()
 
