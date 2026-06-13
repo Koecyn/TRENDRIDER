@@ -63,8 +63,9 @@ _bar     = None   # {o, h, l, c, v, bv, sv, n}
 
 # Real-time TF state — updated on every 1s close
 # _partial[tf] = current open bar for that TF (in-memory, not yet closed)
-_partial  = {}   # {tf: {'_aligned':int, ts, open, high, low, close, volume, buy_v, sell_v, n}}
-_counts   = {}   # {tf: total closed bar count} — base from file + live increments
+_partial    = {}   # {tf: {'_aligned':int, ts, open, high, low, close, volume, buy_v, sell_v, n}}
+_counts     = {}   # {tf: total closed bar count} — base from file + live increments
+_snap_count = 0    # 1s-bar counter; snapshot prints every 5 counts
 
 
 # ── Terminal output ────────────────────────────────────────────────────────────
@@ -83,20 +84,37 @@ def _print_counts():
     print(f'  {C}bars{Z}  {row}', flush=True)
 
 
-def _print_partial_edges():
-    """Print current open (partial) bar state for each TF — called on build cycle."""
+def _print_edge_snapshot(label: str = ''):
+    """
+    Print the current open (partial) bar for every TF — called after each 1s close.
+    Shows elapsed / remaining time so you can SEE each TF building in real time.
+    """
     if not _partial:
         return
-    print(f'  {C}partial bars (open leading edge):{Z}', flush=True)
-    for tf, p in sorted(_partial.items(), key=lambda x: TIMEFRAMES[x[0]]):
+    now_sec = int(time.time())
+    hdr = f'  {C}── live edges {_utc()}{" " + label if label else ""} ──{Z}'
+    print(hdr, flush=True)
+    for tf, tf_secs in TIMEFRAMES.items():
+        p = _partial.get(tf)
         if p is None:
+            print(f'  {W}{tf:>4}{Z}  (no data yet)', flush=True)
             continue
-        buy_pct = int(p['buy_v'] / p['volume'] * 100) if p['volume'] else 0
-        bc = G if p['close'] >= p['open'] else R
-        print(f'    {W}{tf:>4}{Z}  O:{p["open"]:>12,.2f}  '
-              f'H:{p["high"]:>12,.2f}  L:{p["low"]:>12,.2f}  '
-              f'{bc}C:{p["close"]:>12,.2f}{Z}  '
-              f'V:{p["volume"]:.4f}btc  buy:{buy_pct}%', flush=True)
+        elapsed   = max(0, now_sec - p['_aligned'])
+        remaining = max(0, tf_secs - elapsed)
+        pct       = min(100, int(elapsed / tf_secs * 100))
+        chg       = p['close'] - p['open']
+        chg_c     = G if chg >= 0 else R
+        bc        = G if p['close'] >= p['open'] else R
+        buy_pct   = int(p['buy_v'] / p['volume'] * 100) if p['volume'] else 0
+        bar_frac  = ('█' * (pct // 10)).ljust(10)
+        print(
+            f'  {W}{tf:>4}{Z}  [{bar_frac}]{pct:>3}%  '
+            f'{elapsed:>4}s/{tf_secs}s  '
+            f'O:{p["open"]:>12,.2f}  {bc}C:{p["close"]:>12,.2f}{Z}  '
+            f'{chg_c}{chg:>+8.2f}{Z}  '
+            f'V:{p["volume"]:.4f}btc  buy:{buy_pct}%',
+            flush=True
+        )
 
 
 # ── Real-time TF aggregation ───────────────────────────────────────────────────
@@ -149,7 +167,7 @@ def _on_1s_close(bar1s: dict) -> list:
 
 
 def _print_tf_close(tf: str, bar: dict):
-    """Print a prominent notification when a TF bar closes."""
+    """Print a prominent notification when a TF bar closes, then show new open edge."""
     buy_pct = int(bar['buy_v'] / bar['volume'] * 100) if bar['volume'] else 0
     bc = G if bar['close'] >= bar['open'] else R
     chg = bar['close'] - bar['open']
@@ -162,6 +180,11 @@ def _print_tf_close(tf: str, bar: dict):
     print(f'  vol:{bar["volume"]:.4f}btc  buy:{buy_pct}%  '
           f'sell:{100-buy_pct}%  n={bar["n"]} 1s-bars')
     _print_counts()
+    # Show the new partial bar that just opened for this TF
+    p = _partial.get(tf)
+    if p is not None:
+        print(f'  {C}▶ new {tf} bar open:{Z}  O:{p["open"]:>12,.2f}  '
+              f'(0s/{TIMEFRAMES[tf]}s  0%)', flush=True)
     print(f'{SEP}\n', flush=True)
 
 
@@ -213,7 +236,7 @@ def _build():
 
         print(f'\n  {C}── build {_utc()} ─────────────────────────{Z}', flush=True)
         _print_counts()
-        _print_partial_edges()
+        _print_edge_snapshot(label='(post-build)')
         print(flush=True)
 
     except Exception as e:
@@ -405,6 +428,12 @@ async def _stream():
                                 just_closed.sort(key=lambda x: TIMEFRAMES[x[0]])
                                 for tf, closed_bar in just_closed:
                                     _print_tf_close(tf, closed_bar)
+
+                                # Live edge snapshot — every 5 1s-bars, or on any TF close
+                                global _snap_count
+                                _snap_count += 1
+                                if _snap_count % 5 == 0 or just_closed:
+                                    _print_edge_snapshot()
 
                                 _bar = None
 
