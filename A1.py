@@ -209,6 +209,126 @@ def _print_status(new_sigs=None):
         ts_str = '  '.join(f'{W}{k}{Z}:{v}' for k, v in sorted(tf_states.items()))
         print(f'  1m_state:{last_1m}  {ts_str}', flush=True)
 
+    # ── Fusion sub-signals (every component that feeds fused_score) ──────
+    if st is not None:
+        fus = getattr(st, 'last_fusion', {})
+        if fus:
+            _sec('fusion sub-signals  (each feeds fused_score)')
+            sol  = fus.get('soliton',      {})
+            wh   = fus.get('water_hammer', {})
+            acc  = fus.get('accum',        {})
+            ib   = fus.get('iceberg',      {})
+            rey  = fus.get('reynolds',     {})
+            shk  = fus.get('shock',        {})
+            cav  = fus.get('cavitation',   {})
+            dar  = fus.get('darcy',        {})
+            mfl  = fus.get('mass_flow',    {})
+            cvd  = fus.get('cvd',          {})
+            obi_f = fus.get('obi',         {})
+            _da = lambda d, *ks, default=0: d.get(ks[0], default) if len(ks)==1 else _da(d.get(ks[0],{}), *ks[1:], default=default)
+            def _dir(v): return {1:G+'↑'+Z, -1:R+'↓'+Z}.get(v,'→')
+            def _yn(v):  return (G+'YES'+Z) if v else (R+'NO '+Z)
+            print(f'  soliton:      dir:{_dir(sol.get("direction",0))}  '
+                  f'balance:{sol.get("balance",0):.4f}  '
+                  f'amplitude:{sol.get("amplitude",0):.4f}  '
+                  f'detected:{_yn(sol.get("detected",False))}', flush=True)
+            print(f'  water_hammer: detected:{_yn(wh.get("detected",False))}  '
+                  f'dir:{_dir(wh.get("direction",0))}  '
+                  f'strength:{wh.get("strength",wh.get("amplitude",0)):.4f}', flush=True)
+            print(f'  dark_pool:    firing:{_yn(acc.get("firing",False))}  '
+                  f'dir:{_dir(acc.get("direction",0))}  '
+                  f'pressure:{acc.get("pressure",acc.get("accumulation",0)):.4f}', flush=True)
+            print(f'  iceberg:      detected:{_yn(ib.get("detected",False))}  '
+                  f'dir:{_dir(ib.get("direction",0))}  '
+                  f'obstruction:{ib.get("obstruction",ib.get("amplitude",0)):.4f}', flush=True)
+            print(f'  reynolds:     Re:{rey.get("re",0):.2f}  '
+                  f'regime:{rey.get("regime","?")}  '
+                  f'multiplier:{rey.get("multiplier",1):.2f}', flush=True)
+            print(f'  shock_front:  detected:{_yn(shk.get("detected",False))}  '
+                  f'mach:{shk.get("mach",0):.3f}  '
+                  f'dir:{_dir(shk.get("direction",0))}  '
+                  f'mult:{shk.get("multiplier",1):.2f}', flush=True)
+            print(f'  cavitation:   active:{_yn(cav.get("active",False))}  '
+                  f'risk:{cav.get("risk",0):.4f}  '
+                  f'multiplier:{cav.get("multiplier",1):.2f}', flush=True)
+            print(f'  darcy:        Q:{dar.get("Q",0):.4f}  '
+                  f'friction:{dar.get("friction",0):.4f}  '
+                  f'dir:{_dir(dar.get("direction",0))}', flush=True)
+            print(f'  mass_flow:    rate:{mfl.get("rate",mfl.get("amplitude",0)):.4f}  '
+                  f'dir:{_dir(mfl.get("direction",0))}', flush=True)
+            print(f'  cvd:          divergence:{cvd.get("divergence",0):.4f}  '
+                  f'dir:{_dir(cvd.get("direction",0))}  '
+                  f'strong:{_yn(cvd.get("strong",False))}  '
+                  f'contribution:{cvd.get("contribution",0):.4f}', flush=True)
+            obi_v = obi_f.get('obi',0) if isinstance(obi_f,dict) else float(obi_f or 0)
+            print(f'  obi_signal:   obi:{obi_v:>+.4f}  '
+                  f'contribution:{obi_f.get("contribution",0) if isinstance(obi_f,dict) else 0:.4f}  '
+                  f'dir:{_dir(obi_f.get("direction",0) if isinstance(obi_f,dict) else 0)}',
+                  flush=True)
+            print(f'  fusion_tier:{fus.get("tier","?")}  '
+                  f'confidence:{fus.get("confidence",0):.4f}  '
+                  f'physics_layer:{fus.get("physics",0):.4f}  '
+                  f'micro_layer:{fus.get("micro",0):.4f}', flush=True)
+
+        # ── Waveform bands + interference + targets ───────────────────────
+        wf = getattr(st, 'last_wf', {})
+        if wf:
+            _sec('waveform bands  (4-band decomposition)')
+            comp = wf.get('components', {})
+            for band in ('micro', 'subharm', 'carrier', 'macro'):
+                b = comp.get(band, {})
+                if not b:
+                    continue
+                bph_c = G if b.get('phase',0) < -0.4 else (R if b.get('phase',0) > 0.4 else Y)
+                print(f'  {band:<8}  '
+                      f'phase:{bph_c}{b.get("phase",0):>+.3f}{Z}  '
+                      f'dir:{_dir(b.get("direction",0))}  '
+                      f'velocity:{b.get("velocity",0):>+.4f}  '
+                      f'amplitude:{b.get("amplitude",0):.4f}  '
+                      f'hi:{b.get("hi",0):>10,.2f}  '
+                      f'lo:{b.get("lo",0):>10,.2f}', flush=True)
+            itf = wf.get('interference', {})
+            if itf:
+                _sec('waveform interference')
+                ic = G if itf.get('type','')=='constructive' else (R if itf.get('type','')=='destructive' else Y)
+                print(f'  type:{ic}{itf.get("type","?")}{Z}  '
+                      f'score:{itf.get("score",0):>+.4f}  '
+                      f'dir:{_dir(itf.get("direction",0))}  '
+                      f'dominant:{itf.get("dominant","?")}', flush=True)
+                print(f'  aligned:{itf.get("aligned",[])}  '
+                      f'opposing:{itf.get("opposing",[])}', flush=True)
+                print(f'  amp_sum:{itf.get("amplitude_sum",0):.4f}  '
+                      f'carrier_amp:{itf.get("carrier_amp",0):.4f}  '
+                      f'macro_amp:{itf.get("macro_amp",0):.4f}  '
+                      f'subharm_amp:{itf.get("subharm_amp",0):.4f}', flush=True)
+            tgts = wf.get('targets', {})
+            if tgts:
+                _sec('waveform price targets')
+                print(f'  primary:${tgts.get("primary",0):>10,.2f}  '
+                      f'extended:${tgts.get("extended",0):>10,.2f}  '
+                      f'resonance:${tgts.get("resonance",0):>10,.2f}', flush=True)
+                print(f'  confidence:{tgts.get("confidence",0):.4f}  '
+                      f'phase_factor:{tgts.get("phase_factor",0):.4f}  '
+                      f'carrier_amp:{tgts.get("c_amp",0):.4f}  '
+                      f'subharm_amp:{tgts.get("s_amp",0):.4f}  '
+                      f'macro_amp:{tgts.get("m_amp",0):.4f}', flush=True)
+
+        # ── Resonance detail — per-TF scores and directions ───────────────
+        res = getattr(st, 'last_res', {})
+        if res:
+            _sec('resonance  (multi-TF soliton alignment)')
+            print(f'  score:{res.get("score",0):>+.4f}  '
+                  f'alignment:{res.get("alignment",0):.4f}  '
+                  f'dir:{_dir(res.get("direction",0))}  '
+                  f'dominant:{res.get("dominant_tf","?")}  '
+                  f'dissonance:{"YES" if res.get("dissonance") else "NO"}', flush=True)
+            tf_sc  = res.get('tf_scores', {})
+            tf_dir = res.get('tf_dirs',   {})
+            if tf_sc:
+                row = '  '.join(f'{W}{tf}{Z}:{tf_sc.get(tf,0):>+.3f}{_dir(tf_dir.get(tf,0))}'
+                                for tf in ('1m','5m','15m','1h','4h'))
+                print(f'  per-TF scores:  {row}', flush=True)
+
     # ── Bar counts ────────────────────────────────────────────────────────
     _sec('closed bar counts')
     tfs_all = ('1s', '1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')

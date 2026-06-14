@@ -2078,7 +2078,8 @@ class ScanState:
                  'last_peak_px', 'last_trough_px',
                  'last_range_hi_px', 'last_range_lo_px',
                  'last_range_state', 'session_shelves', 'live',
-                 'tf_hists', 'tf_accums', 'tf_live')
+                 'tf_hists', 'tf_accums', 'tf_live',
+                 'last_fusion', 'last_wf', 'last_res')
 
     def __init__(self):
         from physics.signals import HydraulicAccumulator
@@ -2118,6 +2119,9 @@ class ScanState:
         self.last_range_state = None   # 'sup'|'res' — last ranging side fired
         self.session_shelves  = []
         self.live             = {}     # current-second indicator snapshot for JSON output
+        self.last_fusion      = {}     # full fusion.run() return — every sub-signal
+        self.last_wf          = {}     # full WF.run() return — all 4 bands + interference + targets
+        self.last_res         = {}     # full RES.resonance() return — per-TF scores + dirs
         # Per-TF physics — each TF has its own history, accumulator, and live snapshot.
         # Histories update only at TF bar close; thresholds are frozen between rollovers.
         _TFS = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
@@ -2710,6 +2714,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
             res_dir    = res_out.get('direction', 0)
             align      = res_out.get('alignment', 0.0)
             dissonance = res_out.get('dissonance', False)
+            state.last_res = res_out   # full dict — tf_scores, tf_dirs, dominant_tf, dissonance
         except Exception:
             res_dir=0; align=0.0; dissonance=False
         state.last_align   = align
@@ -2790,6 +2795,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 obi_raw  = fus.get('obi', {})
                 obi_p    = (obi_raw.get('obi', 0.0)
                             if isinstance(obi_raw, dict) else float(obi_raw or 0.0))
+                state.last_fusion = fus   # full dict — every sub-signal accessible
             except Exception:
                 kdv=0; kdv_bal=0.0; wh=False; f_sc=0.0; obi_p=0.0
 
@@ -2817,6 +2823,7 @@ def scan_incremental(state: ScanState, from_sec: int = 0,
                 itf  = wf['interference']
                 tgts = wf.get('targets', {})
                 micro_phase = comp.get('micro', {}).get('phase', 0.0)
+                state.last_wf = wf   # full dict — all 4 bands + interference + targets
             except Exception:
                 comp={}; itf={'direction':0,'type':'cons'}; tgts={}; micro_phase=0.0
 
