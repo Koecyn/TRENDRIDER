@@ -90,88 +90,153 @@ def _g(ok):
 
 def _print_status(new_sigs=None):
     """
-    Unified status block.
-    Header: composite dk / vel / micro / htf_sup.
-    One row per TF: candle progress  +  that TF's own phase / obi / score / kdv / wave_dir.
-    Signal cards printed at the end if new_sigs provided.
+    Full status block — every indicator from state.live, state.tf_live,
+    knife buffer, resonance, HTF context, and session stats.
+    Two lines per TF: candle progress + full per-TF physics.
     """
-    now_sec = int(time.time())
-    live    = getattr(_scan_state, 'live',    {}) if _scan_state else {}
-    tf_live = getattr(_scan_state, 'tf_live', {}) if _scan_state else {}
+    now_sec  = int(time.time())
+    st       = _scan_state
+    live     = getattr(st, 'live',    {}) if st else {}
+    tf_live  = getattr(st, 'tf_live', {}) if st else {}
+
+    def _sec(label):
+        print(f'  {C}── {label} {"─"*(48-len(label))}{Z}', flush=True)
 
     print(f'\n{SEPE}', flush=True)
 
-    # ── Composite header (1m / global indicators) ─────────────────────────
-    if live:
-        price   = live.get('price',    0)
-        dk      = live.get('dk',       '?')
-        vel     = live.get('vel',      0)
-        micro   = live.get('micro_ph', 0)
-        spr     = live.get('spr',      0)
-        htf_sup = getattr(_scan_state, 'last_htf_sup', False)
-        dk_c    = G if dk == 'FLOOR' else R
-        vel_c   = G if vel > 0 else R
-        mic_c   = G if micro > 0 else R
-        htf_c   = G if htf_sup else R
-        print(f'  {W}LIVE{Z}  {_utc()}  ${price:>12,.2f}  '
-              f'spr:${spr:.2f}  htf:{htf_c}{"✓" if htf_sup else "✗"}{Z}',
-              flush=True)
-        print(f'  dk:{dk_c}{dk}{Z}  vel:{vel_c}{vel:>+.4f}{Z}  '
-              f'micro_ph:{mic_c}{micro:>+.3f}{Z}',
-              flush=True)
-    else:
-        status = (f'{Y}initializing…{Z}' if _scan_state is not None
-                  else f'{R}no physics seed{Z}')
+    if not live:
+        status = f'{Y}initializing…{Z}' if st is not None else f'{R}no seed — physics offline{Z}'
         print(f'  {W}LIVE{Z}  {_utc()}  {status}', flush=True)
+    else:
+        # ── Price / session ──────────────────────────────────────────────
+        price  = live.get('price', 0)
+        spr    = live.get('spr',   0)
+        conc   = live.get('conc',  0)
+        print(f'  {W}LIVE{Z}  {_utc()}  ${price:>12,.2f}  spr:${spr:.2f}  conc:{conc:>+.3f}', flush=True)
+
+        # Session stats from closed 1m bars
+        closed = getattr(st, 'closed_1m', [])
+        if closed:
+            now_ms  = int(time.time() * 1000)
+            today0  = now_ms - (now_ms % 86_400_000)
+            today   = [b for b in closed if b['ts'] >= today0]
+            if today:
+                s_o = today[0]['open'];  s_h = max(b['high'] for b in today)
+                s_l = min(b['low']  for b in today)
+                s_c = price;             s_r = s_h - s_l
+                s_chg = s_c - s_o;      s_pct = s_chg / s_o * 100 if s_o else 0
+                ch_c  = G if s_chg >= 0 else R
+                print(f'  sess  O:{s_o:>10,.2f}  H:{s_h:>10,.2f}  L:{s_l:>10,.2f}  '
+                      f'rng:${s_r:.0f}  {ch_c}{s_chg:>+.2f}({s_pct:>+.2f}%){Z}', flush=True)
+
+        # ── Knife decay buffer ───────────────────────────────────────────
+        _sec('knife')
+        dk       = live.get('dk',       '?')
+        decay_sc = live.get('decay_sc', 0)
+        floor_sc = live.get('floor_sc', 0)
+        vel      = live.get('vel',      0)
+        buf      = getattr(st, 'knife_buf', None)
+        buf_ph   = getattr(buf, 'phase', '?') if buf else '?'
+        dk_c     = G if dk == 'FLOOR' else (Y if 'FLR' in dk or 'DEC' in dk else R)
+        vel_c    = G if vel > 0 else R
+        dec_c    = G if decay_sc >= 0.6 else (Y if decay_sc >= 0.3 else '')
+        flr_c    = G if floor_sc >= 0.7 else (Y if floor_sc >= 0.4 else '')
+        print(f'  dk:{dk_c}{dk}{Z}  phase:{buf_ph}  '
+              f'vel:{vel_c}{vel:>+.4f}{Z}', flush=True)
+        print(f'  decay_sc:{dec_c}{decay_sc:.3f}{Z}  '
+              f'floor_sc:{flr_c}{floor_sc:.3f}{Z}', flush=True)
+
+        # ── Waveform / microstructure ────────────────────────────────────
+        _sec('wave · micro')
+        micro    = live.get('micro_ph',  0)
+        score    = live.get('score',     0);  score_n = live.get('score_need',   1)
+        kdv      = live.get('kdv_bal',   0);  kdv_r   = live.get('kdv_need_rev', 999)
+        kdv_c_n  = live.get('kdv_need_cont', 999)
+        obi      = live.get('obi',       0);  obi_n   = live.get('obi_need',     1)
+        mic_c    = G if micro < -0.6 else (R if micro > 0.6 else Y)  # trough=green, peak=red
+        sc_ok    = score >= score_n;  kdv_ok = kdv >= kdv_r;  obi_ok = obi >= obi_n
+        print(f'  micro_ph:{mic_c}{micro:>+.3f}{Z}  '
+              f'score:{score:.3f}(≥{score_n:.3f}){_g(sc_ok)}  '
+              f'obi:{obi:>+.3f}(≥{obi_n:.3f}){_g(obi_ok)}', flush=True)
+        print(f'  kdv_bal:{kdv:.3f}(rev≥{kdv_r:.3f}){_g(kdv_ok)}  '
+              f'kdv_cont≥{kdv_c_n:.3f}{_g(kdv >= kdv_c_n)}', flush=True)
+
+        # ── Resonance / HTF alignment ────────────────────────────────────
+        _sec('resonance · HTF')
+        res_align  = getattr(st, 'last_align',   0)
+        res_dir    = getattr(st, 'last_res_dir',  0)
+        htf_sup    = getattr(st, 'last_htf_sup',  False)
+        align_need = live.get('align_need', 1)
+        tf_states  = getattr(st, 'last_tf_states', {})
+        last_1m    = getattr(st, 'last_1m_state',  '?')
+        ra_ok      = res_align >= align_need
+        rd_arrow   = {1: G+'↑'+Z, -1: R+'↓'+Z}.get(res_dir, '→')
+        htf_c      = G if htf_sup else R
+        print(f'  res_align:{res_align:.3f}(≥{align_need:.3f}){_g(ra_ok)}  '
+              f'res_dir:{rd_arrow}  htf_sup:{htf_c}{"✓" if htf_sup else "✗"}{Z}', flush=True)
+        tf_st_str  = '  '.join(f'{W}{k}{Z}:{v}' for k, v in sorted(tf_states.items()))
+        print(f'  1m:{last_1m}  {tf_st_str}', flush=True)
 
     # ── Bar counts ────────────────────────────────────────────────────────
-    print(f'  {C}{"─"*52}{Z}', flush=True)
+    _sec('bars')
     tfs_all = ('1s', '1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
-    print(f'  {C}bars{Z}  ' +
-          '  '.join(f'{W}{tf}{Z}:{_counts.get(tf, 0):>4}' for tf in tfs_all),
+    print(f'  ' + '  '.join(f'{W}{tf}{Z}:{_counts.get(tf,0):>4}' for tf in tfs_all),
           flush=True)
-    print(f'  {C}{"─"*52}{Z}', flush=True)
 
-    # ── Per-TF rows: candle progress + that TF's own physics ─────────────
-    #  TF   [progress]pct%  Xs  Δprice  │  ph:±N.NN  obi:±N.NN✓  sc:N.NN✓  kv:N.NN✓  ↑
+    # ── Per-TF: two lines each ────────────────────────────────────────────
+    _sec('per-TF physics')
     for tf, tf_secs in TIMEFRAMES.items():
         p  = _partial.get(tf)
         lv = tf_live.get(tf, {})
 
-        # Candle progress column
+        # Line 1: candle progress + velocity + wave direction
         if p is not None:
             elapsed = max(0, now_sec - p['_aligned'])
             pct     = min(100, int(elapsed / tf_secs * 100))
             chg     = p['close'] - p['open']
             chg_c   = G if chg >= 0 else R
             bar_f   = ('█' * (pct // 10)).ljust(10)
-            c_col   = (f'[{bar_f}]{pct:>3}%  {elapsed:>4}s  '
-                       f'{chg_c}{chg:>+7.2f}{Z}')
+            l1_candle = (f'[{bar_f}]{pct:>3}%  {elapsed:>5}s  '
+                         f'{chg_c}{chg:>+8.2f}{Z}')
         else:
-            c_col = f'{Y}(no bar){Z}'
+            l1_candle = f'{Y}(no bar yet){Z}'
 
-        # Per-TF physics column (each TF's own adaptive thresholds)
         if lv:
+            wdir  = lv.get('wave_dir', 0)
+            wamp  = lv.get('wave_amp', 0)
+            vel_t = lv.get('vel',      0)
+            atr   = lv.get('atr',      0)
+            atr_u = lv.get('atr_up',   0)
+            atr_d = lv.get('atr_dn',   0)
+            pj_pk = lv.get('proj_peak',   0)
+            pj_tr = lv.get('proj_trough', 0)
             ph    = lv.get('phase',       0)
             obi   = lv.get('obi',         0);  obi_n = lv.get('obi_need',     1)
-            sc    = lv.get('score',       0);  sc_n  = lv.get('thresh',       1)
-            kdv   = lv.get('kdv_bal',     0);  kdv_r = lv.get('kdv_need_rev', 999)
-            wdir  = lv.get('wave_dir',    0)
-            ph_c  = G if ph > 0 else (R if ph < 0 else '')
-            arrow = {1: G+'↑'+Z, -1: R+'↓'+Z}.get(wdir, '→')
-            obi_ok = obi >= obi_n; sc_ok = sc >= sc_n; kdv_ok = kdv >= kdv_r
-            n_ok   = sum([obi_ok, sc_ok, kdv_ok])
-            row_c  = G if n_ok == 3 else (Y if n_ok == 2 else '')
-            p_col  = (f'ph:{ph_c}{ph:>+.2f}{Z}  '
-                      f'obi:{obi:>+.3f}{_g(obi_ok)}  '
-                      f'sc:{sc:.3f}{_g(sc_ok)}  '
-                      f'kv:{kdv:.3f}{_g(kdv_ok)}  '
-                      f'{arrow}')
-        else:
-            row_c = ''
-            p_col = f'{Y}physics pending{Z}'
+            sc    = lv.get('score',        0);  sc_n  = lv.get('thresh',       1)
+            kdv   = lv.get('kdv_bal',      0);  kdv_r = lv.get('kdv_need_rev', 999)
+            kdv_c = lv.get('kdv_need_cont', 999)
 
-        print(f'  {row_c}{W}{tf:>4}{Z}  {c_col}  │  {p_col}', flush=True)
+            arrow   = {1: G+'↑'+Z, -1: R+'↓'+Z}.get(wdir, '→')
+            vel_c_t = G if vel_t > 0 else R
+            ph_c    = G if ph < -0.5 else (R if ph > 0.5 else Y)  # trough=green, peak=red
+            obi_ok  = obi >= obi_n; sc_ok = sc >= sc_n; kdv_ok = kdv >= kdv_r
+            n_ok    = sum([obi_ok, sc_ok, kdv_ok])
+            row_c   = G if n_ok == 3 else (Y if n_ok == 2 else '')
+
+            l1_phys = (f'vel:{vel_c_t}{vel_t:>+.3f}{Z}  '
+                       f'amp:${wamp:.1f}  dir:{arrow}  atr:${atr:.1f}(↑{atr_u:.1f}/↓{atr_d:.1f})')
+            l2_phys = (f'ph:{ph_c}{ph:>+.3f}{Z}  '
+                       f'obi:{obi:>+.3f}(≥{obi_n:.3f}){_g(obi_ok)}  '
+                       f'sc:{sc:.3f}(≥{sc_n:.3f}){_g(sc_ok)}  '
+                       f'kv:{kdv:.3f}(rev≥{kdv_r:.3f}){_g(kdv_ok)}  '
+                       f'kv_cont≥{kdv_c:.3f}{_g(kdv>=kdv_c)}')
+            l3_proj = (f'proj ↑${pj_pk:>10,.2f}  ↓${pj_tr:>10,.2f}')
+
+            print(f'  {row_c}{W}{tf:>4}{Z}  {l1_candle}  {l1_phys}', flush=True)
+            print(f'        {l2_phys}', flush=True)
+            print(f'        {l3_proj}', flush=True)
+        else:
+            print(f'  {W}{tf:>4}{Z}  {l1_candle}  {Y}physics pending{Z}', flush=True)
 
     print(f'{SEPE}', flush=True)
 
