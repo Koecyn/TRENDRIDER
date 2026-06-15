@@ -89,20 +89,49 @@ C='\033[96m'; B='\033[1m'
 def log(m, c=Z): print(f'{c}[raw] {m}{Z}', flush=True)
 
 VALID_TFS   = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
+_TF_SECS    = {'1m':60,'5m':300,'10m':600,'15m':900,'30m':1800,'45m':2700,'1h':3600,'4h':14400}
 _last_dash_t = 0.0
-_DASH_MIN_S  = 1.0      # redraw at most once per second
+_DASH_MIN_S  = 1.0
+
+
+def _live_partial(state, tf):
+    """Build in-progress bar for `tf` from the per-second tick store."""
+    s1 = getattr(state, 's1_by_sec', {})
+    if not s1:
+        return None
+    tf_secs   = _TF_SECS[tf]
+    last_sec  = max(s1)
+    win_start = (last_sec // tf_secs) * tf_secs
+    secs      = sorted(s for s in s1 if win_start <= s <= last_sec)
+    if not secs:
+        return None
+    bars = [s1[s] for s in secs]
+    vol  = sum(b['volume'] for b in bars)
+    buy  = sum(b.get('taker_buy', 0) for b in bars)
+    chg  = bars[-1]['close'] - bars[0]['open']
+    el   = max(1, len(secs))
+    return {
+        'elapsed':  el,
+        'pct':      min(100, el * 100 // tf_secs),
+        'open':     bars[0]['open'],
+        'high':     max(b['high'] for b in bars),
+        'low':      min(b['low']  for b in bars),
+        'close':    bars[-1]['close'],
+        'volume':   vol,
+        'buy_v':    buy,
+        'chg':      chg,
+        'vel':      chg / el,          # $/s
+        'buy_pct':  int(buy / vol * 100) if vol else 0,
+    }
 
 
 def _dashboard(state, tfs, recent_signals):
-    """Clear screen and redraw full TF dashboard.
-
-    Uses full-screen clear so concurrent log output from other threads
-    never corrupts cursor positioning.
+    """Full-screen live dashboard — ALL physics sub-signals exposed.
 
     TF selection (live, no restart needed):
-      echo '1m 5m 1h'  > ~/.trendrider/tf_view   # narrow view
-      echo 'all'       > ~/.trendrider/tf_view   # all 8 TFs
-      rm               ~/.trendrider/tf_view      # back to --tf default
+      echo '1m 5m 1h'  > ~/.trendrider/tf_view
+      echo 'all'       > ~/.trendrider/tf_view
+      rm ~/.trendrider/tf_view   # back to --tf default
     """
     global _last_dash_t
     now_t = time.monotonic()
@@ -110,8 +139,7 @@ def _dashboard(state, tfs, recent_signals):
         return
     _last_dash_t = now_t
 
-    # ── live TF selection — read on every draw, no restart needed ────────
-    active_tfs = tfs  # fallback: whatever --tf gave us
+    active_tfs = tfs
     try:
         txt = TF_VIEW_FILE.read_text().strip()
         if txt.lower() in ('all', 'default', ''):
@@ -120,8 +148,6 @@ def _dashboard(state, tfs, recent_signals):
             chosen = [t for t in txt.split() if t in VALID_TFS]
             if chosen:
                 active_tfs = chosen
-    except FileNotFoundError:
-        pass   # no file → use --tf default
     except Exception:
         pass
 
@@ -129,7 +155,6 @@ def _dashboard(state, tfs, recent_signals):
     tf_live = getattr(state, 'tf_live', {})
     now_s   = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
-    # ── global live indicators ────────────────────────────────────────────
     price    = live.get('price',    0.0)
     dk       = live.get('dk',       '?')
     vel      = live.get('vel',      0.0)
@@ -163,57 +188,69 @@ def _dashboard(state, tfs, recent_signals):
     tr_4h    = live.get('trend_4h',      0)
     tr_1h    = live.get('trend_1h',      0)
 
-    def _trend_str(t):
-        return f'{G}BULL▲{Z}' if t > 0 else (f'{R}BEAR▼{Z}' if t < 0 else f'{Y}COIL─{Z}')
+    def _trend(t): return (f'{G}BULL▲{Z}' if t > 0 else
+                           (f'{R}BEAR▼{Z}' if t < 0 else f'{Y}COIL─{Z}'))
+    def _yn(v):  return (G+'YES'+Z) if v else (R+'NO '+Z)
+    def _dir(v): return {1:G+'↑'+Z, -1:R+'↓'+Z}.get(int(v) if v else 0, '─')
+    def _gx(ok): return f'{G}✓{Z}' if ok else f'{R}✗{Z}'
 
-    W = 64
-    rows = ['\033[2J\033[H']   # clear screen, cursor to home
+    W = 68
+    rows = ['\033[2J\033[H']
+
+    # ── price / session ──────────────────────────────────────────────────
     rows.append(f'{B}{C}{"─"*W}{Z}')
     rows.append(f'{B}{C}  BTC ${price:>11,.2f}   {now_s}   dk={dk}{Z}')
     rows.append(f'{C}{"─"*W}{Z}')
-    # session range line
     if s_open > 0:
-        chg_c = G if s_chg >= 0 else R
-        rows.append(f'  SESSION  o=${s_open:,.0f}  h=${s_high:,.0f}  l=${s_low:,.0f}'
-                    f'  rng=${s_range:,.0f}  {chg_c}{s_chg:+,.0f}({s_pct:+.2f}%){Z}')
-    # trend line
-    rows.append(f'  TREND  4h={_trend_str(tr_4h)}  1h={_trend_str(tr_1h)}'
+        cc = G if s_chg >= 0 else R
+        rows.append(f'  SESSION  o=${s_open:,.2f}  h=${s_high:,.2f}'
+                    f'  l=${s_low:,.2f}  rng=${s_range:,.0f}'
+                    f'  {cc}{s_chg:+,.2f}({s_pct:+.2f}%){Z}')
+    rows.append(f'  TREND  4h={_trend(tr_4h)}  1h={_trend(tr_1h)}'
                 f'  htf_sup={G+"▲SUP"+Z if htf_sup else Y+"no-sup"+Z}')
-    # deep book probe line
+
+    # ── deep book ────────────────────────────────────────────────────────
     dp = _deep_probe
     if dp:
-        bias_s  = (f'{G}▲PULL{Z}' if dp.get('bias',0) > 0
-                   else (f'{R}▼PULL{Z}' if dp.get('bias',0) < 0 else f'{Y}FLAT{Z}'))
-        aw = dp.get('nearest_ask_wall')
-        bw = dp.get('nearest_bid_wall')
+        bs = (f'{G}▲PULL{Z}' if dp.get('bias',0) > 0
+              else (f'{R}▼PULL{Z}' if dp.get('bias',0) < 0 else f'{Y}FLAT{Z}'))
+        aw = dp.get('nearest_ask_wall'); bw = dp.get('nearest_bid_wall')
         aw_s = f'ask_wall=${aw:,.0f}(+${aw-price:,.0f})' if aw else 'ask_wall=─'
         bw_s = f'bid_wall=${bw:,.0f}(-${price-bw:,.0f})' if bw else 'bid_wall=─'
         rows.append(f'  DEEP({dp.get("levels_bid",0)}b/{dp.get("levels_ask",0)}a)'
-                    f'  obi={dp.get("deep_obi",0):+.3f}  {bias_s}'
+                    f'  deep_obi={dp.get("deep_obi",0):+.3f}  {bs}'
                     f'  {aw_s}  {bw_s}')
+        rows.append(f'  deep_gravity  bid=${dp.get("gravity_bid",0):,.2f}'
+                    f'  ask=${dp.get("gravity_ask",0):,.2f}'
+                    f'  reload_bid_defending:{dp.get("reloads_bid_defending",0)}'
+                    f'  ask_defending:{dp.get("reloads_ask_defending",0)}')
 
-    # line 1: velocity / OB imbalance / concentration / spread
-    rows.append(f'  vel={vel:+.4f}  obi={obi_g:+.3f}(n={obi_n:.3f})'
-                f'  conc={conc:+.3f}  spr={spr:.2f}')
-    # line 2: score / KdV
-    sc_ok = abs(score_g) >= score_n > 0
-    rows.append(f'  score={G if sc_ok else Z}{score_g:+.4f}{Z}(n={score_n:.3f})'
-                f'  kdv={kdv_g:.4f}  rev_n={kdv_rev:.3f}  con_n={kdv_con:.3f}')
-    # line 3: micro phase with its own thresholds / alignment
-    mok = micro_ph <= mph_tr or micro_ph >= mph_pk
-    rows.append(f'  μph={G if mok else Z}{micro_ph:+.4f}{Z}'
-                f'[trg:{mph_tr:.3f} pk:{mph_pk:.3f}]'
-                f'  align={res_al:.3f}(n={align_n:.3f})')
-    # line 4: decay / floor / flow rates
-    dir_str = f'{G}▲{Z}' if res_dir > 0 else (f'{R}▼{Z}' if res_dir < 0 else '─')
-    rows.append(f'  ds={decay_sc:.3f}  fos={floor_sc:.3f}'
-                f'  bf={bf:+.4f}  af={af:+.4f}  {dir_str}')
-    # line 5: HTF bar counts
-    if htf_bars:
-        rows.append(f'  htf: {htf_bars}')
-
-    # ── per-TF blocks (2 lines each) ─────────────────────────────────────
+    # ── order book / live physics input ──────────────────────────────────
     rows.append(f'{C}{"─"*W}{Z}')
+    n_buf = len(_raw_deque)
+    rows.append(f'  input: {W}{n_buf:,}{Z} lines in buffer'
+                f'  (trades T + depth snapshots D — both feed physics)')
+    sc_ok = abs(score_g) >= score_n > 0
+    mok   = micro_ph <= mph_tr or micro_ph >= mph_pk
+    ra_ok = res_al >= align_n
+    rows.append(f'  vel={vel:+.4f}  obi={obi_g:+.3f}(need≥{obi_n:.3f})'
+                f'  conc={conc:+.3f}  spr={spr:.2f}')
+    rows.append(f'  fused_score={G if sc_ok else Z}{score_g:+.4f}{Z}(need≥{score_n:.3f}){_gx(sc_ok)}'
+                f'  kdv={kdv_g:.4f}  rev≥{kdv_rev:.3f}  cont≥{kdv_con:.3f}')
+    rows.append(f'  micro_phase={G if mok else Z}{micro_ph:+.4f}{Z}'
+                f'[trough:{mph_tr:.3f} peak:{mph_pk:.3f}]'
+                f'  res_alignment={res_al:.3f}(need≥{align_n:.3f}){_gx(ra_ok)}')
+    dir_str = f'{G}▲{Z}' if res_dir > 0 else (f'{R}▼{Z}' if res_dir < 0 else '─')
+    rows.append(f'  decay_score={decay_sc:.3f}  floor_score={floor_sc:.3f}'
+                f'  bid_flow={bf:+.4f}  ask_flow={af:+.4f}  {dir_str}')
+    if htf_bars:
+        rows.append(f'  htf_bars: {htf_bars}')
+
+    # ── per-TF blocks ─────────────────────────────────────────────────────
+    # [LIVE] = score/phase/kdv_bal/obi update every scan tick from partial-bar physics
+    # [bar]  = vel/atr/wave_dir/thresholds freeze until a full bar closes
+    rows.append(f'{C}{"─"*W}{Z}')
+    rows.append(f'{C}  per-TF  [LIVE]=updates every tick  [bar]=refreshes on close{Z}')
 
     for tf in active_tfs:
         lv          = tf_live.get(tf, {})
@@ -233,62 +270,176 @@ def _dashboard(state, tfs, recent_signals):
         obi         = lv.get('obi',           0.0)
         obi_need    = lv.get('obi_need',      0.0)
         al          = lv.get('align_need',    0.0)
-        vel_tf      = lv.get('vel',           0.0)
 
-        # State from wave direction + how close price is to projection
-        cur_px = price  # global price from live dict
-        near_pk = proj_peak   > 0 and cur_px >= proj_peak   * 0.998
-        near_tr = proj_trough > 0 and cur_px <= proj_trough * 1.002
-        if wave_dir == 1 and near_pk:
-            st = f'{R}PEAK▼{Z}'
-        elif wave_dir == -1 and near_tr:
-            st = f'{G}TRGR▲{Z}'
-        elif wave_dir == 1:
-            st = f'{G}UP  ▲{Z}'
-        elif wave_dir == -1:
-            st = f'{R}DN  ▼{Z}'
+        # live partial bar from s1_by_sec
+        pb = _live_partial(state, tf)
+        if pb:
+            pct   = pb['pct']
+            bar_f = ('█' * (pct // 10)).ljust(10)
+            cc    = G if pb['chg'] >= 0 else R
+            vc    = G if pb['vel'] >= 0 else R
+            l0    = (f'  {B}{tf:<4}{Z} [{bar_f}]{pct:>3}%  {pb["elapsed"]:>5}s  '
+                     f'{cc}{pb["chg"]:>+8.2f}{Z}  buy:{pb["buy_pct"]}%  '
+                     f'live_vel:{vc}{pb["vel"]:>+.3f}{Z}$/s')
+            l1    = (f'       O:{pb["open"]:>10,.2f}  H:{pb["high"]:>10,.2f}'
+                     f'  L:{pb["low"]:>10,.2f}  C:{pb["close"]:>10,.2f}'
+                     f'  vol:{pb["volume"]:.4f}  bvol:{pb["buy_v"]:.4f}')
         else:
-            st = f'{Y}MID  {Z}'
+            l0 = f'  {B}{tf:<4}{Z} {Y}(partial bar pending){Z}'
+            l1 = ''
 
         sc_hit  = abs(score) >= thresh > 0
         obi_hit = abs(obi)   >= obi_need > 0
-        sc_s  = f'{G if sc_hit  else Z}{score:+.3f}{Z}'
-        obi_s = f'{G if obi_hit else Z}{obi:+.3f}{Z}'
-        dir_s = '▲' if wave_dir == 1 else ('▼' if wave_dir == -1 else '─')
+        kdv_hit = kdv_bal >= kdv_rev > 0
+        ph_c    = G if phase < -0.5 else (R if phase > 0.5 else Y)
+        n_ok    = sum([sc_hit, obi_hit, kdv_hit])
+        near_pk = proj_peak   > 0 and price >= proj_peak   * 0.998
+        near_tr = proj_trough > 0 and price <= proj_trough * 1.002
+        if wave_dir == 1 and near_pk:   state_s = f'{R}PEAK▼{Z}'
+        elif wave_dir == -1 and near_tr: state_s = f'{G}TRGR▲{Z}'
+        elif wave_dir == 1:              state_s = f'{G}UP  ▲{Z}'
+        elif wave_dir == -1:             state_s = f'{R}DN  ▼{Z}'
+        else:                            state_s = f'{Y}MID  {Z}'
 
-        rows.append(
-            f'  {B}{tf:<4}{Z} {st}'
-            f'  sc={sc_s}(n={thresh:.3f})'
-            f'  ph={phase:+.3f}'
-            f'  vel={vel_tf:+.1f}'
-        )
-        atr_s = (f'  atr=${atr_tf:,.0f}(↑${atr_up_tf:,.0f} ↓${atr_dn_tf:,.0f})'
+        atr_s = (f'  atr:${atr_tf:,.2f}(↑{atr_up_tf:.2f}/↓{atr_dn_tf:.2f})'
                  if atr_tf > 0 else '')
-        rows.append(
-            f'       {dir_s} pk=${proj_peak:,.0f}  tr=${proj_trough:,.0f}'
-            f'  amp=${wave_amp:,.0f}{atr_s}'
-        )
-        rows.append(
-            f'       kdv={kdv_bal:.3f}(rv={kdv_rev:.3f} cn={kdv_con:.3f})'
-            f'  obi={obi_s}(n={obi_need:.3f})'
-            f'  al={al:.3f}'
-        )
+        l2 = (f'  {C}[LIVE]{Z} {state_s}'
+              f'  phase:{ph_c}{phase:>+.4f}{Z}'
+              f'  score:{G if sc_hit else Z}{score:>+.4f}{Z}(≥{thresh:.3f}){_gx(sc_hit)}'
+              f'  obi:{G if obi_hit else Z}{obi:>+.4f}{Z}(≥{obi_need:.3f}){_gx(obi_hit)}'
+              f'  kdv:{G if kdv_hit else Z}{kdv_bal:.4f}{Z}(rev≥{kdv_rev:.3f}){_gx(kdv_hit)}')
+        l3 = (f'  {Y}[bar]{Z}  dir:{_dir(wave_dir)}'
+              f'  swing_amp:${wave_amp:,.2f}'
+              f'  proj_peak:${proj_peak:>10,.2f}  proj_trough:${proj_trough:>10,.2f}'
+              f'{atr_s}'
+              f'  kdv_cont≥{kdv_con:.3f}{_gx(kdv_bal>=kdv_con)}'
+              f'  align_need:{al:.3f}')
 
+        rows.append(l0)
+        if l1: rows.append(l1)
+        rows.append(l2)
+        rows.append(l3)
+
+    # ── fusion sub-signals — every component that contributes to fused_score ──
     rows.append(f'{C}{"─"*W}{Z}')
+    fus = getattr(state, 'last_fusion', {})
+    if fus:
+        rows.append(f'{C}  fusion sub-signals  (all feed fused_score={score_g:+.4f}){Z}')
+        sol = fus.get('soliton',      {})
+        wh  = fus.get('water_hammer', {})
+        acc = fus.get('accum',        {})
+        ib  = fus.get('iceberg',      {})
+        rey = fus.get('reynolds',     {})
+        shk = fus.get('shock',        {})
+        cav = fus.get('cavitation',   {})
+        dar = fus.get('darcy',        {})
+        mfl = fus.get('mass_flow',    {})
+        cvd = fus.get('cvd',          {})
+        obi_f = fus.get('obi',        {})
+        rows.append(f'  soliton:      detected:{_yn(sol.get("detected",False))}'
+                    f'  dir:{_dir(sol.get("direction",0))}'
+                    f'  balance:{sol.get("balance",0):.4f}'
+                    f'  amplitude:{sol.get("amplitude",0):.4f}')
+        rows.append(f'  water_hammer: detected:{_yn(wh.get("detected",False))}'
+                    f'  dir:{_dir(wh.get("direction",0))}'
+                    f'  strength:{wh.get("strength",wh.get("amplitude",0)):.4f}')
+        rows.append(f'  dark_pool:    firing:{_yn(acc.get("firing",False))}'
+                    f'  dir:{_dir(acc.get("direction",0))}'
+                    f'  pressure:{acc.get("pressure",acc.get("accumulation",0)):.4f}')
+        rows.append(f'  iceberg:      detected:{_yn(ib.get("detected",False))}'
+                    f'  dir:{_dir(ib.get("direction",0))}'
+                    f'  obstruction:{ib.get("obstruction",ib.get("amplitude",0)):.4f}')
+        rows.append(f'  reynolds:     Re:{rey.get("re",0):.2f}'
+                    f'  regime:{rey.get("regime","?")}  multiplier:{rey.get("multiplier",1):.3f}')
+        rows.append(f'  shock_front:  detected:{_yn(shk.get("detected",False))}'
+                    f'  mach:{shk.get("mach",0):.4f}'
+                    f'  dir:{_dir(shk.get("direction",0))}'
+                    f'  mult:{shk.get("multiplier",1):.3f}')
+        rows.append(f'  cavitation:   active:{_yn(cav.get("active",False))}'
+                    f'  risk:{cav.get("risk",0):.4f}'
+                    f'  multiplier:{cav.get("multiplier",1):.3f}')
+        rows.append(f'  darcy:        Q:{dar.get("Q",0):.4f}'
+                    f'  friction:{dar.get("friction",0):.4f}'
+                    f'  dir:{_dir(dar.get("direction",0))}')
+        rows.append(f'  mass_flow:    rate:{mfl.get("rate",mfl.get("amplitude",0)):.4f}'
+                    f'  dir:{_dir(mfl.get("direction",0))}')
+        rows.append(f'  cvd:          divergence:{cvd.get("divergence",0):.4f}'
+                    f'  dir:{_dir(cvd.get("direction",0))}'
+                    f'  strong:{_yn(cvd.get("strong",False))}'
+                    f'  contribution:{cvd.get("contribution",0):.4f}')
+        obi_v = obi_f.get('obi',0) if isinstance(obi_f,dict) else float(obi_f or 0)
+        rows.append(f'  obi_signal:   obi:{obi_v:>+.4f}'
+                    f'  contribution:{obi_f.get("contribution",0) if isinstance(obi_f,dict) else 0:.4f}'
+                    f'  dir:{_dir(obi_f.get("direction",0) if isinstance(obi_f,dict) else 0)}')
+        rows.append(f'  fusion_tier:{fus.get("tier","?")}  confidence:{fus.get("confidence",0):.4f}'
+                    f'  physics_layer:{fus.get("physics",0):.4f}'
+                    f'  micro_layer:{fus.get("micro",0):.4f}')
+    else:
+        rows.append(f'  {Y}fusion sub-signals: warming up (first 1m cycle not complete yet){Z}')
 
+    # ── waveform bands ───────────────────────────────────────────────────
+    wf = getattr(state, 'last_wf', {})
+    if wf:
+        rows.append(f'{C}  waveform bands  (4-band decomposition){Z}')
+        comp = wf.get('components', {})
+        for band in ('micro', 'subharm', 'carrier', 'macro'):
+            b = comp.get(band, {})
+            if not b: continue
+            bph_c = G if b.get('phase',0) < -0.4 else (R if b.get('phase',0) > 0.4 else Y)
+            rows.append(f'  {band:<8}  phase:{bph_c}{b.get("phase",0):>+.3f}{Z}'
+                        f'  dir:{_dir(b.get("direction",0))}'
+                        f'  velocity:{b.get("velocity",0):>+.4f}'
+                        f'  amplitude:{b.get("amplitude",0):.4f}'
+                        f'  hi:${b.get("hi",0):>10,.2f}  lo:${b.get("lo",0):>10,.2f}')
+        itf = wf.get('interference', {})
+        if itf:
+            ic = G if itf.get('type','')=='constructive' else (R if itf.get('type','')=='destructive' else Y)
+            rows.append(f'  interference: type:{ic}{itf.get("type","?")}{Z}'
+                        f'  score:{itf.get("score",0):>+.4f}'
+                        f'  dir:{_dir(itf.get("direction",0))}'
+                        f'  dominant:{itf.get("dominant","?")}')
+            rows.append(f'               aligned:{itf.get("aligned",[])}  opposing:{itf.get("opposing",[])}')
+            rows.append(f'               amp_sum:{itf.get("amplitude_sum",0):.4f}'
+                        f'  carrier:{itf.get("carrier_amp",0):.4f}'
+                        f'  macro:{itf.get("macro_amp",0):.4f}'
+                        f'  subharm:{itf.get("subharm_amp",0):.4f}')
+        tgts = wf.get('targets', {})
+        if tgts:
+            rows.append(f'  targets: primary:${tgts.get("primary",0):>10,.2f}'
+                        f'  extended:${tgts.get("extended",0):>10,.2f}'
+                        f'  resonance:${tgts.get("resonance",0):>10,.2f}')
+            rows.append(f'           confidence:{tgts.get("confidence",0):.4f}'
+                        f'  phase_factor:{tgts.get("phase_factor",0):.4f}')
+
+    # ── resonance — per-TF soliton scores ────────────────────────────────
+    res = getattr(state, 'last_res', {})
+    if res:
+        rows.append(f'{C}  resonance  (multi-TF soliton alignment){Z}')
+        rows.append(f'  score:{res.get("score",0):>+.4f}'
+                    f'  alignment:{res.get("alignment",0):.4f}'
+                    f'  dir:{_dir(res.get("direction",0))}'
+                    f'  dominant:{res.get("dominant_tf","?")}'
+                    f'  dissonance:{"YES" if res.get("dissonance") else "NO"}')
+        tf_sc  = res.get('tf_scores', {})
+        tf_dir = res.get('tf_dirs',   {})
+        if tf_sc:
+            row_r = '  '.join(f'{B}{tf}{Z}:{tf_sc.get(tf,0):>+.3f}{_dir(tf_dir.get(tf,0))}'
+                              for tf in ('1m','5m','15m','1h','4h'))
+            rows.append(f'  per-TF:  {row_r}')
+
+    # ── recent signals ────────────────────────────────────────────────────
+    rows.append(f'{C}{"─"*W}{Z}')
     if recent_signals:
-        for sig in recent_signals[-3:]:
+        for sig in recent_signals[-5:]:
             d   = sig.get('dir', 0)
             lbl = sig.get('label', sig.get('stype', '?'))
             px  = sig.get('price', 0.0)
             t   = sig.get('time', '')
             cl  = G if d > 0 else R
-            rows.append(f'  {cl}{"▲" if d>0 else "▼"} {lbl:<16} {t}  ${px:,.2f}{Z}')
-        rows.append('')
+            rows.append(f'  {cl}{"▲" if d>0 else "▼"} {lbl:<18} {t}  ${px:,.2f}{Z}')
 
-    # live TF control hint
     cur = ' '.join(active_tfs)
-    rows.append(f'\033[2m  view: {cur}'
+    rows.append(f'\033[2m  view:{cur}'
                 f'  |  echo "1m 5m 1h" > {TF_VIEW_FILE.name}'
                 f'  |  echo all > {TF_VIEW_FILE.name}\033[0m')
 
