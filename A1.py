@@ -160,8 +160,8 @@ def _print_status(new_sigs=None):
         print(f'  dark_pool_pressure:{acc_c}{acc_p:.3f}{Z}  dir:{acc_arrow}', flush=True)
         print(f'  micro_pool_pressure:{macc_c}{macc_p:.3f}{Z}  dir:{macc_arrow}', flush=True)
 
-        # ── Order book flow ──────────────────────────────────────────────
-        _sec('order book · flow')
+        # ── Order book · flow ────────────────────────────────────────────
+        _sec('order book · flow  (trades + depth both feed physics)')
         obi   = live.get('obi',      0); obi_n = live.get('obi_need', 1)
         bid_r = ask_r = 0.0
         if buf is not None:
@@ -171,6 +171,10 @@ def _print_status(new_sigs=None):
                 pass
         obi_ok  = obi >= obi_n
         flow_c  = G if bid_r > ask_r else R
+        buf_sz  = len(_raw)
+        print(f'  input buffer: {W}{_n_ticks:,}{Z} trade-ticks (T)  '
+              f'{W}{_n_depth:,}{Z} depth-snaps (D)  '
+              f'{W}{buf_sz:,}{Z} total lines in physics window', flush=True)
         print(f'  obi:{obi:>+.3f}(need≥{obi_n:.3f}){_g(obi_ok)}  '
               f'bid_flow:{flow_c}{bid_r:>+.4f}{Z}  ask_flow:{ask_r:>+.4f}', flush=True)
 
@@ -212,6 +216,12 @@ def _print_status(new_sigs=None):
     # ── Fusion sub-signals (every component that feeds fused_score) ──────
     if st is not None:
         fus = getattr(st, 'last_fusion', {})
+        if not fus:
+            _sec('fusion sub-signals  (warming up — waiting for first full 1m cycle)')
+            print(f'  {Y}last_fusion is empty — physics has not completed one full minute yet.{Z}',
+                  flush=True)
+            print(f'  {Y}Fusion, waveform, and resonance detail will appear once seed data is processed.{Z}',
+                  flush=True)
         if fus:
             _sec('fusion sub-signals  (each feeds fused_score)')
             sol  = fus.get('soliton',      {})
@@ -335,62 +345,77 @@ def _print_status(new_sigs=None):
     print(f'  ' + '  '.join(f'{W}{tf}{Z}:{_counts.get(tf,0):>4}' for tf in tfs_all),
           flush=True)
 
-    # ── Per-TF: 3 lines each ──────────────────────────────────────────────
-    _sec('per-TF physics  (each TF runs its own adaptive thresholds)')
+    # ── Per-TF: 4 lines each ──────────────────────────────────────────────
+    # [LIVE] = updates every 5s from partial-bar physics
+    # [bar]  = frozen at last full-bar close; refreshes when bar boundary crosses
+    _sec('per-TF physics  (LIVE=updates every 5s · bar=refreshes on close)')
     for tf, tf_secs in TIMEFRAMES.items():
         p  = _partial.get(tf)
         lv = tf_live.get(tf, {})
 
-        # Line 1: candle progress + velocity + wave direction + ATR
+        # ── partial bar: progress + live OHLCV ──
         if p is not None:
-            elapsed  = max(0, now_sec - p['_aligned'])
+            elapsed  = max(1, now_sec - p['_aligned'])
             pct      = min(100, int(elapsed / tf_secs * 100))
             chg      = p['close'] - p['open']
             chg_c    = G if chg >= 0 else R
             buy_pct  = int(p['buy_v'] / p['volume'] * 100) if p['volume'] else 0
             bar_f    = ('█' * (pct // 10)).ljust(10)
-            l1_bar   = (f'[{bar_f}]{pct:>3}%  {elapsed:>5}s  '
-                        f'{chg_c}{chg:>+8.2f}{Z}  buy:{buy_pct}%')
+            # live velocity = Δ price per second within this partial bar
+            live_vel   = chg / elapsed
+            lv_c       = G if live_vel > 0 else R
+            l1_bar     = (f'[{bar_f}]{pct:>3}%  {elapsed:>5}s  '
+                          f'{chg_c}{chg:>+8.2f}{Z}  buy:{buy_pct}%  '
+                          f'live_vel:{lv_c}{live_vel:>+.3f}{Z}$/s')
+            l0_ohlcv   = (f'O:{p["open"]:>10,.2f}  H:{p["high"]:>10,.2f}  '
+                          f'L:{p["low"]:>10,.2f}  C:{p["close"]:>10,.2f}  '
+                          f'vol:{p["volume"]:.4f}  bvol:{p["buy_v"]:.4f}')
         else:
-            l1_bar = f'{Y}(no bar yet){Z}'
+            l1_bar   = f'{Y}(no bar yet){Z}'
+            l0_ohlcv = ''
 
-        if lv:
-            wdir   = lv.get('wave_dir', 0)
-            wamp   = lv.get('wave_amp', 0)
-            vel_t  = lv.get('vel',      0)
-            atr    = lv.get('atr',      0)
-            atr_u  = lv.get('atr_up',   0)
-            atr_d  = lv.get('atr_dn',   0)
-            pj_pk  = lv.get('proj_peak',   0)
-            pj_tr  = lv.get('proj_trough', 0)
-            phase  = lv.get('phase',       0)
-            obi    = lv.get('obi',         0);  obi_n = lv.get('obi_need',     1)
-            score  = lv.get('score',       0);  sc_n  = lv.get('thresh',       1)
-            kdv    = lv.get('kdv_bal',     0);  kdv_r = lv.get('kdv_need_rev', 999)
-            kdv_c  = lv.get('kdv_need_cont', 999)
+        # ── wave_scan tf_live: LIVE fields (score/phase/kdv_bal/obi) ──
+        phase  = lv.get('phase',   0)
+        obi    = lv.get('obi',     0); obi_n = lv.get('obi_need',     1)
+        score  = lv.get('score',   0); sc_n  = lv.get('thresh',       1)
+        kdv    = lv.get('kdv_bal', 0); kdv_r = lv.get('kdv_need_rev', 999)
+        kdv_c2 = lv.get('kdv_need_cont', 999)
+        # bar-close fields (frozen until boundary)
+        wdir   = lv.get('wave_dir',     0)
+        wamp   = lv.get('wave_amp',     0)
+        atr    = lv.get('atr',          0)
+        atr_u  = lv.get('atr_up',       0)
+        atr_d  = lv.get('atr_dn',       0)
+        pj_pk  = lv.get('proj_peak',    0)
+        pj_tr  = lv.get('proj_trough',  0)
 
-            arrow   = {1: G+'↑'+Z, -1: R+'↓'+Z}.get(wdir, '→')
-            vel_c_t = G if vel_t > 0 else R
-            ph_c    = G if phase < -0.5 else (R if phase > 0.5 else Y)
-            obi_ok  = obi >= obi_n; sc_ok = score >= sc_n; kdv_ok = kdv >= kdv_r
-            n_ok    = sum([obi_ok, sc_ok, kdv_ok])
-            row_c   = G if n_ok == 3 else (Y if n_ok == 2 else '')
+        arrow  = {1: G+'↑'+Z, -1: R+'↓'+Z}.get(wdir, '→')
+        ph_c   = G if phase < -0.5 else (R if phase > 0.5 else Y)
+        obi_ok = obi >= obi_n; sc_ok = score >= sc_n; kdv_ok = kdv >= kdv_r
+        n_ok   = sum([obi_ok, sc_ok, kdv_ok])
+        row_c  = G if n_ok == 3 else (Y if n_ok == 2 else '')
 
-            l1_phys = (f'velocity:{vel_c_t}{vel_t:>+.3f}{Z}  '
-                       f'swing_amp:${wamp:.1f}  dir:{arrow}  '
-                       f'atr:${atr:.1f}(↑{atr_u:.1f}/↓{atr_d:.1f})')
-            l2_phys = (f'phase:{ph_c}{phase:>+.3f}{Z}  '
-                       f'obi:{obi:>+.3f}(≥{obi_n:.3f}){_g(obi_ok)}  '
-                       f'score:{score:.3f}(≥{sc_n:.3f}){_g(sc_ok)}  '
-                       f'kdv:{kdv:.3f}(rev≥{kdv_r:.3f}){_g(kdv_ok)}  '
-                       f'kdv_cont≥{kdv_c:.3f}{_g(kdv>=kdv_c)}')
-            l3_proj = (f'projected  peak:${pj_pk:>10,.2f}  trough:${pj_tr:>10,.2f}')
+        # [LIVE] every 5s
+        l2_live = (f'{C}[LIVE]{Z}  '
+                   f'phase:{ph_c}{phase:>+.4f}{Z}  '
+                   f'score:{score:>+.4f}(≥{sc_n:.3f}){_g(sc_ok)}  '
+                   f'kdv:{kdv:.4f}(rev≥{kdv_r:.3f}){_g(kdv_ok)}  '
+                   f'obi:{obi:>+.4f}(≥{obi_n:.3f}){_g(obi_ok)}')
+        # [bar] on close
+        l3_bar  = (f'{Y}[bar]{Z}   '
+                   f'dir:{arrow}  swing_amp:${wamp:.2f}  '
+                   f'atr:${atr:.2f}(↑{atr_u:.2f}/↓{atr_d:.2f})  '
+                   f'kdv_cont≥{kdv_c2:.3f}{_g(kdv>=kdv_c2)}')
+        l4_proj = (f'         '
+                   f'projected_peak:${pj_pk:>10,.2f}  '
+                   f'projected_trough:${pj_tr:>10,.2f}')
 
-            print(f'  {row_c}{W}{tf:>4}{Z}  {l1_bar}  {l1_phys}', flush=True)
-            print(f'        {l2_phys}', flush=True)
-            print(f'        {l3_proj}', flush=True)
-        else:
-            print(f'  {W}{tf:>4}{Z}  {l1_bar}  {Y}physics pending{Z}', flush=True)
+        print(f'  {row_c}{W}{tf:>4}{Z}  {l1_bar}', flush=True)
+        if l0_ohlcv:
+            print(f'         {l0_ohlcv}', flush=True)
+        print(f'         {l2_live}', flush=True)
+        print(f'         {l3_bar}', flush=True)
+        print(f'         {l4_proj}', flush=True)
 
     print(f'{SEPE}', flush=True)
 
