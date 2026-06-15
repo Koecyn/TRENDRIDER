@@ -195,7 +195,7 @@ def _dashboard(state, tfs, recent_signals):
     def _gx(ok): return f'{G}✓{Z}' if ok else f'{R}✗{Z}'
 
     W = 68
-    rows = ['\033[2J\033[H']
+    rows = []
 
     # ── price / session ──────────────────────────────────────────────────
     rows.append(f'{B}{C}{"─"*W}{Z}')
