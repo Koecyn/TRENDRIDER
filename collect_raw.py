@@ -90,8 +90,9 @@ def log(m, c=Z): print(f'{c}[raw] {m}{Z}', flush=True)
 
 VALID_TFS   = ('1m', '5m', '10m', '15m', '30m', '45m', '1h', '4h')
 _TF_SECS    = {'1m':60,'5m':300,'10m':600,'15m':900,'30m':1800,'45m':2700,'1h':3600,'4h':14400}
-_last_dash_t = 0.0
-_DASH_MIN_S  = 1.0
+_last_dash_t  = 0.0
+_DASH_MIN_S   = 1.0
+_last_n_lines = 0   # lines in previous dashboard — drives in-place cursor rewrite
 
 
 def _live_partial(state, tf):
@@ -133,7 +134,7 @@ def _dashboard(state, tfs, recent_signals):
       echo 'all'       > ~/.trendrider/tf_view
       rm ~/.trendrider/tf_view   # back to --tf default
     """
-    global _last_dash_t
+    global _last_dash_t, _last_n_lines
     now_t = time.monotonic()
     if now_t - _last_dash_t < _DASH_MIN_S:
         return
@@ -443,7 +444,17 @@ def _dashboard(state, tfs, recent_signals):
                 f'  |  echo "1m 5m 1h" > {TF_VIEW_FILE.name}'
                 f'  |  echo all > {TF_VIEW_FILE.name}\033[0m')
 
-    print('\n'.join(rows), flush=True)
+    content  = '\n'.join(rows)
+    n_lines  = content.count('\n') + 1
+    import sys as _sys
+    if _last_n_lines > 0:
+        # Move cursor up to start of previous dashboard and overwrite in place.
+        # \033[{N}A = cursor up N lines,  \r = start of line,  \033[J = erase to end.
+        _sys.stdout.write(f'\033[{_last_n_lines}A\r{content}\033[J\n')
+    else:
+        _sys.stdout.write(content + '\n')
+    _sys.stdout.flush()
+    _last_n_lines = n_lines
 
 
 def _agg_tf(bars_1m, n, keep=20):
