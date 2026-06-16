@@ -1,0 +1,118 @@
+{
+  "mid": 65729.38,
+  "levels_bid": 100,
+  "levels_ask": 100,
+  "deep_obi": 0.101,
+  "gravity_bid": 65498.84,
+  "gravity_ask": 65905.8,
+  "bid_walls": [
+    {
+      "price": 65702.72,
+      "qty": 0.5972,
+      "dist": 26.65,
+      "ratio": 18.2,
+      "side": "bid",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    },
+    {
+      "price": 65561.97,
+      "qty": 0.7023,
+      "dist": 167.4,
+      "ratio": 3.2,
+      "side": "bid",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    },
+    {
+      "price": 65490.95,
+      "qty": 0.703,
+      "dist": 238.43,
+      "ratio": 3.5,
+      "side": "bid",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    },
+    {
+      "price": 65100.0,
+      "qty": 0.1536,
+      "dist": 629.38,
+      "ratio": 91.8,
+      "side": "bid",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    },
+    {
+      "price": 64550.0,
+      "qty": 0.6029,
+      "dist": 1179.38,
+      "ratio": 230.5,
+      "side": "bid",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    }
+  ],
+  "ask_walls": [
+    {
+      "price": 65751.85,
+      "qty": 0.5822,
+      "dist": 22.48,
+      "ratio": 14.0,
+      "side": "ask",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    },
+    {
+      "price": 65913.39,
+      "qty": 0.7593,
+      "dist": 184.01,
+      "ratio": 8.1,
+      "side": "ask",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    },
+    {
+      "price": 66040.47,
+      "qty": 0.7578,
+      "dist": 311.1,
+      "ratio": 15.5,
+      "side": "ask",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    },
+    {
+      "price": 67047.08,
+      "qty": 0.2927,
+      "dist": 1317.71,
+      "ratio": 56.2,
+      "side": "ask",
+      "friction": "STABLE",
+      "reload_r": null,
+      "reload_prev": null,
+      "reload_curr": null
+    }
+  ],
+  "nearest_bid_wall": 65702.72,
+  "nearest_ask_wall": 65751.85,
+  "bias": 0,
+  "reload_bias": -1,
+  "reloads_ask_defending": 0,
+  "reloads_bid_defending": 2,
+  "_status": "ok 100b/100a"
+}
